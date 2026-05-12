@@ -394,6 +394,7 @@ class CosmicNNSurrogateEnhanced(nn.Module):
         self.encoder = DynamicsEncoder(n_components, n_params, latent_dim)
         self.decoder = MultiHeadTemporalDecoder(n_components, latent_dim, n_heads)
         self.n_components = n_components
+        self.n_params = n_params
     
     def forward(self, initial_conditions, time_points, parameters):
         """
@@ -671,7 +672,11 @@ class PredictionInterface:
             else:
                 params_tensor = torch.FloatTensor(parameters).unsqueeze(0).to(self.device)
         else:
-            params_tensor = torch.zeros(1, 1).to(self.device)
+            # Only create params tensor if model expects parameters
+            if self.model.n_params > 0:
+                params_tensor = torch.zeros(1, self.model.n_params).to(self.device)
+            else:
+                params_tensor = torch.zeros(1, 0).to(self.device)
         
         # Predict
         with torch.no_grad():
