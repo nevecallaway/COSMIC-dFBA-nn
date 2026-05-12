@@ -3,7 +3,7 @@
 import sys
 from nn.cosmic_nn_surrogate import (
     CosmicNNSurrogateEnhanced, CosmicNNSurrogate, 
-    TrainingManager, dFBADataset
+    TrainingManager, dFBADataset, dfba_collate_fn
 )
 from torch.utils.data import DataLoader, random_split
 import torch
@@ -94,8 +94,8 @@ def main(model_type='enhanced', data_dir='data/matlab_exports', use_cuda=True):
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, collate_fn=dfba_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, collate_fn=dfba_collate_fn)
     
     print(f"Train samples: {len(train_dataset)}, Validation: {len(val_dataset)}")
     

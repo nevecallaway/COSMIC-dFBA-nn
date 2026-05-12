@@ -14,7 +14,7 @@ import time
 # Try to import our modules
 try:
     from nn.cosmic_nn_surrogate import (
-        CosmicNNSurrogateEnhanced, TrainingManager, PredictionInterface, dFBADataset
+        CosmicNNSurrogateEnhanced, TrainingManager, PredictionInterface, dFBADataset, dfba_collate_fn
     )
     from torch.utils.data import DataLoader, random_split
     IMPORTS_OK = True
@@ -111,8 +111,8 @@ def train_enhanced_model(trajectories, time_points, initial_conditions, paramete
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0, collate_fn=dfba_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0, collate_fn=dfba_collate_fn)
     
     print(f"Train: {len(train_dataset)}, Validation: {len(val_dataset)}")
     

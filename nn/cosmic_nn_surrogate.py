@@ -15,6 +15,34 @@ import json
 from typing import Dict, List, Tuple, Optional
 
 
+def dfba_collate_fn(batch):
+    """
+    Custom collate function to properly handle empty parameter tensors.
+    Default PyTorch collate doesn't correctly stack empty tensors of shape (0,).
+    """
+    ic = torch.stack([item['initial_conditions'] for item in batch])
+    time = torch.stack([item['time'] for item in batch])
+    traj = torch.stack([item['trajectory'] for item in batch])
+    
+    # Handle parameters carefully - stack empty tensors correctly
+    params_list = [item['parameters'] for item in batch]
+    
+    # Check if all parameters are empty (shape (0,))
+    if params_list[0].shape[0] == 0:
+        # All empty - create proper (batch_size, 0) tensor
+        params = torch.zeros(len(batch), 0)
+    else:
+        # Non-empty - stack normally
+        params = torch.stack(params_list)
+    
+    return {
+        'initial_conditions': ic,
+        'time': time,
+        'parameters': params,
+        'trajectory': traj
+    }
+
+
 class dFBADataset(Dataset):
     """
     Dataset for dFBA simulation trajectories.
