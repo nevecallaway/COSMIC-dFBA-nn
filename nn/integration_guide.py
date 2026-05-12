@@ -12,7 +12,7 @@ This script demonstrates:
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from cosmic_nn_surrogate import (
+from nn.cosmic_nn_surrogate import (
     CosmicNNSurrogate, TrainingManager, PredictionInterface, dFBADataset
 )
 from torch.utils.data import DataLoader, random_split

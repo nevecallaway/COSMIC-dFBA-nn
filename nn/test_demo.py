@@ -13,7 +13,7 @@ import time
 
 # Try to import our modules
 try:
-    from cosmic_nn_surrogate import (
+    from nn.cosmic_nn_surrogate import (
         CosmicNNSurrogate, TrainingManager, PredictionInterface, dFBADataset
     )
     from torch.utils.data import DataLoader, random_split
