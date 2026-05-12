@@ -9,7 +9,9 @@ COLAB_NOTEBOOK = """
 # ================================================
 
 # Step 0: Setup and clone repo
-!cd /content && git clone https://github.com/your-repo/COSMIC-dFBA-nn.git 2>/dev/null || cd /content/COSMIC-dFBA-nn && git pull
+GITHUB_URL = "https://github.com/nevecallaway/COSMIC-dFBA-nn.git"
+
+!cd /content && git clone $GITHUB_URL 2>/dev/null || (cd /content/COSMIC-dFBA-nn && git pull)
 %cd /content/COSMIC-dFBA-nn/nn
 
 # Step 1: Upload real data or download from paper

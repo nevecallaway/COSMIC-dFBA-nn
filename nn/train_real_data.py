@@ -228,12 +228,29 @@ def main():
     print("Step 1: Loading Real Experimental Data")
     print(f"{'='*70}")
     
-    data_file = Path("/Users/nevecallaway/Downloads/data_2.csv")
-    if not data_file.exists():
-        print(f"Error: {data_file} not found")
+    # Try multiple possible paths (local, Colab, Downloads)
+    possible_paths = [
+        Path("data_2.csv"),
+        Path("/content/COSMIC-dFBA-nn/nn/data_2.csv"),
+        Path("/Users/nevecallaway/Downloads/data_2.csv"),
+        Path("./data_2.csv"),
+    ]
+    
+    data_file = None
+    for p in possible_paths:
+        if p.exists():
+            data_file = str(p)
+            print(f"Found data file: {data_file}")
+            break
+    
+    if data_file is None:
+        print(f"Error: data_2.csv not found in any of these locations:")
+        for p in possible_paths:
+            print(f"  - {p}")
+        print("\nPlease upload data_2.csv to the current directory or /content/COSMIC-dFBA-nn/nn/")
         sys.exit(1)
     
-    trajectories, time_points, ics, metadata = load_experimental_data(str(data_file))
+    trajectories, time_points, ics, metadata = load_experimental_data(data_file)
     
     # Step 2: Analyze phases
     print(f"\n{'='*70}")
