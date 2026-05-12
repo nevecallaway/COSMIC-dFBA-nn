@@ -36,7 +36,7 @@ class ImprovedTrainer:
         self.device = device
         self.optimizer = optim.Adam(model.parameters(), lr=learning_rate)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5, verbose=False
+            self.optimizer, mode='min', factor=0.5, patience=5
         )
         self.losses = []
         self.true_phases = true_phases  # For phase-aware loss
