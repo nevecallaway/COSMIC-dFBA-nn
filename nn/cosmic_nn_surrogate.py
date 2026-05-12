@@ -69,13 +69,16 @@ class dFBADataset(Dataset):
         # Normalize time to [0,1]
         time = torch.FloatTensor(self.time_points[idx] / np.max(self.time_points[idx]))
         
-        # Stack parameters
+        # Stack parameters - FIXED: ensure proper 1D tensor even if empty
         param_list = []
         for key, val in self.parameters.items():
             if val is not None:
                 param_list.append(torch.FloatTensor([val[idx]]))
         
-        params = torch.cat(param_list) if param_list else torch.FloatTensor([])
+        if param_list:
+            params = torch.cat(param_list)  # Shape: (n_params,)
+        else:
+            params = torch.zeros(0)  # Shape: (0,) - proper empty 1D tensor
         
         return {
             'initial_conditions': ic,
@@ -364,6 +367,7 @@ class CosmicNNSurrogate(nn.Module):
         self.encoder = DynamicsEncoder(n_components, n_params, latent_dim)
         self.decoder = TemporalDecoder(n_components, latent_dim, n_heads)
         self.n_components = n_components
+        self.n_params = n_params
     
     def forward(self, initial_conditions, time_points, parameters):
         """
@@ -664,7 +668,9 @@ class PredictionInterface:
         ic_tensor = torch.FloatTensor(ic_norm).to(self.device)
         time_tensor = torch.FloatTensor(time_norm).unsqueeze(0).to(self.device)
         
-        # Handle parameters
+        # Handle parameters - match the n_params from model
+        n_params = getattr(self.model, 'n_params', 0)
+        
         if parameters is not None:
             if isinstance(parameters, dict):
                 param_list = [torch.FloatTensor([parameters[key]]) for key in sorted(parameters.keys())]
@@ -672,11 +678,12 @@ class PredictionInterface:
             else:
                 params_tensor = torch.FloatTensor(parameters).unsqueeze(0).to(self.device)
         else:
-            # Only create params tensor if model expects parameters
-            if self.model.n_params > 0:
-                params_tensor = torch.zeros(1, self.model.n_params).to(self.device)
+            # Create params tensor matching model expectations
+            if n_params > 0:
+                params_tensor = torch.zeros(1, n_params).to(self.device)
             else:
-                params_tensor = torch.zeros(1, 0).to(self.device)
+                # No parameters - create empty 1D tensor then unsqueeze to (1, 0)
+                params_tensor = torch.zeros(0).unsqueeze(0).to(self.device)
         
         # Predict
         with torch.no_grad():
