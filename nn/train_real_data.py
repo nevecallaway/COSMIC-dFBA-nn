@@ -108,7 +108,7 @@ def evaluate_real_model(model, dataset, device, metadata):
         # Compare phase predictions to ground truth
         print(f"\nPhase Transition Comparison:")
         print(f"  True phases: {true_phases[:5]} ... {true_phases[-5:]}")
-        print(f"  Pred phases: {pred_phases[:5]:.3f} ... {pred_phases[-5:]:.3f}")
+        print(f"  Pred phases: {np.round(pred_phases[:5], 3)} ... {np.round(pred_phases[-5:], 3)}")
         
         # Compute phase accuracy (classify as growth/production)
         true_bistable = np.zeros_like(true_phases)
