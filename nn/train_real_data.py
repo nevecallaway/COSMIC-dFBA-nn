@@ -11,6 +11,11 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
 import time
+import os
+
+# Debug: Show current directory and available files
+print(f"Current directory: {os.getcwd()}")
+print(f"Files in current directory: {os.listdir('.')}")
 
 # Import our modules
 try:
@@ -20,8 +25,15 @@ try:
     from load_real_data import load_experimental_data, analyze_phase_transitions
     from torch.utils.data import DataLoader, random_split
     IMPORTS_OK = True
+    print("✓ Successfully imported all modules")
 except ImportError as e:
     print(f"Error importing modules: {e}")
+    print(f"\nTroubleshooting:")
+    print(f"  - Make sure you're in the nn/ directory: cd /content/COSMIC-dFBA-nn/nn")
+    print(f"  - Check that these files exist:")
+    print(f"    - cosmic_nn_surrogate.py")
+    print(f"    - load_real_data.py")
+    print(f"    - data_2.csv (or upload it)")
     IMPORTS_OK = False
 
 
