@@ -107,7 +107,7 @@ def main():
     plt.close()
     
     # Figure 3: Phase-annotated trajectories for key components
-    fig, axes = plt.subplots(2, 5, figsize=(18, 8))
+    fig, axes = plt.subplots(2, 10, figsize=(24, 6))
     fig.suptitle('Phase-Annotated Trajectories: Cell Density & Titer', fontsize=16, fontweight='bold')
     
     for reactor_idx, reactor_id in enumerate(reactor_ids):
@@ -121,12 +121,13 @@ def main():
         ax.plot(time_axis, cd, 'k-', alpha=0.3, linewidth=1)
         ax.axhline(0.2, color='green', linestyle='--', alpha=0.3, linewidth=1)
         ax.axhline(0.8, color='orange', linestyle='--', alpha=0.3, linewidth=1)
-        ax.set_title(f'{reactor_id}', fontsize=10, fontweight='bold')
+        ax.set_title(f'{reactor_id}', fontsize=9, fontweight='bold')
         ax.set_ylim(-0.05, 1.05)
         ax.grid(True, alpha=0.2)
+        ax.set_xticks([0, 6, 12])
         
         if reactor_idx == 0:
-            ax.set_ylabel('Cell Density')
+            ax.set_ylabel('Cell Density', fontweight='bold')
         
         # Titer
         ax = axes[1, reactor_idx]
@@ -135,11 +136,12 @@ def main():
         scatter = ax.scatter(time_axis, titer, c=phase, cmap='RdYlGn', s=80, alpha=0.8, edgecolors='black', linewidth=1)
         ax.plot(time_axis, titer, 'k-', alpha=0.3, linewidth=1)
         ax.set_ylim(-0.05, 1.05)
-        ax.set_xlabel('Timepoint')
+        ax.set_xlabel('Time', fontsize=8)
         ax.grid(True, alpha=0.2)
+        ax.set_xticks([0, 6, 12])
         
         if reactor_idx == 0:
-            ax.set_ylabel('Titer')
+            ax.set_ylabel('Titer', fontweight='bold')
     
     plt.colorbar(scatter, ax=axes, label='Phase', shrink=0.8)
     plt.tight_layout()
