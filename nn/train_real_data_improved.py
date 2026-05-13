@@ -31,7 +31,7 @@ except ImportError as e:
 class ImprovedTrainer:
     """Enhanced trainer with real-data-aware losses."""
     
-    def __init__(self, model, device, learning_rate=1e-3, true_phases=None):
+    def __init__(self, model, device, learning_rate=1e-3, phases_metadata=None):
         self.model = model
         self.device = device
         self.optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -39,67 +39,83 @@ class ImprovedTrainer:
             self.optimizer, mode='min', factor=0.5, patience=5
         )
         self.losses = []
-        self.true_phases = true_phases  # For phase-aware loss
+        self.phases_metadata = phases_metadata  # Ground truth phases from data
     
     def compute_improved_loss(self, predictions, targets, ics, true_phases_batch):
         """
-        Enhanced loss function addressing real data challenges:
+        Enhanced loss function with binary phase classification:
         1. Concentration MSE (main)
         2. IC constraint (first prediction ≈ IC)
         3. Non-flatness penalty (encourage dynamics)
-        4. Bistability penalty (push towards 0 or 1, not 0.5)
+        4. Phase classification loss (cross-entropy with binary targets)
         """
         conc_pred = predictions['concentrations']
-        phase_pred = predictions['phase_weights']
+        phase_logits = predictions['phase_weights']  # Now logits, not sigmoid outputs
         
         # Loss 1: Main concentration loss
         conc_loss = nn.functional.mse_loss(conc_pred, targets)
         
         # Loss 2: IC constraint - first timepoint should match initial conditions
-        # This forces model to respect input conditions
         ic_error = torch.mean((conc_pred[:, 0, :] - ics) ** 2)
-        ic_loss = 0.1 * ic_error  # Weight: make sure first prediction respects IC
+        ic_loss = 0.1 * ic_error
         
         # Loss 3: Non-flatness penalty - penalize constant predictions
-        # Compute variance over time for each trajectory
         conc_variance = torch.var(conc_pred, dim=1)  # Shape: (batch, n_components)
-        flatness_penalty = 0.05 * torch.mean(1.0 / (1.0 + conc_variance))  # Penalize low variance
+        flatness_penalty = 0.05 * torch.mean(1.0 / (1.0 + conc_variance))
         
-        # Loss 4: Bistability penalty - push phase weights towards 0 or 1
-        # Phase should be bistable: either growth (near 0) or production (near 1)
-        phase_squeeze = phase_pred.squeeze(-1)  # (batch, time)
-        
-        # Distance from closest bistable state (0 or 1)
-        dist_to_zero = torch.abs(phase_squeeze)
-        dist_to_one = torch.abs(phase_squeeze - 1.0)
-        dist_to_nearest = torch.min(dist_to_zero, dist_to_one)
-        bistability_penalty = 0.05 * torch.mean(dist_to_nearest)
-        
-        # Loss 5: Phase smoothness (still want smooth transitions within phase)
-        phase_smoothness = 0.01 * torch.mean((phase_squeeze[:, 1:] - phase_squeeze[:, :-1]) ** 2)
+        # Loss 4: Phase classification with binary cross-entropy
+        # Convert true_phases_batch (continuous [0,1]) to binary targets {0,1}
+        if true_phases_batch is not None:
+            # Classify: <0.2 = growth (0), >0.8 = production (1)
+            # Ambiguous middle (0.2-0.8) = ignore (masked)
+            batch_size, n_time = true_phases_batch.shape[0], true_phases_batch.shape[1]
+            
+            phase_targets = torch.zeros((batch_size, n_time), dtype=torch.long, device=true_phases_batch.device)
+            mask = torch.zeros((batch_size, n_time), dtype=torch.bool, device=true_phases_batch.device)
+            
+            for b in range(batch_size):
+                for t in range(n_time):
+                    p = true_phases_batch[b, t, 0].item()
+                    if p < 0.2:
+                        phase_targets[b, t] = 0  # Growth
+                        mask[b, t] = True
+                    elif p > 0.8:
+                        phase_targets[b, t] = 1  # Production
+                        mask[b, t] = True
+                    # else: mask = False (ignore transition zone)
+            
+            # Reshape phase_logits: (batch, time, 2) -> (batch*time, 2)
+            phase_logits_flat = phase_logits.view(-1, 2)
+            phase_targets_flat = phase_targets.view(-1)
+            mask_flat = mask.view(-1)
+            
+            # Apply mask and compute cross-entropy only on clear phase regions
+            if mask_flat.sum() > 0:
+                phase_loss = nn.functional.cross_entropy(
+                    phase_logits_flat[mask_flat],
+                    phase_targets_flat[mask_flat]
+                )
+                phase_loss = 0.5 * phase_loss  # Weight: 0.5x
+            else:
+                phase_loss = torch.tensor(0.0, device=targets.device)
+        else:
+            phase_loss = torch.tensor(0.0, device=targets.device)
         
         # Combined loss
-        total_loss = (
-            conc_loss +
-            ic_loss +
-            flatness_penalty +
-            bistability_penalty +
-            phase_smoothness
-        )
+        total_loss = conc_loss + ic_loss + flatness_penalty + phase_loss
         
         return total_loss, {
             'conc': conc_loss.item(),
             'ic': ic_loss.item(),
             'flatness': flatness_penalty.item(),
-            'bistability': bistability_penalty.item(),
-            'smoothness': phase_smoothness.item(),
+            'phase_ce': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
         }
     
-    def train_epoch(self, train_loader, true_phases_train):
+    def train_epoch(self, train_loader, train_indices=None):
         """Train for one epoch."""
         self.model.train()
         epoch_loss = 0.0
-        loss_components = {'conc': 0, 'ic': 0, 'flatness': 0, 'bistability': 0, 'smoothness': 0}
+        loss_components = {'conc': 0, 'ic': 0, 'flatness': 0, 'phase_ce': 0}
         n_batches = 0
         
         for batch_idx, batch in enumerate(train_loader):
@@ -108,14 +124,12 @@ class ImprovedTrainer:
             params = batch['parameters'].to(self.device)
             target = batch['trajectory'].to(self.device)
             
-            # Get corresponding true phases
-            if true_phases_train is not None:
-                # Map batch to true phases (this is approximate for random split)
-                true_phases_batch = torch.FloatTensor(
-                    np.random.rand(ic.shape[0], target.shape[1], 1)
-                ).to(self.device)
-            else:
-                true_phases_batch = None
+            # Extract true phases from metadata if available
+            true_phases_batch = None
+            if self.phases_metadata is not None and train_indices is not None and batch_idx < len(train_indices):
+                idx = train_indices[batch_idx] if batch_idx < len(train_indices) else batch_idx
+                phase_data = self.phases_metadata[idx]
+                true_phases_batch = torch.FloatTensor(phase_data).unsqueeze(-1).to(self.device)
             
             self.optimizer.zero_grad()
             
@@ -164,13 +178,13 @@ class ImprovedTrainer:
         val_loss /= len(val_loader)
         return val_loss
     
-    def train(self, train_loader, val_loader, epochs=50, patience=10):
+    def train(self, train_loader, val_loader, epochs=50, patience=10, train_indices=None):
         """Full training loop."""
         best_val_loss = float('inf')
         patience_counter = 0
         
         for epoch in range(1, epochs + 1):
-            train_loss, components = self.train_epoch(train_loader, None)
+            train_loss, components = self.train_epoch(train_loader, train_indices)
             val_loss = self.validate(val_loader)
             
             if val_loss < best_val_loss:
@@ -184,7 +198,7 @@ class ImprovedTrainer:
                       f"Val={val_loss:.6f} | "
                       f"IC={components['ic']:.4f} | "
                       f"Flat={components['flatness']:.4f} | "
-                      f"Bistab={components['bistability']:.4f}")
+                      f"Phase_CE={components['phase_ce']:.4f}")
             
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch}")
@@ -219,13 +233,15 @@ def main():
         sys.exit(1)
     
     trajectories, time_points, ics, metadata = load_experimental_data(data_file)
+    phases = metadata['phases']  # Extract ground truth phases
     
     # Create dataset
     dataset = dFBADataset(trajectories, time_points, ics, parameters={}, normalize=True)
     
-    # Split: 7 train, 3 val
+    # Split: 7 train, 3 val (keeping track of indices for phase lookup)
     train_size = int(0.7 * len(dataset))
     val_size = len(dataset) - train_size
+    train_indices = list(range(train_size))
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     
     train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, 
@@ -234,6 +250,7 @@ def main():
                            num_workers=0, collate_fn=dfba_collate_fn)
     
     print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
+    print(f"Phase data available: {phases.shape}")
     
     # Create model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -250,19 +267,19 @@ def main():
     
     # Train with improved losses
     print(f"\n{'='*70}")
-    print("Training with Improved Loss Function")
+    print("Training with Binary Phase Classification")
     print(f"{'='*70}")
     print("Loss components:")
     print("  - Concentration MSE (main)")
     print("  - IC constraint (0.1× weight)")
     print("  - Non-flatness penalty (0.05×)")
-    print("  - Bistability penalty (0.05×) ← NEW")
-    print("  - Phase smoothness (0.01×)")
+    print("  - Phase binary cross-entropy (0.5× weight) ← NEW")
+    print("  - Classification: <0.2=growth(0), >0.8=production(1)")
     
-    trainer = ImprovedTrainer(model, device, learning_rate=5e-4)
+    trainer = ImprovedTrainer(model, device, learning_rate=5e-4, phases_metadata=phases)
     
     start_time = time.time()
-    best_val_loss = trainer.train(train_loader, val_loader, epochs=100, patience=20)
+    best_val_loss = trainer.train(train_loader, val_loader, epochs=100, patience=20, train_indices=train_indices)
     elapsed = time.time() - start_time
     
     print(f"\n✓ Training complete in {elapsed:.1f}s")

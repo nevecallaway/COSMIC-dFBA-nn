@@ -142,8 +142,8 @@ class DynamicsEncoder(nn.Module):
 
 class StateWeightingLayer(nn.Module):
     """
-    Predicts weighting between growth and production phases.
-    Outputs smooth transitions (0->1) for each timepoint.
+    Predicts phase classification: growth (class 0) vs production (class 1).
+    Outputs logits for binary classification with cross-entropy loss.
     """
     def __init__(self, latent_dim=64):
         super().__init__()
@@ -151,8 +151,7 @@ class StateWeightingLayer(nn.Module):
             nn.Linear(latent_dim, 64),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(64, 1),
-            nn.Sigmoid()  # Output in [0,1] representing phase progress
+            nn.Linear(64, 2),  # Output 2 logits: [growth_logit, production_logit]
         )
     
     def forward(self, latent_state, time_points):
@@ -162,7 +161,7 @@ class StateWeightingLayer(nn.Module):
             time_points: (batch_size, n_timepoints)
         
         Returns:
-            phase_weights: (batch_size, n_timepoints, 1) - growth weight over time
+            phase_logits: (batch_size, n_timepoints, 2) - logits for 2 classes
         """
         batch_size = latent_state.shape[0]
         n_timepoints = time_points.shape[1]
@@ -174,9 +173,9 @@ class StateWeightingLayer(nn.Module):
         time_expanded = time_points.unsqueeze(-1)
         combined = latent_expanded + time_expanded * 0.1  # Mix in temporal context
         
-        # Predict phase transition weights
-        phase_weights = self.mlp(combined)
-        return phase_weights
+        # Predict phase logits (raw, before softmax)
+        phase_logits = self.mlp(combined)  # Shape: (batch, time, 2)
+        return phase_logits
 
 
 class RatePredictionHead(nn.Module):
