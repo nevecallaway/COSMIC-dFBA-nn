@@ -105,7 +105,7 @@ class ImprovedTrainer:
                     phase_logits_flat[mask_flat],
                     phase_targets_flat[mask_flat]
                 )
-                phase_loss = 0.5 * phase_loss  # Weight: 0.5x
+                phase_loss = 0.1 * phase_loss  # Weight: 0.1× (reduced from 0.5)
             else:
                 phase_loss = torch.tensor(0.0, device=targets.device)
                 if debug:
@@ -148,9 +148,9 @@ class ImprovedTrainer:
             # Forward pass
             predictions = self.model(ic, time, params)
             
-            # Compute improved loss
+            # Compute improved loss - debug only on first batch of first epoch
             loss, components = self.compute_improved_loss(
-                predictions, target, ic, phases_batch, debug=(batch_idx == 0)
+                predictions, target, ic, phases_batch, debug=(batch_idx == 0 and debug)
             )
             loss.backward()
             
@@ -196,7 +196,9 @@ class ImprovedTrainer:
         patience_counter = 0
         
         for epoch in range(1, epochs + 1):
-            train_loss, components = self.train_epoch(train_loader)
+            # Debug only on first epoch
+            debug_epoch = (epoch == 1)
+            train_loss, components = self.train_epoch(train_loader, debug=debug_epoch)
             val_loss = self.validate(val_loader)
             
             if val_loss < best_val_loss:
