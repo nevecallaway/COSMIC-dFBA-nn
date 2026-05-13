@@ -40,7 +40,7 @@ class ImprovedTrainer:
         )
         self.losses = []
     
-    def compute_improved_loss(self, predictions, targets, ics, phases_batch=None):
+    def compute_improved_loss(self, predictions, targets, ics, phases_batch=None, debug=False):
         """
         Enhanced loss function with binary phase classification:
         1. Concentration MSE (main)
@@ -65,6 +65,11 @@ class ImprovedTrainer:
         # Loss 4: Phase classification with binary cross-entropy
         # phases_batch shape: (batch_size, n_timepoints) - ground truth phase fractions
         if phases_batch is not None:
+            if debug:
+                print(f"\n[DEBUG] phases_batch shape: {phases_batch.shape}")
+                print(f"[DEBUG] phases_batch min/max: {phases_batch.min():.4f} / {phases_batch.max():.4f}")
+                print(f"[DEBUG] phases_batch values: {phases_batch[0, :5]}")
+            
             batch_size = phases_batch.shape[0]
             n_time = phases_batch.shape[1]
             
@@ -84,6 +89,10 @@ class ImprovedTrainer:
                         mask[b, t] = True
                     # else: mask = False (ignore transition zone)
             
+            if debug:
+                print(f"[DEBUG] mask sum (classified): {mask.sum().item()} / {batch_size * n_time}")
+                print(f"[DEBUG] growth targets: {(phase_targets == 0).sum().item()}, prod targets: {(phase_targets == 1).sum().item()}")
+            
             # Reshape phase_logits: (batch, time, 2) -> (batch*time, 2)
             phase_logits_flat = phase_logits.view(-1, 2)
             phase_targets_flat = phase_targets.view(-1)
@@ -98,8 +107,12 @@ class ImprovedTrainer:
                 phase_loss = 0.5 * phase_loss  # Weight: 0.5x
             else:
                 phase_loss = torch.tensor(0.0, device=targets.device)
+                if debug:
+                    print("[DEBUG] WARNING: No classified phases (all in transition zone)")
         else:
             phase_loss = torch.tensor(0.0, device=targets.device)
+            if debug:
+                print("[DEBUG] phases_batch is None!")
         
         # Combined loss
         total_loss = conc_loss + ic_loss + flatness_penalty + phase_loss
@@ -111,14 +124,14 @@ class ImprovedTrainer:
             'phase_ce': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
         }
     
-    def train_epoch(self, train_loader):
+    def train_epoch(self, train_loader, debug=False):
         """Train for one epoch."""
         self.model.train()
         epoch_loss = 0.0
         loss_components = {'conc': 0, 'ic': 0, 'flatness': 0, 'phase_ce': 0}
         n_batches = 0
         
-        for batch in train_loader:
+        for batch_idx, batch in enumerate(train_loader):
             ic = batch['initial_conditions'].to(self.device)
             time = batch['time'].to(self.device)
             params = batch['parameters'].to(self.device)
@@ -136,7 +149,7 @@ class ImprovedTrainer:
             
             # Compute improved loss
             loss, components = self.compute_improved_loss(
-                predictions, target, ic, phases_batch
+                predictions, target, ic, phases_batch, debug=(batch_idx == 0)
             )
             loss.backward()
             
