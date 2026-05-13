@@ -425,6 +425,65 @@ class CosmicNNSurrogate(nn.Module):
         return trajectory
 
 
+class SimpleBaseline(nn.Module):
+    """Baseline: No phase handling, just concentration prediction with attention."""
+    def __init__(self, n_components, n_params=0, latent_dim=64):
+        super().__init__()
+        self.n_components = n_components
+        self.n_params = n_params
+        
+        input_size = n_components + n_params
+        self.encoder = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, latent_dim),
+        )
+        
+        # Simple decoder
+        self.time_embed = nn.Sequential(
+            nn.Linear(1, 32),
+            nn.ReLU(),
+            nn.Linear(32, latent_dim),
+        )
+        
+        self.attention = nn.MultiheadAttention(latent_dim, 2, batch_first=True)
+        
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim * 2, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, n_components),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, initial_conditions, time_points, parameters=None):
+        if parameters is not None and parameters.shape[1] > 0:
+            encoder_input = torch.cat([initial_conditions, parameters], dim=-1)
+        else:
+            encoder_input = initial_conditions
+        
+        latent_state = self.encoder(encoder_input)
+        
+        batch_size = initial_conditions.shape[0]
+        time_expanded = time_points.unsqueeze(-1)
+        time_embedded = self.time_embed(time_expanded)
+        latent_expanded = latent_state.unsqueeze(1).expand(-1, time_points.shape[1], -1)
+        
+        attn_out, _ = self.attention(time_embedded, latent_expanded, latent_expanded)
+        combined = torch.cat([latent_expanded, attn_out], dim=-1)
+        
+        concentrations = self.decoder(combined)
+        
+        return {
+            'concentrations': concentrations,
+            'phase_weights': torch.ones(batch_size, time_points.shape[1], 1, device=initial_conditions.device) * 0.5
+        }
+
+
 class CosmicNNSurrogateEnhanced(nn.Module):
     """
     Enhanced COSMIC-dFBA model with multi-output heads for full paper compliance.

@@ -15,6 +15,7 @@ try:
     from torch.utils.data import DataLoader
 except ImportError as e:
     print(f"✗ Import error: {e}")
+    print(f"  Make sure all dependencies are installed")
     sys.exit(1)
 
 
