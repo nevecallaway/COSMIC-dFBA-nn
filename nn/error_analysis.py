@@ -5,6 +5,7 @@ Detailed error analysis: Find trends in where model fails.
 
 import numpy as np
 import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
@@ -12,7 +13,7 @@ import sys
 try:
     from cosmic_nn_surrogate import SimpleBaseline, dFBADataset, dfba_collate_fn
     from load_real_data import load_experimental_data
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, random_split
 except ImportError as e:
     print(f"✗ Import error: {e}")
     print(f"  Make sure all dependencies are installed")
@@ -53,12 +54,82 @@ def analyze_errors():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = SimpleBaseline(n_components=dataset.n_components, n_params=0, latent_dim=32)
     
-    if Path('simple_baseline_model.pt').exists():
-        model.load_state_dict(torch.load('simple_baseline_model.pt', map_location=device))
-        print("✓ Loaded simple_baseline_model.pt")
-    else:
-        print("⚠ Model not found, skipping analysis")
-        return
+    model_paths = [
+        'simple_baseline_model.pt',
+        'simple-baseline_model.pt',
+        'simple_baseline_enhanced_model.pt'
+    ]
+    
+    model_found = False
+    for path in model_paths:
+        if Path(path).exists():
+            model.load_state_dict(torch.load(path, map_location=device))
+            print(f"✓ Loaded {path}")
+            model_found = True
+            break
+    
+    if not model_found:
+        print(f"\n⚠ Pre-trained model not found. Training from scratch...")
+        print(f"  (Usually run: python compare_models.py first)")
+        print(f"\nTraining Simple Baseline on 70% data...")
+        
+        train_size = int(0.7 * len(dataset))
+        val_size = len(dataset) - train_size
+        train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+        
+        train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0, collate_fn=dfba_collate_fn)
+        val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=dfba_collate_fn)
+        
+        model.to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        
+        best_loss = float('inf')
+        patience_counter = 0
+        
+        for epoch in range(1, 51):
+            model.train()
+            for batch in train_loader:
+                ic = batch['initial_conditions'].to(device)
+                time = batch['time'].to(device)
+                params = batch['parameters'].to(device)
+                target = batch['trajectory'].to(device)
+                
+                optimizer.zero_grad()
+                predictions = model(ic, time, params)
+                conc_pred = predictions['concentrations']
+                loss = nn.functional.mse_loss(conc_pred, target)
+                loss.backward()
+                optimizer.step()
+            
+            model.eval()
+            with torch.no_grad():
+                val_loss = 0.0
+                for batch in val_loader:
+                    ic = batch['initial_conditions'].to(device)
+                    time = batch['time'].to(device)
+                    params = batch['parameters'].to(device)
+                    target = batch['trajectory'].to(device)
+                    predictions = model(ic, time, params)
+                    val_loss += nn.functional.mse_loss(predictions['concentrations'], target).item()
+                val_loss /= len(val_loader)
+            
+            scheduler.step(val_loss)
+            
+            if epoch % 10 == 0:
+                print(f"  Epoch {epoch}: Val Loss = {val_loss:.6f}")
+            
+            if val_loss < best_loss:
+                best_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            if patience_counter >= 10:
+                break
+        
+        torch.save(model.state_dict(), 'simple_baseline_model.pt')
+        print(f"✓ Model trained and saved")
     
     model.to(device)
     model.eval()
