@@ -68,7 +68,7 @@ class ImprovedTrainer:
             if debug:
                 print(f"\n[DEBUG] phases_batch shape: {phases_batch.shape}")
                 print(f"[DEBUG] phases_batch min/max: {phases_batch.min():.4f} / {phases_batch.max():.4f}")
-                print(f"[DEBUG] phases_batch values: {phases_batch[0, :5]}")
+                print(f"[DEBUG] phases_batch values sample: {phases_batch[0, :5]}")
             
             batch_size = phases_batch.shape[0]
             n_time = phases_batch.shape[1]
@@ -90,6 +90,7 @@ class ImprovedTrainer:
                     # else: mask = False (ignore transition zone)
             
             if debug:
+                print(f"[DEBUG] Phase distribution: <0.2={(phases_batch < 0.2).sum().item()}, 0.2-0.8={((phases_batch >= 0.2) & (phases_batch <= 0.8)).sum().item()}, >0.8={(phases_batch > 0.8).sum().item()}")
                 print(f"[DEBUG] mask sum (classified): {mask.sum().item()} / {batch_size * n_time}")
                 print(f"[DEBUG] growth targets: {(phase_targets == 0).sum().item()}, prod targets: {(phase_targets == 1).sum().item()}")
             
