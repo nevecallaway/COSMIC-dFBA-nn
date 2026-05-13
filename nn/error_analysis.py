@@ -138,7 +138,7 @@ def analyze_errors():
     all_predictions = []
     all_targets = []
     all_errors = []
-    reactor_ids = list(metadata['reactor_ids'])
+    reactor_ids = list(metadata['reactors'])
     component_names = ['Cell Density', 'Glucose', 'Lactate', 'Titer']
     
     with torch.no_grad():
