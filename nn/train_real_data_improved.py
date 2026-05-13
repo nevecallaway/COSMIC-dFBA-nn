@@ -31,7 +31,7 @@ except ImportError as e:
 class ImprovedTrainer:
     """Enhanced trainer with real-data-aware losses."""
     
-    def __init__(self, model, device, learning_rate=1e-3, phases_metadata=None):
+    def __init__(self, model, device, learning_rate=1e-3):
         self.model = model
         self.device = device
         self.optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -39,9 +39,8 @@ class ImprovedTrainer:
             self.optimizer, mode='min', factor=0.5, patience=5
         )
         self.losses = []
-        self.phases_metadata = phases_metadata  # Ground truth phases from data
     
-    def compute_improved_loss(self, predictions, targets, ics, true_phases_batch):
+    def compute_improved_loss(self, predictions, targets, ics, phases_batch=None):
         """
         Enhanced loss function with binary phase classification:
         1. Concentration MSE (main)
@@ -64,18 +63,19 @@ class ImprovedTrainer:
         flatness_penalty = 0.05 * torch.mean(1.0 / (1.0 + conc_variance))
         
         # Loss 4: Phase classification with binary cross-entropy
-        # Convert true_phases_batch (continuous [0,1]) to binary targets {0,1}
-        if true_phases_batch is not None:
+        # phases_batch shape: (batch_size, n_timepoints) - ground truth phase fractions
+        if phases_batch is not None:
+            batch_size = phases_batch.shape[0]
+            n_time = phases_batch.shape[1]
+            
             # Classify: <0.2 = growth (0), >0.8 = production (1)
             # Ambiguous middle (0.2-0.8) = ignore (masked)
-            batch_size, n_time = true_phases_batch.shape[0], true_phases_batch.shape[1]
-            
-            phase_targets = torch.zeros((batch_size, n_time), dtype=torch.long, device=true_phases_batch.device)
-            mask = torch.zeros((batch_size, n_time), dtype=torch.bool, device=true_phases_batch.device)
+            phase_targets = torch.zeros((batch_size, n_time), dtype=torch.long, device=phases_batch.device)
+            mask = torch.zeros((batch_size, n_time), dtype=torch.bool, device=phases_batch.device)
             
             for b in range(batch_size):
                 for t in range(n_time):
-                    p = true_phases_batch[b, t, 0].item()
+                    p = phases_batch[b, t].item()
                     if p < 0.2:
                         phase_targets[b, t] = 0  # Growth
                         mask[b, t] = True
@@ -111,25 +111,23 @@ class ImprovedTrainer:
             'phase_ce': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
         }
     
-    def train_epoch(self, train_loader, train_indices=None):
+    def train_epoch(self, train_loader):
         """Train for one epoch."""
         self.model.train()
         epoch_loss = 0.0
         loss_components = {'conc': 0, 'ic': 0, 'flatness': 0, 'phase_ce': 0}
         n_batches = 0
         
-        for batch_idx, batch in enumerate(train_loader):
+        for batch in train_loader:
             ic = batch['initial_conditions'].to(self.device)
             time = batch['time'].to(self.device)
             params = batch['parameters'].to(self.device)
             target = batch['trajectory'].to(self.device)
             
-            # Extract true phases from metadata if available
-            true_phases_batch = None
-            if self.phases_metadata is not None and train_indices is not None and batch_idx < len(train_indices):
-                idx = train_indices[batch_idx] if batch_idx < len(train_indices) else batch_idx
-                phase_data = self.phases_metadata[idx]
-                true_phases_batch = torch.FloatTensor(phase_data).unsqueeze(-1).to(self.device)
+            # Extract phases from batch if available
+            phases_batch = batch.get('phases', None)
+            if phases_batch is not None:
+                phases_batch = phases_batch.to(self.device)
             
             self.optimizer.zero_grad()
             
@@ -138,7 +136,7 @@ class ImprovedTrainer:
             
             # Compute improved loss
             loss, components = self.compute_improved_loss(
-                predictions, target, ic, true_phases_batch
+                predictions, target, ic, phases_batch
             )
             loss.backward()
             
@@ -178,13 +176,13 @@ class ImprovedTrainer:
         val_loss /= len(val_loader)
         return val_loss
     
-    def train(self, train_loader, val_loader, epochs=50, patience=10, train_indices=None):
+    def train(self, train_loader, val_loader, epochs=50, patience=10):
         """Full training loop."""
         best_val_loss = float('inf')
         patience_counter = 0
         
         for epoch in range(1, epochs + 1):
-            train_loss, components = self.train_epoch(train_loader, train_indices)
+            train_loss, components = self.train_epoch(train_loader)
             val_loss = self.validate(val_loader)
             
             if val_loss < best_val_loss:
@@ -238,10 +236,9 @@ def main():
     # Create dataset
     dataset = dFBADataset(trajectories, time_points, ics, parameters={}, normalize=True)
     
-    # Split: 7 train, 3 val (keeping track of indices for phase lookup)
+    # Split: 7 train, 3 val
     train_size = int(0.7 * len(dataset))
     val_size = len(dataset) - train_size
-    train_indices = list(range(train_size))
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     
     train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, 
@@ -250,7 +247,7 @@ def main():
                            num_workers=0, collate_fn=dfba_collate_fn)
     
     print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
-    print(f"Phase data available: {phases.shape}")
+    print(f"Phase data shape: {phases.shape}")
     
     # Create model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -276,10 +273,10 @@ def main():
     print("  - Phase binary cross-entropy (0.5× weight) ← NEW")
     print("  - Classification: <0.2=growth(0), >0.8=production(1)")
     
-    trainer = ImprovedTrainer(model, device, learning_rate=5e-4, phases_metadata=phases)
+    trainer = ImprovedTrainer(model, device, learning_rate=5e-4)
     
     start_time = time.time()
-    best_val_loss = trainer.train(train_loader, val_loader, epochs=100, patience=20, train_indices=train_indices)
+    best_val_loss = trainer.train(train_loader, val_loader, epochs=100, patience=20)
     elapsed = time.time() - start_time
     
     print(f"\n✓ Training complete in {elapsed:.1f}s")

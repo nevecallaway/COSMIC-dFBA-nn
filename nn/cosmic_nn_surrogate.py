@@ -17,7 +17,7 @@ from typing import Dict, List, Tuple, Optional
 
 def dfba_collate_fn(batch):
     """
-    Custom collate function to properly handle empty parameter tensors.
+    Custom collate function to properly handle empty parameter tensors and phases.
     Default PyTorch collate doesn't correctly stack empty tensors of shape (0,).
     """
     ic = torch.stack([item['initial_conditions'] for item in batch])
@@ -35,12 +35,18 @@ def dfba_collate_fn(batch):
         # Non-empty - stack normally
         params = torch.stack(params_list)
     
-    return {
+    result = {
         'initial_conditions': ic,
         'time': time,
         'parameters': params,
         'trajectory': traj
     }
+    
+    # Add phases if available
+    if 'phases' in batch[0]:
+        result['phases'] = torch.stack([item['phases'] for item in batch])
+    
+    return result
 
 
 class dFBADataset(Dataset):
@@ -49,7 +55,7 @@ class dFBADataset(Dataset):
     Each sample is a complete simulation trajectory.
     """
     def __init__(self, trajectories, time_points, initial_conditions, 
-                 parameters, normalize=True):
+                 parameters, normalize=True, phases=None):
         """
         Args:
             trajectories: Array of shape (n_samples, n_timepoints, n_components)
@@ -57,11 +63,13 @@ class dFBADataset(Dataset):
             initial_conditions: Array of shape (n_samples, n_components)
             parameters: Dict of parameter arrays
             normalize: Whether to normalize data
+            phases: Optional array of shape (n_samples, n_timepoints) with phase info
         """
         self.trajectories = trajectories
         self.time_points = time_points
         self.initial_conditions = initial_conditions
         self.parameters = parameters
+        self.phases = phases
         
         self.n_samples = trajectories.shape[0]
         self.n_components = trajectories.shape[2]
@@ -108,12 +116,18 @@ class dFBADataset(Dataset):
         else:
             params = torch.zeros(0)  # Shape: (0,) - proper empty 1D tensor
         
-        return {
+        item = {
             'initial_conditions': ic,
             'time': time,
             'parameters': params,
             'trajectory': traj
         }
+        
+        # Add phase data if available
+        if self.phases is not None:
+            item['phases'] = torch.FloatTensor(self.phases[idx])
+        
+        return item
 
 
 class DynamicsEncoder(nn.Module):
