@@ -257,6 +257,9 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0, collate_fn=dfba_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=dfba_collate_fn)
     
+    # Evaluation on full dataset
+    eval_loader = DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=dfba_collate_fn)
+    
     # Create models
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     n_comp = dataset.n_components
@@ -282,7 +285,7 @@ def main():
         elapsed = time.time() - start
         
         print(f"\nEvaluating {model_name}...")
-        metrics = evaluate_model(model, device, val_loader, phases_true=phases)
+        metrics = evaluate_model(model, device, eval_loader, phases_true=phases)
         
         metrics['model'] = model_name
         metrics['training_time'] = elapsed
