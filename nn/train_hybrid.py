@@ -48,12 +48,12 @@ class HybridTrainer:
         
         for batch in train_loader:
             ic = batch['initial_conditions'].to(self.device)
-            time = batch['time'].to(self.device)
+            time_points = batch['time'].to(self.device)
             params = batch['parameters'].to(self.device)
             target = batch['trajectory'].to(self.device)
             
             self.optimizer.zero_grad()
-            predictions = self.model(ic, time, params)
+            predictions = self.model(ic, time_points, params)
             loss = self.compute_loss(predictions, target, ic)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -74,11 +74,11 @@ class HybridTrainer:
         with torch.no_grad():
             for batch in val_loader:
                 ic = batch['initial_conditions'].to(self.device)
-                time = batch['time'].to(self.device)
+                time_points = batch['time'].to(self.device)
                 params = batch['parameters'].to(self.device)
                 target = batch['trajectory'].to(self.device)
                 
-                predictions = self.model(ic, time, params)
+                predictions = self.model(ic, time_points, params)
                 loss = self.compute_loss(predictions, target, ic)
                 val_loss += loss.item()
                 n_batches += 1
@@ -208,11 +208,11 @@ def main():
         all_real = []
         for batch in val_loader:
             ic = batch['initial_conditions'].to(device)
-            time = batch['time'].to(device)
+            time_points = batch['time'].to(device)
             params = batch['parameters'].to(device)
             target = batch['trajectory'].to(device)
             
-            predictions = model(ic, time, params)
+            predictions = model(ic, time_points, params)
             all_pred.append(predictions['concentrations'].cpu().numpy())
             all_real.append(target.cpu().numpy())
     
