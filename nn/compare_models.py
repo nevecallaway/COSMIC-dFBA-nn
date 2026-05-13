@@ -302,6 +302,10 @@ def main():
         
         results.append(metrics)
         
+        # Save model
+        model_filename = model_name.lower().replace(' ', '_') + '_model.pt'
+        torch.save(model.state_dict(), model_filename)
+        print(f"  ✓ Saved: {model_filename}")
         print(f"  ✓ Completed in {elapsed:.1f}s")
     
     # Summary table
