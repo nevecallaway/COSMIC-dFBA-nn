@@ -191,7 +191,7 @@ def evaluate_model(model, device, eval_loader, phases_true=None):
     
     all_predictions = np.concatenate(all_predictions, axis=0)
     all_targets = np.concatenate(all_targets, axis=0)
-    all_phases_pred = np.concatenate(all_phases_pred, axis=0).squeeze(-1)
+    all_phases_pred = np.concatenate(all_phases_pred, axis=0)
     
     # Concentration metrics
     conc_mse = np.mean((all_predictions - all_targets) ** 2)
@@ -212,10 +212,18 @@ def evaluate_model(model, device, eval_loader, phases_true=None):
     # Phase metrics if available
     if phases_true is not None:
         phases_true_flat = np.concatenate([phases_true[i] for i in range(len(phases_true))])
-        phase_mae = np.mean(np.abs(all_phases_pred.flatten() - phases_true_flat))
-        phase_rmse = np.sqrt(np.mean((all_phases_pred.flatten() - phases_true_flat) ** 2))
-        metrics['phase_mae'] = phase_mae
-        metrics['phase_rmse'] = phase_rmse
+        # Handle variable phase shapes (different models output different formats)
+        all_phases_flat = all_phases_pred.reshape(-1) if all_phases_pred.ndim > 1 else all_phases_pred.flatten()
+        
+        # Only compare if same length (some models may not output meaningful phases)
+        if len(all_phases_flat) == len(phases_true_flat):
+            phase_mae = np.mean(np.abs(all_phases_flat - phases_true_flat))
+            phase_rmse = np.sqrt(np.mean((all_phases_flat - phases_true_flat) ** 2))
+            metrics['phase_mae'] = phase_mae
+            metrics['phase_rmse'] = phase_rmse
+        else:
+            metrics['phase_mae'] = np.nan
+            metrics['phase_rmse'] = np.nan
     
     return metrics
 
