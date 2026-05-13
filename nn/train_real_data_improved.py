@@ -246,8 +246,8 @@ def main():
     trajectories, time_points, ics, metadata = load_experimental_data(data_file)
     phases = metadata['phases']  # Extract ground truth phases
     
-    # Create dataset
-    dataset = dFBADataset(trajectories, time_points, ics, parameters={}, normalize=True)
+    # Create dataset WITH phases
+    dataset = dFBADataset(trajectories, time_points, ics, parameters={}, normalize=True, phases=phases)
     
     # Split: 7 train, 3 val
     train_size = int(0.7 * len(dataset))
