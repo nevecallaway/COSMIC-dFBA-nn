@@ -198,12 +198,13 @@ def analyze_errors():
     print(f"{'='*70}")
     
     # Correlate error with phase value
-    all_phases_flat = np.concatenate(phases)
+    # Expand phases to match error dimensions (repeat for each component)
+    all_phases_expanded = np.repeat(np.concatenate(phases)[:, np.newaxis], 4, axis=1).flatten()
     all_errors_flat = all_errors.reshape(-1)
     
     phase_bins = np.linspace(0, 1, 11)
     for i in range(len(phase_bins) - 1):
-        mask = (all_phases_flat >= phase_bins[i]) & (all_phases_flat < phase_bins[i+1])
+        mask = (all_phases_expanded >= phase_bins[i]) & (all_phases_expanded < phase_bins[i+1])
         if mask.sum() > 0:
             bin_error = np.mean(all_errors_flat[mask])
             print(f"Phase [{phase_bins[i]:.1f}-{phase_bins[i+1]:.1f}): Mean Error = {bin_error:.4f} ({mask.sum()} points)")
@@ -240,7 +241,7 @@ def analyze_errors():
     phase_centers = (phase_bins[:-1] + phase_bins[1:]) / 2
     bin_errors = []
     for i in range(len(phase_bins) - 1):
-        mask = (all_phases_flat >= phase_bins[i]) & (all_phases_flat < phase_bins[i+1])
+        mask = (all_phases_expanded >= phase_bins[i]) & (all_phases_expanded < phase_bins[i+1])
         if mask.sum() > 0:
             bin_errors.append(np.mean(all_errors_flat[mask]))
         else:
