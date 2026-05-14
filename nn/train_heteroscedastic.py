@@ -165,6 +165,11 @@ def gaussian_nll_loss(pred_mean, pred_logvar, target, component_weights=None):
     
     L = 0.5 * (log(var) + (y - mu)^2 / var)
     
+    IMPORTANT: Loss CAN BE NEGATIVE!
+    When logvar < 0 (high confidence, low variance) and error is small,
+    the term (y-mu)^2/var dominates and loss becomes negative.
+    This is fine - it means "model was confident and mostly correct".
+    
     Args:
         pred_mean: Predicted mean [batch, time, components]
         pred_logvar: Predicted log-variance [batch, time, components]
@@ -282,7 +287,7 @@ def train_heteroscedastic(epochs=150, batch_size=2, learning_rate=1e-3):
             ic = batch['initial_conditions'].to(device)
             time = batch['time'].to(device)
             target_traj = batch['trajectory'].to(device)
-            phase_target = batch['phase'].to(device) if 'phase' in batch else None
+            phase_target = batch['phases'].to(device) if 'phases' in batch else None
             params = batch['parameters'].to(device)
             
             optimizer.zero_grad()
@@ -326,7 +331,7 @@ def train_heteroscedastic(epochs=150, batch_size=2, learning_rate=1e-3):
                 ic = batch['initial_conditions'].to(device)
                 time = batch['time'].to(device)
                 target_traj = batch['trajectory'].to(device)
-                phase_target = batch['phase'].to(device) if 'phase' in batch else None
+                phase_target = batch['phases'].to(device) if 'phases' in batch else None
                 params = batch['parameters'].to(device)
                 
                 output = model(ic, time, params)

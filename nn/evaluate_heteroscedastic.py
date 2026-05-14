@@ -132,7 +132,7 @@ def evaluate_models():
             ic = batch['initial_conditions'].to(device)
             time = batch['time'].to(device)
             target = batch['trajectory'].to(device)
-            phase_target = batch['phase'].to(device) if 'phase' in batch else None
+            phase_target = batch['phases'].to(device) if 'phases' in batch else None
             params = batch['parameters'].to(device)
             
             # Simple baseline prediction
