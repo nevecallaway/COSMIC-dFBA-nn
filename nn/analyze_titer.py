@@ -36,8 +36,8 @@ def analyze_titer():
         print("Error: data_2.csv not found")
         sys.exit(1)
     
-    # Skip the units row (row 1)
-    df = pd.read_csv(data_file, skiprows=1)
+    # Skip the units row (row 1, keeping row 0 as header)
+    df = pd.read_csv(data_file, skiprows=[1])
     
     # Get unique reactors (filter out NaN)
     reactors = sorted([r for r in df['Vessel'].unique() if pd.notna(r)])
