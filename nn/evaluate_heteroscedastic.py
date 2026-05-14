@@ -21,6 +21,16 @@ except ImportError as e:
     sys.exit(1)
 
 
+# Component weights (same as training)
+COMPONENT_WEIGHTS = torch.tensor([
+    1.0 / 0.0898,   # Cell Density
+    1.0 / 0.0558,   # Glucose (protect this!)
+    1.0 / 0.0592,   # Lactate
+    1.0 / 0.1218,   # Titer
+])
+COMPONENT_WEIGHTS = COMPONENT_WEIGHTS / COMPONENT_WEIGHTS.sum() * 4
+
+
 def calculate_metrics(y_true, y_pred):
     """Calculate standard metrics."""
     mse = np.mean((y_pred - y_true) ** 2)

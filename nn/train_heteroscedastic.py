@@ -155,9 +155,9 @@ class HeteroscedasticMultiTask(nn.Module):
         }
 
 
-def gaussian_nll_loss(pred_mean, pred_logvar, target):
+def gaussian_nll_loss(pred_mean, pred_logvar, target, component_weights=None):
     """
-    Gaussian Negative Log-Likelihood loss.
+    Gaussian Negative Log-Likelihood loss with optional component weighting.
     
     The model learns to predict not just the mean, but also the variance.
     This naturally learns uncertainty: high variance in uncertain regions,
@@ -169,6 +169,7 @@ def gaussian_nll_loss(pred_mean, pred_logvar, target):
         pred_mean: Predicted mean [batch, time, components]
         pred_logvar: Predicted log-variance [batch, time, components]
         target: Ground truth [batch, time, components]
+        component_weights: [components] weights (default: uniform)
     
     Returns:
         Scalar loss
@@ -176,6 +177,12 @@ def gaussian_nll_loss(pred_mean, pred_logvar, target):
     precision = torch.exp(-pred_logvar)  # 1 / variance
     mse = (target - pred_mean) ** 2
     loss = 0.5 * (pred_logvar + mse * precision)
+    
+    # Apply component weights if provided
+    if component_weights is not None:
+        weights = torch.tensor(component_weights, device=loss.device, dtype=loss.dtype)
+        loss = loss * weights.unsqueeze(0).unsqueeze(0)
+    
     return loss.mean()
 
 
@@ -186,6 +193,23 @@ def train_heteroscedastic(epochs=150, batch_size=2, learning_rate=1e-3):
     print("HETEROSCEDASTIC MULTI-TASK MODEL")
     print("Tasks: Phase prediction + Concentration prediction with uncertainty")
     print(f"{'='*70}\n")
+    
+    # Component importance weights (based on simple baseline MSE)
+    # Inverse of baseline MSE: easier components get higher weight
+    # This prevents the model from giving up on easy targets like Glucose
+    component_weights = torch.tensor([
+        1.0 / 0.0898,   # Cell Density: harder
+        1.0 / 0.0558,   # Glucose: easy (SHOULD BE PROTECTED)
+        1.0 / 0.0592,   # Lactate: medium
+        1.0 / 0.1218,   # Titer: hardest (focus here)
+    ])
+    component_weights = component_weights / component_weights.sum() * 4  # Normalize
+    
+    print(f"Component weights (to prevent abandoning easy targets):")
+    for i, (name, w) in enumerate(zip(['Cell Density', 'Glucose', 'Lactate', 'Titer'], 
+                                        component_weights.numpy())):
+        print(f"  {name:15s}: {w:.4f}")
+    print()
     
     # Load data
     possible_paths = [
@@ -269,7 +293,8 @@ def train_heteroscedastic(epochs=150, batch_size=2, learning_rate=1e-3):
             pred_phases = output['phases']
             
             # Concentration loss (Gaussian NLL)
-            conc_loss = gaussian_nll_loss(pred_means, pred_logvars, target_traj)
+            conc_loss = gaussian_nll_loss(pred_means, pred_logvars, target_traj, 
+                                         component_weights=component_weights)
             
             # Phase loss (MSE)
             if phase_target is not None:
@@ -309,7 +334,8 @@ def train_heteroscedastic(epochs=150, batch_size=2, learning_rate=1e-3):
                 pred_logvars = output['log_variances']
                 pred_phases = output['phases']
                 
-                conc_loss = gaussian_nll_loss(pred_means, pred_logvars, target_traj)
+                conc_loss = gaussian_nll_loss(pred_means, pred_logvars, target_traj,
+                                             component_weights=component_weights)
                 
                 if phase_target is not None:
                     phase_loss = phase_criterion(pred_phases, phase_target)
