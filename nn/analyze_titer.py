@@ -38,8 +38,8 @@ def analyze_titer():
     
     df = pd.read_csv(data_file)
     
-    # Get unique reactors
-    reactors = sorted(df['Vessel'].unique())
+    # Get unique reactors (filter out NaN)
+    reactors = sorted([r for r in df['Vessel'].unique() if pd.notna(r)])
     print(f"\n{'='*80}")
     print("TITER DEEP-DIVE ANALYSIS")
     print(f"{'='*80}\n")
