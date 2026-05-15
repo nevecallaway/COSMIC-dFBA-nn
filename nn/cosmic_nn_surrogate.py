@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import json
 from typing import Dict, List, Tuple, Optional
+from nn.diagnostics import ModelDiagnostics
 
 
 def dfba_collate_fn(batch):
@@ -156,40 +157,48 @@ class DynamicsEncoder(nn.Module):
 
 class StateWeightingLayer(nn.Module):
     """
-    Predicts phase classification: growth (class 0) vs production (class 1).
-    Outputs logits for binary classification with cross-entropy loss.
+    Hybrid Phase Classifier: Predicts growth (class 0) vs production (class 1)
+    based on current metabolite concentrations and latent state.
     """
-    def __init__(self, latent_dim=64):
+    def __init__(self, n_components, latent_dim=64):
         super().__init__()
+        self.n_components = n_components
+
+        # Learns a "trigger weight" for each component
+        # This is like learning which metabolite's depletion triggers the phase shift
+        self.trigger_weights = nn.Parameter(torch.randn(n_components, 1))
+        self.bias = nn.Parameter(torch.zeros(1))
+
         self.mlp = nn.Sequential(
             nn.Linear(latent_dim, 64),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, 2),  # Output 2 logits: [growth_logit, production_logit]
+            nn.Linear(64, 1), # Output a shift factor
         )
-    
-    def forward(self, latent_state, time_points):
+
+    def forward(self, latent_state, concentrations):
         """
         Args:
             latent_state: (batch_size, latent_dim)
-            time_points: (batch_size, n_timepoints)
-        
+            concentrations: (batch_size, n_timepoints, n_components)
         Returns:
-            phase_logits: (batch_size, n_timepoints, 2) - logits for 2 classes
+            phase_logits: (batch_size, n_timepoints, 2)
         """
-        batch_size = latent_state.shape[0]
-        n_timepoints = time_points.shape[1]
-        
-        # Expand latent state across time
-        latent_expanded = latent_state.unsqueeze(1).expand(-1, n_timepoints, -1)
-        
-        # Combine with normalized time as context
-        time_expanded = time_points.unsqueeze(-1)
-        combined = latent_expanded + time_expanded * 0.1  # Mix in temporal context
-        
-        # Predict phase logits (raw, before softmax)
-        phase_logits = self.mlp(combined)  # Shape: (batch, time, 2)
-        return phase_logits
+        batch_size, n_timepoints, _ = concentrations.shape
+
+        # 1. Concentration-based trigger: C * W + b
+        # (batch, time, comp) @ (comp, 1) -> (batch, time, 1)
+        trigger = torch.matmul(concentrations, self.trigger_weights) + self.bias
+
+        # 2. Latent state modulation (adjusts the trigger threshold based on the simulation context)
+        modulation = self.mlp(latent_state).unsqueeze(1) # (batch, 1, 1)
+
+        # Combine trigger and modulation
+        w = trigger + modulation
+
+        # Return as logits for [growth, production]
+        # We treat 'w' as the logit for production phase
+        logits = torch.cat([-w, w], dim=-1)
+        return logits
 
 
 class RatePredictionHead(nn.Module):
@@ -319,11 +328,11 @@ class MultiHeadTemporalDecoder(nn.Module):
         # Shared attention
         self.attention = nn.MultiheadAttention(latent_dim, n_heads, batch_first=True)
 
-        # HEAD 1: Differentiable Integrator (Replaces direct concentration decoder)
+        # HEAD 1: Differentiable Integrator
         self.integrator = DifferentiableIntegrator()
 
-        # HEAD 2: State weighting layer
-        self.state_weighting = StateWeightingLayer(latent_dim)
+        # HEAD 2: State weighting layer (now takes components as input)
+        self.state_weighting = StateWeightingLayer(n_components, latent_dim)
 
         # HEAD 3: Rate prediction
         self.rate_predictor = RatePredictionHead(n_components, latent_dim, n_heads)
@@ -338,7 +347,7 @@ class MultiHeadTemporalDecoder(nn.Module):
         Returns:
             Dict with keys:
             - 'concentrations': (batch_size, n_timepoints, n_components)
-            - 'phase_weights': (batch_size, n_timepoints, 2) - raw logits
+            - 'phase_weights': (batch_size, n_timepoints, 2)
             - 'growth_rates': (batch_size, n_timepoints, n_components)
             - 'prod_rates': (batch_size, n_timepoints, n_components)
         """
@@ -352,22 +361,31 @@ class MultiHeadTemporalDecoder(nn.Module):
         attn_out, _ = self.attention(time_embedded, latent_expanded, latent_expanded)
         combined = torch.cat([latent_expanded, attn_out], dim=-1)
 
-        # 1. Predict phase and rates
-        phase_logits = self.state_weighting(latent_state, time_points)
+        # 1. Predict raw rates
         growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
 
-        # 2. Compute blended rates: v_blend = (1-f)*v_g + f*v_p
-        # Convert logits to probability f (softmax over [growth, prod])
+        # 2. Initial Phase Estimate (start with growth)
+        # We need an initial concentration to start the integration
+        # For the first iteration, we assume a simple linear blend or 100% growth
+        f_initial = torch.zeros(batch_size, n_timepoints, 1, device=latent_state.device)
+        blended_rates_initial = (1 - f_initial) * growth_rates + f_initial * prod_rates
+
+        # 3. Integrate to get concentrations
+        concentrations = self.integrator(initial_conditions, blended_rates_initial, time_points)
+
+        # 4. Hybrid Phase Trigger: Use concentrations to refine phase weights
+        phase_logits = self.state_weighting(latent_state, concentrations)
+
+        # 5. Final blended rates (for reporting/loss)
         phase_probs = torch.softmax(phase_logits, dim=-1)
-        f = phase_probs[:, :, 1 : 2] # Probability of production phase (index 1)
+        f_final = phase_probs[:, :, 1 : 2]
+        final_blended_rates = (1 - f_final) * growth_rates + f_final * prod_rates
 
-        blended_rates = (1 - f) * growth_rates + f * prod_rates
-
-        # 3. Integrate rates to get concentrations
-        concentrations = self.integrator(initial_conditions, blended_rates, time_points)
+        # Re-integrate one last time with the refined phase for the actual output
+        final_concentrations = self.integrator(initial_conditions, final_blended_rates, time_points)
 
         return {
-            'concentrations': concentrations,
+            'concentrations': final_concentrations,
             'phase_weights': phase_logits,
             'growth_rates': growth_rates,
             'prod_rates': prod_rates,
@@ -714,51 +732,82 @@ class TrainingManager:
         return epoch_loss
     
     def validate(self, val_loader):
-        """Validate model."""
+        """Validate model and return a comprehensive diagnostic report."""
         self.model.eval()
         val_loss = 0.0
-        
+
+        all_targets = []
+        all_preds = []
+        all_phase_targets = []
+        all_phase_preds = []
+
         with torch.no_grad():
             for batch in val_loader:
                 ic = batch['initial_conditions'].to(self.device)
                 time = batch['time'].to(self.device)
                 params = batch['parameters'].to(self.device)
                 target = batch['trajectory'].to(self.device)
-                
+
                 pred = self.model(ic, time, params)
-                
+
                 # Compute loss
                 if self.model_type == 'enhanced' and isinstance(pred, dict):
                     loss = self._compute_enhanced_loss(pred, target)
+
+                    # Collect data for diagnostics
+                    all_targets.append(target.cpu().numpy())
+                    all_preds.append(pred['concentrations'].cpu().numpy())
+
+                    if 'phases' in batch:
+                        all_phase_targets.append(batch['phases'].cpu().numpy())
+                        all_phase_preds.append(pred['phase_weights'].cpu().numpy())
                 else:
                     loss = nn.functional.mse_loss(pred, target)
-                    
+
                 val_loss += loss.item()
-        
+
         val_loss /= len(val_loader)
-        return val_loss
+
+        # Generate Diagnostic Report
+        report = {"val_loss": val_loss}
+        if all_targets:
+            y_true = np.concatenate(all_targets, axis=0)
+            y_pred = np.concatenate(all_preds, axis=0)
+            report["metrics"] = ModelDiagnostics.calculate_regression_metrics(y_true, y_pred)
+
+            if all_phase_targets:
+                p_true = np.concatenate(all_phase_targets, axis=0)
+                p_pred = np.concatenate(all_phase_preds, axis=0)
+                report["phase_metrics"] = ModelDiagnostics.calculate_phase_metrics(p_true, p_pred)
+
+        return report
     
     def train(self, train_loader, val_loader, epochs=100, patience=20):
         """Full training loop with early stopping."""
         best_val_loss = float('inf')
         patience_counter = 0
-        
+
         for epoch in range(epochs):
             train_loss = self.train_epoch(train_loader)
-            val_loss = self.validate(val_loader)
-            
+            report = self.validate(val_loader)
+            val_loss = report["val_loss"]
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
                 print(f"Epoch {epoch+1}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f} (BEST)")
+                if "metrics" in report:
+                    print(f"  -> R2: {report['metrics']['global_r2']:.4f}, MAPE: {report['metrics']['global_mape']:.4f}")
+                if "phase_metrics" in report:
+                    print(f"  -> Phase F1: {report['phase_metrics']['phase_f1']:.4f}")
             else:
                 patience_counter += 1
                 print(f"Epoch {epoch+1}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
-            
+
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch+1}")
                 break
-        
+
         return best_val_loss
     
     def save(self, path):
