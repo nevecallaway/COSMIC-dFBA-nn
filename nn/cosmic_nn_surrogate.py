@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import json
 from typing import Dict, List, Tuple, Optional
-from nn.diagnostics import ModelDiagnostics
+from diagnostics import ModelDiagnostics
 
 
 def dfba_collate_fn(batch):
