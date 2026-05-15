@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Production training script for supercomputer - Enhanced COSMIC-dFBA model"""
 import sys
-from nn.cosmic_nn_surrogate import (
+from cosmic_nn_surrogate import (
     CosmicNNSurrogateEnhanced, CosmicNNSurrogate, 
     TrainingManager, dFBADataset, dfba_collate_fn
 )
