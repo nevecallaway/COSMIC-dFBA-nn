@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from nn.cosmic_nn_surrogate import DifferentiableIntegrator
+from cosmic_nn_surrogate import DifferentiableIntegrator
 
 def test_integrator():
     integrator = DifferentiableIntegrator()
