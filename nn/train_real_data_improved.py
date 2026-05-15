@@ -1,307 +1,317 @@
 #!/usr/bin/env python3
 """
-Improved training for COSMIC-dFBA on real data.
-Fixes learned from failure: adds IC constraint, bistability penalty, and non-flatness penalty.
+Master Training Script for COSMIC-dFBA
+Combines real-data (CSV) and production (NPZ) loading with Physics-Informed (PINN) losses.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
 from pathlib import Path
 import sys
 import time
 import os
-
-print(f"Current directory: {os.getcwd()}")
+import json
 
 try:
     from cosmic_nn_surrogate import (
         CosmicNNSurrogateEnhanced, dFBADataset, dfba_collate_fn
     )
-    from load_real_data import load_experimental_data, analyze_phase_transitions
-    from torch.utils.data import DataLoader, random_split
-    import torch.optim as optim
+    from load_real_data import load_experimental_data
+    from diagnostics import ModelDiagnostics
     IMPORTS_OK = True
 except ImportError as e:
     print(f"✗ Import error: {e}")
     sys.exit(1)
 
-
-class ImprovedTrainer:
-    """Enhanced trainer with real-data-aware losses."""
-    
-    def __init__(self, model, device, learning_rate=1e-3):
-        self.model = model
+class MasterTrainer:
+    """
+    Unified trainer for COSMIC-dFBA that combines Binary Phase Classification
+    with Physics-Informed Neural Network (PINN) constraints.
+    """
+    def __init__(self, model, device, learning_rate=5e-4):
+        self.model = model.to(device)
         self.device = device
-        self.optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='min', factor=0.5, patience=5
         )
         self.losses = []
-    
-    def compute_improved_loss(self, predictions, targets, ics, phases_batch=None, debug=False):
+
+    def compute_fused_loss(self, predictions, targets, ics, phases_batch=None):
         """
-        Enhanced loss function with binary phase classification:
-        1. Concentration MSE (main)
-        2. IC constraint (first prediction ≈ IC)
-        3. Non-flatness penalty (encourage dynamics)
-        4. Phase classification loss (cross-entropy with binary targets)
+        Combines binary phase classification, IC constraints, and PINN physics.
         """
         conc_pred = predictions['concentrations']
-        phase_logits = predictions['phase_weights']  # Now logits, not sigmoid outputs
-        
-        # Loss 1: Main concentration loss
+        phase_logits = predictions['phase_weights']
+        growth_rates = predictions['growth_rates']
+        prod_rates = predictions['prod_rates']
+
+        # 1. Main Concentration MSE
         conc_loss = nn.functional.mse_loss(conc_pred, targets)
-        
-        # Loss 2: IC constraint - first timepoint should match initial conditions
-        ic_error = torch.mean((conc_pred[:, 0, :] - ics) ** 2)
-        ic_loss = 0.1 * ic_error
-        
-        # Loss 3: Non-flatness penalty - penalize constant predictions
-        conc_variance = torch.var(conc_pred, dim=1)  # Shape: (batch, n_components)
+
+        # 2. IC constraint (first prediction should match IC)
+        ic_loss = 0.1 * torch.mean((conc_pred[:, 0, :] - ics) ** 2)
+
+        # 3. Non-flatness penalty (encourage dynamics)
+        conc_variance = torch.var(conc_pred, dim=1)
         flatness_penalty = 0.05 * torch.mean(1.0 / (1.0 + conc_variance))
-        
-        # Loss 4: Phase classification with binary cross-entropy
-        # phases_batch shape: (batch_size, n_timepoints) - ground truth phase fractions
+
+        # 4. PINN: Non-negativity penalty
+        non_neg_loss = 0.5 * torch.mean(torch.clamp(conc_pred, max=0)**2)
+
+        # 5. PINN: Concentration Smoothness
+        conc_smoothness = 0.1 * torch.mean((conc_pred[:, 1:, :] - conc_pred[:, :-1, :]) ** 2)
+
+        # 6. Binary Phase Classification (with masking)
+        phase_loss = torch.tensor(0.0, device=targets.device)
         if phases_batch is not None:
-            if debug:
-                print(f"\n[DEBUG] phases_batch shape: {phases_batch.shape}")
-                print(f"[DEBUG] phases_batch min/max: {phases_batch.min():.4f} / {phases_batch.max():.4f}")
-                print(f"[DEBUG] phases_batch values sample: {phases_batch[0, :5]}")
-            
-            batch_size = phases_batch.shape[0]
-            n_time = phases_batch.shape[1]
-            
-            # Classify: <0.2 = growth (0), >0.8 = production (1)
-            # Ambiguous middle (0.2-0.8) = ignore (masked)
+            batch_size, n_time = phases_batch.shape
             phase_targets = torch.zeros((batch_size, n_time), dtype=torch.long, device=phases_batch.device)
             mask = torch.zeros((batch_size, n_time), dtype=torch.bool, device=phases_batch.device)
-            
+
             for b in range(batch_size):
                 for t in range(n_time):
                     p = phases_batch[b, t].item()
                     if p < 0.2:
-                        phase_targets[b, t] = 0  # Growth
+                        phase_targets[b, t] = 0
                         mask[b, t] = True
                     elif p > 0.8:
-                        phase_targets[b, t] = 1  # Production
+                        phase_targets[b, t] = 1
                         mask[b, t] = True
-                    # else: mask = False (ignore transition zone)
-            
-            if debug:
-                print(f"[DEBUG] Phase distribution: <0.2={(phases_batch < 0.2).sum().item()}, 0.2-0.8={((phases_batch >= 0.2) & (phases_batch <= 0.8)).sum().item()}, >0.8={(phases_batch > 0.8).sum().item()}")
-                print(f"[DEBUG] mask sum (classified): {mask.sum().item()} / {batch_size * n_time}")
-                print(f"[DEBUG] growth targets: {(phase_targets == 0).sum().item()}, prod targets: {(phase_targets == 1).sum().item()}")
-            
-            # Reshape phase_logits: (batch, time, 2) -> (batch*time, 2)
+
             phase_logits_flat = phase_logits.view(-1, 2)
             phase_targets_flat = phase_targets.view(-1)
             mask_flat = mask.view(-1)
-            
-            # Apply mask and compute cross-entropy only on clear phase regions
+
             if mask_flat.sum() > 0:
-                phase_loss = nn.functional.cross_entropy(
+                phase_loss = 0.1 * nn.functional.cross_entropy(
                     phase_logits_flat[mask_flat],
                     phase_targets_flat[mask_flat]
                 )
-                phase_loss = 0.1 * phase_loss  # Weight: 0.1× (reduced from 0.5)
-            else:
-                phase_loss = torch.tensor(0.0, device=targets.device)
-                if debug:
-                    print("[DEBUG] WARNING: No classified phases (all in transition zone)")
-        else:
-            phase_loss = torch.tensor(0.0, device=targets.device)
-            if debug:
-                print("[DEBUG] phases_batch is None!")
-        
-        # Combined loss
-        total_loss = conc_loss + ic_loss + flatness_penalty + phase_loss
-        
+
+        # 7. PINN: Rate-based constraints
+        phase_probs = torch.softmax(phase_logits, dim=-1)
+        f = phase_probs[:, :, 1 : 2]
+        blended_rates = (1 - f) * growth_rates + f * prod_rates
+
+        rate_smoothness = 0.1 * torch.mean((blended_rates[:, 1:, :] - blended_rates[:, :-1, :]) ** 2)
+        rate_magnitude = 0.01 * (torch.mean(torch.abs(growth_rates)) + torch.mean(torch.abs(prod_rates)))
+
+        # 8. Phase smoothness and exploration penalty
+        phase_smoothness = 0.05 * torch.mean((phase_logits[:, 1:, :] - phase_logits[:, :-1, :]) ** 2)
+        phase_penalty = 0.02 * torch.mean((phase_probs[:, :, 1 : 2] - 0.5) ** 2)
+
+        total_loss = (conc_loss + ic_loss + flatness_penalty + phase_loss +
+                      non_neg_loss + conc_smoothness + rate_smoothness +
+                      rate_magnitude + phase_smoothness + phase_penalty)
+
         return total_loss, {
             'conc': conc_loss.item(),
             'ic': ic_loss.item(),
-            'flatness': flatness_penalty.item(),
             'phase_ce': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
+            'pinn_non_neg': non_neg_loss.item(),
+            'pinn_rate_smooth': rate_smoothness.item(),
         }
-    
-    def train_epoch(self, train_loader, debug=False):
-        """Train for one epoch."""
+
+    def train_epoch(self, train_loader):
         self.model.train()
         epoch_loss = 0.0
-        loss_components = {'conc': 0, 'ic': 0, 'flatness': 0, 'phase_ce': 0}
-        n_batches = 0
-        
-        for batch_idx, batch in enumerate(train_loader):
+        components = {'conc': 0, 'ic': 0, 'phase_ce': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
+
+        for batch in train_loader:
             ic = batch['initial_conditions'].to(self.device)
             time = batch['time'].to(self.device)
             params = batch['parameters'].to(self.device)
             target = batch['trajectory'].to(self.device)
-            
-            # Extract phases from batch if available
-            phases_batch = batch.get('phases', None)
-            if phases_batch is not None:
-                phases_batch = phases_batch.to(self.device)
-            
+            phases = batch.get('phases', None)
+            if phases is not None:
+                phases = phases.to(self.device)
+
             self.optimizer.zero_grad()
-            
-            # Forward pass
             predictions = self.model(ic, time, params)
-            
-            # Compute improved loss - debug only on first batch of first epoch
-            loss, components = self.compute_improved_loss(
-                predictions, target, ic, phases_batch, debug=(batch_idx == 0 and debug)
-            )
+            loss, comp = self.compute_fused_loss(predictions, target, ic, phases)
             loss.backward()
-            
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
-            
+
             epoch_loss += loss.item()
-            for key in loss_components:
-                loss_components[key] += components[key]
-            n_batches += 1
-        
-        epoch_loss /= n_batches
-        for key in loss_components:
-            loss_components[key] /= n_batches
-        
+            for k in components:
+                components[k] += comp.get(k, 0)
+
+        epoch_loss /= len(train_loader)
+        for k in components:
+            components[k] /= len(train_loader)
+
         self.losses.append(epoch_loss)
         self.scheduler.step(epoch_loss)
-        
-        return epoch_loss, loss_components
-    
+        return epoch_loss, components
+
     def validate(self, val_loader):
-        """Validate model."""
         self.model.eval()
         val_loss = 0.0
-        
+        all_targets, all_preds, all_phase_targets, all_phase_preds = [], [], [], []
+
         with torch.no_grad():
             for batch in val_loader:
                 ic = batch['initial_conditions'].to(self.device)
                 time = batch['time'].to(self.device)
                 params = batch['parameters'].to(self.device)
                 target = batch['trajectory'].to(self.device)
-                
+
                 predictions = self.model(ic, time, params)
-                loss, _ = self.compute_improved_loss(predictions, target, ic, None)
+                loss, _ = self.compute_fused_loss(predictions, target, ic, None)
                 val_loss += loss.item()
-        
+
+                all_targets.append(target.cpu().numpy())
+                all_preds.append(predictions['concentrations'].cpu().numpy())
+                if 'phases' in batch:
+                    all_phase_targets.append(batch['phases'].cpu().numpy())
+                    all_phase_preds.append(predictions['phase_weights'].cpu().numpy())
+
         val_loss /= len(val_loader)
-        return val_loss
-    
-    def train(self, train_loader, val_loader, epochs=50, patience=10):
-        """Full training loop."""
+
+        report = {"val_loss": val_loss}
+        if all_targets:
+            y_true = np.concatenate(all_targets, axis=0)
+            y_pred = np.concatenate(all_preds, axis=0)
+            report["metrics"] = ModelDiagnostics.calculate_regression_metrics(y_true, y_pred)
+            if all_phase_targets:
+                p_true = np.concatenate(all_phase_targets, axis=0)
+                p_pred = np.concatenate(all_phase_preds, axis=0)
+                report["phase_metrics"] = ModelDiagnostics.calculate_phase_metrics(p_true, p_pred)
+
+        return report
+
+    def train(self, train_loader, val_loader, epochs=100, patience=20):
         best_val_loss = float('inf')
         patience_counter = 0
-        
+
         for epoch in range(1, epochs + 1):
-            # Debug only on first epoch
-            debug_epoch = (epoch == 1)
-            train_loss, components = self.train_epoch(train_loader, debug=debug_epoch)
-            val_loss = self.validate(val_loader)
-            
+            train_loss, comps = self.train_epoch(train_loader)
+            report = self.validate(val_loader)
+            val_loss = report["val_loss"]
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
+                status = "(BEST)"
             else:
                 patience_counter += 1
-            
+                status = ""
+
             if epoch % 5 == 0 or epoch == 1:
-                print(f"Epoch {epoch:2d}: Loss={train_loss:.6f} | "
-                      f"Val={val_loss:.6f} | "
-                      f"IC={components['ic']:.4f} | "
-                      f"Flat={components['flatness']:.4f} | "
-                      f"Phase_CE={components['phase_ce']:.4f}")
-            
+                metric_str = ""
+                if "metrics" in report:
+                    metric_str = f" | R2: {report['metrics']['global_r2']:.4f}"
+                if "phase_metrics" in report:
+                    metric_str += f" | F1: {report['phase_metrics']['phase_f1']:.4f}"
+
+                print(f"Epoch {epoch:3d}: Train={train_loss:.6f} | Val={val_loss:.6f}{status}{metric_str} "
+                      f"| IC={comps['ic']:.4f} | NonNeg={comps['pinn_non_neg']:.4f}")
+
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch}")
                 break
-        
         return best_val_loss
 
+def load_data(data_path):
+    """Flexible loader for CSV or NPZ data."""
+    p = Path(data_path)
+    if p.is_file() and p.suffix == '.csv':
+        print(f"Loading real experimental data from {p}...")
+        trajectories, time_points, ics, metadata = load_experimental_data(str(p))
+        phases = metadata.get('phases', None)
+        dataset = dFBADataset(trajectories, time_points, ics, parameters={}, normalize=True, phases=phases)
+        return dataset
+
+    elif p.is_dir():
+        print(f"Loading production NPZ data from directory {p}...")
+        npz_files = list(p.glob('*.npz'))
+        if not npz_files:
+            raise FileNotFoundError(f"No .npz files found in {p}")
+
+        all_trajectories, all_times, all_ics = [], [], []
+        for npz_file in npz_files:
+            data = np.load(npz_file, allow_pickle=True)
+            profiles = data['profiles']
+            time = data['time'].flatten() if len(data['time'].shape) > 1 else data['time']
+            all_trajectories.append(profiles)
+            all_times.append(time)
+            all_ics.append(profiles[0, :])
+
+        max_t = max(len(t) for t in all_times)
+        n_sims, n_comps = len(all_trajectories), all_trajectories[0].shape[1]
+        trajectories_padded = np.zeros((n_sims, max_t, n_comps))
+        times_padded = np.zeros((n_sims, max_t))
+        for i, (traj, t) in enumerate(zip(all_trajectories, all_times)):
+            trajectories_padded[i, :len(t), :] = traj
+            times_padded[i, :len(t)] = t
+            if len(t) < max_t:
+                trajectories_padded[i, len(t):, :] = traj[-1, :]
+                times_padded[i, len(t):] = t[-1]
+
+        dataset = dFBADataset(trajectories_padded, times_padded, np.array(all_ics), parameters={}, normalize=True)
+        return dataset
+    else:
+        raise ValueError(f"Unsupported data path: {data_path}. Provide a .csv file or a directory of .npz files.")
 
 def main():
-    """Train improved model on real data."""
-    
     print(f"\n{'='*70}")
-    print("COSMIC-dFBA: Improved Training on Real Data")
+    print("COSMIC-dFBA Master Training")
     print(f"{'='*70}")
-    
-    # Load real data
-    print(f"\nLoading real experimental data...")
-    possible_paths = [
-        Path("data_2.csv"),
-        Path("/content/COSMIC-dFBA-nn/nn/data_2.csv"),
-        Path("/Users/nevecallaway/Downloads/data_2.csv"),
-    ]
-    
-    data_file = None
-    for p in possible_paths:
-        if p.exists():
-            data_file = str(p)
-            break
-    
-    if data_file is None:
-        print(f"Error: data_2.csv not found")
-        sys.exit(1)
-    
-    trajectories, time_points, ics, metadata = load_experimental_data(data_file)
-    phases = metadata['phases']  # Extract ground truth phases
-    
-    # Create dataset WITH phases
-    dataset = dFBADataset(trajectories, time_points, ics, parameters={}, normalize=True, phases=phases)
-    
-    # Split: 7 train, 3 val
+
+    # Configuration
+    DATA_PATH = "nn/data_2.csv" # Default
+    LATENT_DIM = 64
+    N_HEADS = 4
+    LR = 5e-4
+    EPOCHS = 100
+    PATIENCE = 20
+
+    try:
+        dataset = load_data(DATA_PATH)
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        return
+
+    # Split: 70/30
     train_size = int(0.7 * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, 
-                             num_workers=0, collate_fn=dfba_collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, 
-                           num_workers=0, collate_fn=dfba_collate_fn)
-    
-    print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
-    print(f"Phase data shape: {phases.shape}")
-    
-    # Create model
+
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, collate_fn=dfba_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, collate_fn=dfba_collate_fn)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
-    
+    print(f"Device: {device} | Samples: Train={len(train_dataset)}, Val={len(val_dataset)}")
+
     model = CosmicNNSurrogateEnhanced(
         n_components=dataset.n_components,
         n_params=0,
-        latent_dim=32,
-        n_heads=2
+        latent_dim=LATENT_DIM,
+        n_heads=N_HEADS
     )
-    
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    
-    # Train with improved losses
-    print(f"\n{'='*70}")
-    print("Training with Binary Phase Classification")
-    print(f"{'='*70}")
-    print("Loss components:")
-    print("  - Concentration MSE (main)")
-    print("  - IC constraint (0.1× weight)")
-    print("  - Non-flatness penalty (0.05×)")
-    print("  - Phase binary cross-entropy (0.5× weight) ← NEW")
-    print("  - Classification: <0.2=growth(0), >0.8=production(1)")
-    
-    trainer = ImprovedTrainer(model, device, learning_rate=5e-4)
-    
+
+    trainer = MasterTrainer(model, device, learning_rate=LR)
+
     start_time = time.time()
-    best_val_loss = trainer.train(train_loader, val_loader, epochs=100, patience=20)
+    best_val_loss = trainer.train(train_loader, val_loader, epochs=EPOCHS, patience=PATIENCE)
     elapsed = time.time() - start_time
-    
+
     print(f"\n✓ Training complete in {elapsed:.1f}s")
     print(f"✓ Best validation loss: {best_val_loss:.6f}")
-    
-    # Save model
-    torch.save(model.state_dict(), 'improved_model.pt')
-    print(f"✓ Model saved: improved_model.pt")
 
+    # Save as comprehensive checkpoint
+    torch.save({
+        'model_state': model.state_dict(),
+        'model_type': 'enhanced',
+        'hyperparams': {'latent_dim': LATENT_DIM, 'n_heads': N_HEADS, 'n_components': dataset.n_components},
+        'best_val_loss': best_val_loss,
+    }, 'improved_model.pt')
+    print(f"✓ Model saved: improved_model.pt")
 
 if __name__ == "__main__":
     main()

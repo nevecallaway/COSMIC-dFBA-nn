@@ -28,19 +28,25 @@ def run_comprehensive_audit(model_path, dataset, test_cases):
     print(f"{'='*70}")
 
     # 1. Load Model
+    checkpoint = torch.load(model_path, map_location=device)
+
+    # Handle full-checkpoint vs state_dict
+    if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
+        state_dict = checkpoint['model_state']
+        # Use hyperparameters from checkpoint if available, else use defaults
+        hparams = checkpoint.get('hyperparams', {'latent_dim': 64, 'n_heads': 4, 'n_components': dataset.n_components})
+    else:
+        state_dict = checkpoint
+        hparams = {'latent_dim': 64, 'n_heads': 4, 'n_components': dataset.n_components}
+
     model = CosmicNNSurrogateEnhanced(
-        n_components=dataset.n_components,
-        n_params=0, # Update if your training used parameters
-        latent_dim=64,
-        n_heads=4
+        n_components=hparams['n_components'],
+        n_params=0,
+        latent_dim=hparams['latent_dim'],
+        n_heads=hparams['n_heads']
     ).to(device)
 
-    checkpoint = torch.load(model_path, map_location=device)
-    # Handle both state_dict and full-checkpoint formats
-    if 'model_state' in checkpoint:
-        model.load_state_dict(checkpoint['model_state'])
-    else:
-        model.load_state_dict(checkpoint)
+    model.load_state_dict(state_dict)
 
     predictor = PredictionInterface(model, dataset, device=device, model_type='enhanced')
 
