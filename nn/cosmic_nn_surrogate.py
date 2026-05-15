@@ -260,11 +260,47 @@ class RatePredictionHead(nn.Module):
         return growth_rates, prod_rates
 
 
+class DifferentiableIntegrator(nn.Module):
+    """
+    Performs differentiable Euler integration of metabolic rates to predict concentrations.
+    Formula: C(t) = C_0 + sum(v_blend * dt)
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, initial_conditions, blended_rates, time_points):
+        """
+        Args:
+            initial_conditions: (batch_size, n_components)
+            blended_rates: (batch_size, n_timepoints, n_components)
+            time_points: (batch_size, n_timepoints)
+        Returns:
+            concentrations: (batch_size, n_timepoints, n_components)
+        """
+        batch_size, n_timepoints, n_components = blended_rates.shape
+
+        # Compute time steps dt. Handle case with only 1 timepoint.
+        if n_timepoints > 1:
+            # diff returns (batch, n_timepoints-1)
+            dt = torch.diff(time_points, dim=1).unsqueeze(-1)
+            # Prepend 0 for the initial state C(0) = C_0
+            dt = torch.cat([torch.zeros(batch_size, 1, 1, device=dt.device), dt], dim=1)
+        else:
+            dt = torch.zeros(batch_size, 1, 1, device=blended_rates.device)
+
+        # Integration: C = C_0 + integral(v dt)
+        # We use cumulative sum of (rate * dt) as a differentiable Euler approximation
+        integrand = blended_rates * dt
+        concentrations = initial_conditions.unsqueeze(1) + torch.cumsum(integrand, dim=1)
+
+        return concentrations
+
+
 class MultiHeadTemporalDecoder(nn.Module):
     """
     Enhanced decoder with multiple prediction heads for COSMIC-dFBA compliance.
     Outputs:
-    - Metabolite concentrations (all components)
+    - Metabolite concentrations (via differentiable integration of rates)
     - Phase transition weights
     - Uptake/secretion rates per metabolic state
     """
@@ -272,66 +308,67 @@ class MultiHeadTemporalDecoder(nn.Module):
         super().__init__()
         self.n_components = n_components
         self.latent_dim = latent_dim
-        
+
         # Shared time embedding
         self.time_embed = nn.Sequential(
             nn.Linear(1, 32),
             nn.ReLU(),
             nn.Linear(32, latent_dim),
         )
-        
+
         # Shared attention
         self.attention = nn.MultiheadAttention(latent_dim, n_heads, batch_first=True)
-        
-        # HEAD 1: Concentration predictions (main output)
-        self.concentration_decoder = nn.Sequential(
-            nn.Linear(latent_dim * 2, 256),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, n_components),
-            nn.Sigmoid()  # Normalized to [0,1]
-        )
-        
+
+        # HEAD 1: Differentiable Integrator (Replaces direct concentration decoder)
+        self.integrator = DifferentiableIntegrator()
+
         # HEAD 2: State weighting layer
         self.state_weighting = StateWeightingLayer(latent_dim)
-        
+
         # HEAD 3: Rate prediction
         self.rate_predictor = RatePredictionHead(n_components, latent_dim, n_heads)
-    
-    def forward(self, latent_state, time_points):
+
+    def forward(self, latent_state, time_points, initial_conditions):
         """
         Args:
             latent_state: (batch_size, latent_dim)
             time_points: (batch_size, n_timepoints)
-        
+            initial_conditions: (batch_size, n_components)
+
         Returns:
             Dict with keys:
             - 'concentrations': (batch_size, n_timepoints, n_components)
-            - 'phase_weights': (batch_size, n_timepoints, 1) - growth phase weight
+            - 'phase_weights': (batch_size, n_timepoints, 2) - raw logits
             - 'growth_rates': (batch_size, n_timepoints, n_components)
             - 'prod_rates': (batch_size, n_timepoints, n_components)
         """
         batch_size = latent_state.shape[0]
         n_timepoints = time_points.shape[1]
-        
+
         # Shared temporal embedding
         time_expanded = time_points.unsqueeze(-1)
         time_embedded = self.time_embed(time_expanded)
         latent_expanded = latent_state.unsqueeze(1).expand(-1, n_timepoints, -1)
         attn_out, _ = self.attention(time_embedded, latent_expanded, latent_expanded)
         combined = torch.cat([latent_expanded, attn_out], dim=-1)
-        
-        # Generate outputs from each head
-        concentrations = self.concentration_decoder(combined)
-        phase_weights = self.state_weighting(latent_state, time_points)
+
+        # 1. Predict phase and rates
+        phase_logits = self.state_weighting(latent_state, time_points)
         growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
-        
+
+        # 2. Compute blended rates: v_blend = (1-f)*v_g + f*v_p
+        # Convert logits to probability f (softmax over [growth, prod])
+        phase_probs = torch.softmax(phase_logits, dim=-1)
+        f = phase_probs[:, :, 1 : 2] # Probability of production phase (index 1)
+
+        blended_rates = (1 - f) * growth_rates + f * prod_rates
+
+        # 3. Integrate rates to get concentrations
+        concentrations = self.integrator(initial_conditions, blended_rates, time_points)
+
         return {
             'concentrations': concentrations,
-            'phase_weights': phase_weights,
+            'phase_weights': phase_logits,
             'growth_rates': growth_rates,
             'prod_rates': prod_rates,
         }
@@ -506,16 +543,16 @@ class CosmicNNSurrogateEnhanced(nn.Module):
             initial_conditions: (batch_size, n_components)
             time_points: (batch_size, n_timepoints)
             parameters: (batch_size, n_params)
-        
+
         Returns:
             Dict with keys:
             - 'concentrations': (batch_size, n_timepoints, n_components)
-            - 'phase_weights': (batch_size, n_timepoints, 1)
+            - 'phase_weights': (batch_size, n_timepoints, 2)
             - 'growth_rates': (batch_size, n_timepoints, n_components)
             - 'prod_rates': (batch_size, n_timepoints, n_components)
         """
         latent = self.encoder(initial_conditions, parameters)
-        outputs = self.decoder(latent, time_points)
+        outputs = self.decoder(latent, time_points, initial_conditions)
         return outputs
 
 
@@ -603,31 +640,45 @@ class TrainingManager:
         phase_weights = pred_dict['phase_weights']
         growth_rates = pred_dict['growth_rates']
         prod_rates = pred_dict['prod_rates']
-        
-        # Concentration MSE (main loss)
+
+        # 1. Concentration MSE (main loss)
         conc_loss = nn.functional.mse_loss(conc, target)
-        
-        # Smoothness regularization on concentrations
+
+        # 2. Smoothness regularization on concentrations (avoid jitter)
         conc_smoothness = torch.mean((conc[:, 1:, :] - conc[:, :-1, :]) ** 2)
-        
-        # Smoothness on phase weights (avoid discontinuous transitions)
+
+        # 3. Non-negativity penalty (PINN: Concentrations cannot be negative)
+        # Penalize values below 0. Since we integrated, this prevents rates from
+        # driving the system into negative space.
+        non_negativity_penalty = torch.mean(torch.clamp(conc, max=0)**2)
+
+        # 4. Smoothness on phase weights (avoid discontinuous transitions)
         phase_smoothness = torch.mean((phase_weights[:, 1:, :] - phase_weights[:, :-1, :]) ** 2)
-        
-        # Rate consistency (rates shouldn't be too extreme)
+
+        # 5. Rate smoothness (PINN: Metabolic fluxes shouldn't jump instantly)
+        # Blend rates to get the actual predicted trajectory flux
+        phase_probs = torch.softmax(phase_weights, dim=-1)
+        f = phase_probs[:, :, 1 : 2]
+        blended_rates = (1 - f) * growth_rates + f * prod_rates
+        rate_smoothness = torch.mean((blended_rates[:, 1:, :] - blended_rates[:, :-1, :]) ** 2)
+
+        # 6. Rate magnitude (keep rates within reasonable bounds)
         rate_magnitude = torch.mean(torch.abs(growth_rates)) + torch.mean(torch.abs(prod_rates))
-        
-        # Phase weights should be in valid range (handled by Sigmoid but still penalize)
-        phase_penalty = torch.mean((phase_weights - 0.5) ** 2)  # Encourage exploration of [0,1]
-        
-        # Combined loss
+
+        # 7. Phase weights exploration penalty
+        phase_penalty = torch.mean((phase_weights - 0.5) ** 2)
+
+        # Combined loss with weighted terms
         total_loss = (
             conc_loss +
             0.1 * conc_smoothness +
+            0.5 * non_negativity_penalty +   # High penalty for negative concentrations
             0.05 * phase_smoothness +
+            0.1 * rate_smoothness +          # Encourage smooth flux transitions
             0.01 * rate_magnitude +
             0.02 * phase_penalty
         )
-        
+
         return total_loss
     
     def train_epoch(self, train_loader):
