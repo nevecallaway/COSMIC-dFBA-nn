@@ -264,7 +264,10 @@ def main():
     print(f"{'='*70}")
 
     # Configuration
-    DATA_PATH = "nn/data_2.csv" # Default
+    # Resolve path relative to the script location to avoid CWD issues
+    script_dir = Path(__file__).parent
+    DATA_PATH = script_dir / "data_2.csv"
+
     LATENT_DIM = 64
     N_HEADS = 4
     LR = 5e-4
@@ -272,7 +275,7 @@ def main():
     PATIENCE = 20
 
     try:
-        dataset = load_data(DATA_PATH)
+        dataset = load_data(str(DATA_PATH))
     except Exception as e:
         print(f"Error loading data: {e}")
         return
