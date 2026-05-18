@@ -348,32 +348,66 @@ def main():
         print(f"\nNo synthetic data at {SYNTH_PATH} — skipping pre-training.")
         print("Run: python generate_synthetic_training.py data_2.csv")
 
-    # --- Phase 2: Fine-tune on real data ---
+    # --- Phase 2: Leave-one-out fine-tuning ---
+    # With only 10 reactors a random 70/30 split gives 3 val samples whose
+    # R2 is dominated by which reactors happen to land there. LOO uses every
+    # reactor as the held-out test once, averaging results across all 10 folds
+    # for a stable metric that isn't luck-of-the-draw.
     print(f"\n{'='*70}")
-    print("Phase 2: Fine-tuning on real data")
+    print("Phase 2: Leave-one-out fine-tuning on real data")
     print(f"{'='*70}")
-    train_size = int(0.7 * len(dataset))
-    val_size   = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True,  collate_fn=dfba_collate_fn)
-    val_loader   = DataLoader(val_dataset,   batch_size=4, shuffle=False, collate_fn=dfba_collate_fn)
-
-    print(f"Device: {device} | Samples: Train={len(train_dataset)}, Val={len(val_dataset)}")
-    trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced')
+    n_reactors  = len(dataset)
+    loo_val_losses, loo_r2s, loo_titer_r2s, loo_f1s = [], [], [], []
+    pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
 
     start_time = time.time()
-    best_val_loss = trainer.train(train_loader, val_loader, epochs=EPOCHS, patience=PATIENCE)
+    for fold in range(n_reactors):
+        # Reset to pre-trained weights for each fold
+        model.load_state_dict(pretrained_state)
+
+        val_indices   = [fold]
+        train_indices = [i for i in range(n_reactors) if i != fold]
+        from torch.utils.data import Subset
+        fold_train = Subset(dataset, train_indices)
+        fold_val   = Subset(dataset, val_indices)
+
+        fold_train_loader = DataLoader(fold_train, batch_size=4, shuffle=True,  collate_fn=dfba_collate_fn)
+        fold_val_loader   = DataLoader(fold_val,   batch_size=1, shuffle=False, collate_fn=dfba_collate_fn)
+
+        fold_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced')
+        best_val = fold_trainer.train(fold_train_loader, fold_val_loader,
+                                      epochs=EPOCHS, patience=PATIENCE)
+        report = fold_trainer.validate(fold_val_loader)
+
+        r2       = report['metrics']['global_r2']          if 'metrics'       in report else float('nan')
+        titer_r2 = report['metrics']['component_r2'].get('comp_5', float('nan')) if 'metrics' in report else float('nan')
+        f1       = report['phase_metrics']['phase_f1']     if 'phase_metrics' in report else float('nan')
+        loo_val_losses.append(best_val)
+        loo_r2s.append(r2)
+        loo_titer_r2s.append(titer_r2)
+        loo_f1s.append(f1)
+        print(f"  Fold {fold+1:2d}/10 (val=reactor {fold}): "
+              f"loss={best_val:.4f} | R2={r2:.4f} | TiterR2={titer_r2:.4f} | F1={f1:.4f}")
+
     elapsed = time.time() - start_time
+    print(f"\n✓ LOO complete in {elapsed:.1f}s")
+    print(f"  Mean val loss : {np.mean(loo_val_losses):.4f} ± {np.std(loo_val_losses):.4f}")
+    print(f"  Mean R2       : {np.mean(loo_r2s):.4f} ± {np.std(loo_r2s):.4f}")
+    print(f"  Mean Titer R2 : {np.mean(loo_titer_r2s):.4f} ± {np.std(loo_titer_r2s):.4f}")
+    print(f"  Mean F1       : {np.mean(loo_f1s):.4f} ± {np.std(loo_f1s):.4f}")
 
-    print(f"\n✓ Training complete in {elapsed:.1f}s")
-    print(f"✓ Best validation loss: {best_val_loss:.6f}")
-
+    # Save final model (re-trained on all 10 reactors)
+    model.load_state_dict(pretrained_state)
+    all_loader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=dfba_collate_fn)
+    final_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced')
+    final_trainer.train(all_loader, all_loader, epochs=EPOCHS // 2, patience=PATIENCE)
     torch.save({
         'model_state': model.state_dict(),
         'model_type': 'enhanced',
         'hyperparams': {'latent_dim': LATENT_DIM, 'n_heads': N_HEADS, 'n_components': dataset.n_components},
-        'best_val_loss': best_val_loss,
+        'loo_mean_r2': float(np.mean(loo_r2s)),
+        'loo_mean_titer_r2': float(np.mean(loo_titer_r2s)),
     }, 'improved_model.pt')
     print(f"✓ Model saved: improved_model.pt")
 
