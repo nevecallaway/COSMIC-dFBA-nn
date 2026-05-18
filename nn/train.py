@@ -54,9 +54,9 @@ class Trainer:
         # 2. IC constraint
         ic_loss = 0.1 * torch.mean((conc_pred[:, 0, :] - ics) ** 2)
 
-        # 3. Non-flatness penalty
+        # 3. Non-flatness penalty (Increased to punish flat lines)
         conc_variance = torch.var(conc_pred, dim=1)
-        flatness_penalty = 0.05 * torch.mean(1.0 / (1.0 + conc_variance))
+        flatness_penalty = 0.2 * torch.mean(1.0 / (1.0 + conc_variance))
 
         # 4. PINN: Non-negativity penalty
         non_neg_loss = 0.5 * torch.mean(torch.clamp(conc_pred, max=0)**2)
@@ -86,7 +86,7 @@ class Trainer:
             mask_flat = mask.view(-1)
 
             if mask_flat.sum() > 0:
-                phase_loss = 0.1 * nn.functional.cross_entropy(
+                phase_loss = 0.5 * nn.functional.cross_entropy(
                     phase_logits_flat[mask_flat],
                     phase_targets_flat[mask_flat]
                 )
@@ -202,9 +202,18 @@ class Trainer:
             if epoch % 5 == 0 or epoch == 1:
                 metric_str = ""
                 if "metrics" in report:
-                    metric_str = f" | R2: {report['metrics']['global_r2']:.4f}"
+                    m = report['metrics']
+                    # Show global R2 and the R2 of the "Titer" (component 7)
+                    titer_r2 = m['component_r2'].get('comp_7', 'N/A')
+                    metric_str = f" | R2: {m['global_r2']:.4f} (Titer: {titer_r2:.4f} if exists)"
                 if "phase_metrics" in report:
                     metric_str += f" | F1: {report['phase_metrics']['phase_f1']:.4f}"
+
+                # Print a small summary of all component R2s every 20 epochs
+                if epoch % 20 == 0 and "metrics" in report:
+                    comp_r2s = report['metrics']['component_r2']
+                    sorted_r2 = sorted(comp_r2s.items(), key=lambda x: x[1])
+                    print(f"  -> Worst R2: {sorted_r2[0]} | Best R2: {sorted_r2[-1]}")
 
                 print(f"Epoch {epoch:3d}: Train={train_loss:.6f} | Val={val_loss:.6f}{status}{metric_str} "
                       f"| IC={comps['ic']:.4f} | NonNeg={comps['pinn_non_neg']:.4f}")
