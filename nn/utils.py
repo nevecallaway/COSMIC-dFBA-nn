@@ -34,13 +34,9 @@ def load_experimental_data(data_file: str = "data_2.csv") -> Tuple[np.ndarray, n
     # Remove header rows with units
     df = df.dropna(subset=['Time'])
 
-    # Key metabolites to track (matching paper Figure S2 and S3)
-    key_components = [
-        'Cell Density',      # Index 0: Biomass proxy
-        'Glucose',           # Index 1: Primary substrate
-        'Lactate',           # Index 2: Byproduct
-        'Titer',             # Index 3: Product (antibody)
-    ]
+    # Key metabolites to track: use all numeric columns except metadata
+    excluded_cols = ['Vessel', 'Time', 'Production phase fraction']
+    key_components = [col for col in df.columns if col not in excluded_cols]
 
     # Get unique reactors
     reactors = df['Vessel'].unique()
@@ -48,6 +44,7 @@ def load_experimental_data(data_file: str = "data_2.csv") -> Tuple[np.ndarray, n
 
     print(f"\nLoading real experimental data from {data_file}")
     print(f"Found {len(reactors)} reactors: {reactors}")
+    print(f"Tracking {len(key_components)} metabolites: {key_components}")
 
     trajectories_list = []
     times_list = []
