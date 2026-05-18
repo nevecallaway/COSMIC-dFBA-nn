@@ -203,13 +203,13 @@ class Trainer:
                 metric_str = ""
                 if "metrics" in report:
                     m = report['metrics']
-                    # Show global R2 and the R2 of the "Titer" (component 7)
-                    titer_r2 = m['component_r2'].get('comp_7', 'N/A')
-                    metric_str = f" | R2: {m['global_r2']:.4f} (Titer: {titer_r2:.4f} if exists)"
+                    # comp_5 = Titer (CD=0, CellVol=1, Glc=2, Lac=3, NH4=4, Titer=5)
+                    titer_r2 = m['component_r2'].get('comp_5', 'N/A')
+                    metric_str = f" | R2: {m['global_r2']:.4f} (Titer: {titer_r2:.4f})"
                 if "phase_metrics" in report:
                     metric_str += f" | F1: {report['phase_metrics']['phase_f1']:.4f}"
 
-                # Print a small summary of all component R2s every 20 epochs
+                # Print worst/best component R2s every 20 epochs
                 if epoch % 20 == 0 and "metrics" in report:
                     comp_r2s = report['metrics']['component_r2']
                     sorted_r2 = sorted(comp_r2s.items(), key=lambda x: x[1])
@@ -218,20 +218,31 @@ class Trainer:
                 print(f"Epoch {epoch:3d}: Train={train_loss:.6f} | Val={val_loss:.6f}{status}{metric_str} "
                       f"| IC={comps['ic']:.4f} | NonNeg={comps['pinn_non_neg']:.4f}")
 
-            if patience_counter >= patience:
+            if patience is not None and patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch}")
                 break
         return best_val_loss
 
 
-def load_synthetic_data(npz_path):
-    """Load synthetic .npz dataset produced by generate_synthetic_training.py."""
+def load_synthetic_data(npz_path, real_dataset):
+    """
+    Load synthetic .npz and apply real dataset's normalization stats.
+    Both datasets must be in the same normalized space so pre-trained
+    weights transfer directly to fine-tuning without a scale mismatch.
+    """
     data = np.load(npz_path, allow_pickle=True)
-    trajectories = data['trajectories']               # (N, T, C)
+    trajectories = data['trajectories'].copy()        # (N, T, C)
     times        = data['times']                      # (N, T)
-    ics          = data['ics']                        # (N, C)
+    ics          = data['ics'].copy()                 # (N, C)
     phases       = data['phases']                     # (N, T)
-    return dFBADataset(trajectories, times, ics, parameters={}, normalize=True, phases=phases)
+
+    # Apply real data's normalization (fit on 10 reactors) to synthetic
+    trajectories = (trajectories - real_dataset.traj_min) / (real_dataset.traj_max - real_dataset.traj_min)
+    trajectories = np.clip(trajectories, 0, 1)
+    ics = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
+    ics = np.clip(ics, 0, 1)
+
+    return dFBADataset(trajectories, times, ics, parameters={}, normalize=False, phases=phases)
 
 
 def load_data(data_path):
@@ -287,15 +298,18 @@ def main():
 
     LATENT_DIM = 64
     N_HEADS    = 4
-    LR         = 1e-4
     EPOCHS     = 200
     PATIENCE   = 40
 
-    # Pre-training on synthetic data before fine-tuning on real data.
-    # 50 epochs at higher LR lets the model learn general dynamics first.
-    PRETRAIN_EPOCHS   = 50
-    PRETRAIN_LR       = 5e-4
-    PRETRAIN_PATIENCE = 15
+    # Pre-training: run full 100 epochs on synthetic, no early stopping.
+    # patience=None disables early stopping so every epoch runs.
+    # LR is higher for faster convergence on 1000-sample synthetic data.
+    PRETRAIN_EPOCHS = 100
+    PRETRAIN_LR     = 5e-4
+
+    # Fine-tuning: lower LR to preserve pre-trained weights (avoid
+    # catastrophic forgetting with only 7 real samples).
+    FINETUNE_LR = 3e-5
 
     try:
         dataset = load_data(str(DATA_PATH))
@@ -317,7 +331,8 @@ def main():
         print(f"\n{'='*70}")
         print("Phase 1: Pre-training on synthetic data")
         print(f"{'='*70}")
-        synth_dataset    = load_synthetic_data(str(SYNTH_PATH))
+        # Apply real data normalization so both datasets share the same scale.
+        synth_dataset    = load_synthetic_data(str(SYNTH_PATH), real_dataset=dataset)
         synth_train_size = int(0.9 * len(synth_dataset))
         synth_val_size   = len(synth_dataset) - synth_train_size
         synth_train, synth_val = random_split(synth_dataset, [synth_train_size, synth_val_size])
@@ -326,8 +341,9 @@ def main():
 
         print(f"Device: {device} | Synthetic: Train={synth_train_size}, Val={synth_val_size}")
         pretrain_trainer = Trainer(model, device, learning_rate=PRETRAIN_LR, model_type='enhanced')
+        # patience=None disables early stopping — run all PRETRAIN_EPOCHS
         pretrain_trainer.train(synth_train_loader, synth_val_loader,
-                               epochs=PRETRAIN_EPOCHS, patience=PRETRAIN_PATIENCE)
+                               epochs=PRETRAIN_EPOCHS, patience=None)
         print("Pre-training complete. Switching to real-data fine-tuning.")
     else:
         print(f"\nNo synthetic data at {SYNTH_PATH} — skipping pre-training.")
@@ -345,7 +361,7 @@ def main():
     val_loader   = DataLoader(val_dataset,   batch_size=4, shuffle=False, collate_fn=dfba_collate_fn)
 
     print(f"Device: {device} | Samples: Train={len(train_dataset)}, Val={len(val_dataset)}")
-    trainer = Trainer(model, device, learning_rate=LR, model_type='enhanced')
+    trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced')
 
     start_time = time.time()
     best_val_loss = trainer.train(train_loader, val_loader, epochs=EPOCHS, patience=PATIENCE)
