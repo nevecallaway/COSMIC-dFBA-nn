@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Master Training Script for COSMIC-dFBA
-Combines real-data (CSV) and production (NPZ) loading with Physics-Informed (PINN) losses.
+Unified Training Script for COSMIC-dFBA.
+Combines standard and PINN-enhanced training logic for real and simulated data.
 """
 
 import numpy as np
@@ -12,38 +12,37 @@ from torch.utils.data import DataLoader, random_split
 from pathlib import Path
 import sys
 import time
-import os
-import json
 
-try:
-    from cosmic_nn_surrogate import (
-        CosmicNNSurrogateEnhanced, dFBADataset, dfba_collate_fn
-    )
-    from load_real_data import load_experimental_data
-    from diagnostics import ModelDiagnostics
-    IMPORTS_OK = True
-except ImportError as e:
-    print(f"✗ Import error: {e}")
-    sys.exit(1)
+from nn.model import CosmicNNSurrogateEnhanced, dFBADataset, dfba_collate_fn
+from nn.utils import load_experimental_data, ModelDiagnostics
 
-class MasterTrainer:
+class Trainer:
     """
-    Unified trainer for COSMIC-dFBA that combines Binary Phase Classification
-    with Physics-Informed Neural Network (PINN) constraints.
+    Unified trainer for COSMIC-dFBA that handles both standard and
+    Physics-Informed Neural Network (PINN) losses.
     """
-    def __init__(self, model, device, learning_rate=5e-4):
+    def __init__(self, model, device, learning_rate=5e-4, model_type='enhanced'):
         self.model = model.to(device)
         self.device = device
+        self.model_type = model_type
         self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='min', factor=0.5, patience=5
         )
         self.losses = []
 
-    def compute_fused_loss(self, predictions, targets, ics, phases_batch=None):
+    def compute_loss(self, predictions, targets, ics, phases_batch=None):
         """
-        Combines binary phase classification, IC constraints, and PINN physics.
+        Computes the loss based on the model type.
+        For 'enhanced' models, it uses the fused PINN loss.
         """
+        if self.model_type == 'standard':
+            # Standard MSE + Smoothness
+            conc_loss = nn.functional.mse_loss(predictions, targets)
+            smoothness = 0.1 * torch.mean((predictions[:, 1:, :] - predictions[:, :-1, :]) ** 2)
+            return conc_loss + smoothness, {'conc': conc_loss.item()}
+
+        # Enhanced / PINN Fused Loss
         conc_pred = predictions['concentrations']
         phase_logits = predictions['phase_weights']
         growth_rates = predictions['growth_rates']
@@ -52,10 +51,10 @@ class MasterTrainer:
         # 1. Main Concentration MSE
         conc_loss = nn.functional.mse_loss(conc_pred, targets)
 
-        # 2. IC constraint (first prediction should match IC)
+        # 2. IC constraint
         ic_loss = 0.1 * torch.mean((conc_pred[:, 0, :] - ics) ** 2)
 
-        # 3. Non-flatness penalty (encourage dynamics)
+        # 3. Non-flatness penalty
         conc_variance = torch.var(conc_pred, dim=1)
         flatness_penalty = 0.05 * torch.mean(1.0 / (1.0 + conc_variance))
 
@@ -96,7 +95,6 @@ class MasterTrainer:
         phase_probs = torch.softmax(phase_logits, dim=-1)
         f = phase_probs[:, :, 1 : 2]
         blended_rates = (1 - f) * growth_rates + f * prod_rates
-
         rate_smoothness = 0.1 * torch.mean((blended_rates[:, 1:, :] - blended_rates[:, :-1, :]) ** 2)
         rate_magnitude = 0.01 * (torch.mean(torch.abs(growth_rates)) + torch.mean(torch.abs(prod_rates)))
 
@@ -132,7 +130,7 @@ class MasterTrainer:
 
             self.optimizer.zero_grad()
             predictions = self.model(ic, time, params)
-            loss, comp = self.compute_fused_loss(predictions, target, ic, phases)
+            loss, comp = self.compute_loss(predictions, target, ic, phases)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
@@ -162,17 +160,16 @@ class MasterTrainer:
                 target = batch['trajectory'].to(self.device)
 
                 predictions = self.model(ic, time, params)
-                loss, _ = self.compute_fused_loss(predictions, target, ic, None)
+                loss, _ = self.compute_loss(predictions, target, ic, None)
                 val_loss += loss.item()
 
                 all_targets.append(target.cpu().numpy())
-                all_preds.append(predictions['concentrations'].cpu().numpy())
+                all_preds.append(predictions['concentrations'].cpu().numpy() if isinstance(predictions, dict) else predictions.cpu().numpy())
                 if 'phases' in batch:
                     all_phase_targets.append(batch['phases'].cpu().numpy())
-                    all_phase_preds.append(predictions['phase_weights'].cpu().numpy())
+                    all_phase_preds.append(predictions['phase_weights'].cpu().numpy() if isinstance(predictions, dict) else None)
 
         val_loss /= len(val_loader)
-
         report = {"val_loss": val_loss}
         if all_targets:
             y_true = np.concatenate(all_targets, axis=0)
@@ -217,6 +214,7 @@ class MasterTrainer:
                 break
         return best_val_loss
 
+
 def load_data(data_path):
     """Flexible loader for CSV or NPZ data."""
     p = Path(data_path)
@@ -258,13 +256,12 @@ def load_data(data_path):
     else:
         raise ValueError(f"Unsupported data path: {data_path}. Provide a .csv file or a directory of .npz files.")
 
+
 def main():
     print(f"\n{'='*70}")
-    print("COSMIC-dFBA Master Training")
+    print("COSMIC-dFBA Unified Training")
     print(f"{'='*70}")
 
-    # Configuration
-    # Resolve path relative to the script location to avoid CWD issues
     script_dir = Path(__file__).parent
     DATA_PATH = script_dir / "data_2.csv"
 
@@ -280,7 +277,6 @@ def main():
         print(f"Error loading data: {e}")
         return
 
-    # Split: 70/30
     train_size = int(0.7 * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
@@ -298,7 +294,7 @@ def main():
         n_heads=N_HEADS
     )
 
-    trainer = MasterTrainer(model, device, learning_rate=LR)
+    trainer = Trainer(model, device, learning_rate=LR, model_type='enhanced')
 
     start_time = time.time()
     best_val_loss = trainer.train(train_loader, val_loader, epochs=EPOCHS, patience=PATIENCE)
@@ -307,7 +303,6 @@ def main():
     print(f"\n✓ Training complete in {elapsed:.1f}s")
     print(f"✓ Best validation loss: {best_val_loss:.6f}")
 
-    # Save as comprehensive checkpoint
     torch.save({
         'model_state': model.state_dict(),
         'model_type': 'enhanced',
