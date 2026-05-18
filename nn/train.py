@@ -267,9 +267,9 @@ def main():
 
     LATENT_DIM = 64
     N_HEADS = 4
-    LR = 5e-4
-    EPOCHS = 100
-    PATIENCE = 20
+    LR = 1e-4
+    EPOCHS = 200
+    PATIENCE = 40
 
     try:
         dataset = load_data(str(DATA_PATH))
