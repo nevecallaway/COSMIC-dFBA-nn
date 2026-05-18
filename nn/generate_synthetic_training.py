@@ -114,6 +114,13 @@ def generate_synthetic_trajectory(real_ics, n_timepoints=13):
     drawn from U[4, 9] days, with steepness drawn from U[0.5, 3.0].
     This spans the range from gradual (R0001, k≈0.8) to near-step-function
     (R0011, k≈3) transitions seen in the 10 real reactors.
+
+    Titer dynamics: ~60% of trajectories are monotonically increasing;
+    ~40% peak then decline (matching the fed-batch dilution effect seen in
+    R0002, R0003, R0006, R0011, R0012 where titer drops 30-80% post-peak).
+
+    L-Aspartic acid (comp_9): some trajectories start high and crash sharply,
+    matching the unusual kinetics in R0003 and R0011.
     """
     # Sample IC by adding Gaussian noise to a random real reactor's day-0
     base_ic = real_ics[np.random.randint(len(real_ics))].copy()
@@ -127,6 +134,17 @@ def generate_synthetic_trajectory(real_ics, n_timepoints=13):
     time  = np.linspace(0, 13, n_timepoints)
     phase = _sigmoid(time, switch_time, steepness)  # in [0, 1]
 
+    # Titer post-peak decline: 40% of runs show peak-then-decline, matching
+    # R0002/R0003/R0006/R0011/R0012 which drop 0.10-0.14 units/day post-peak.
+    # Peak day is phase switch + 0.5-2 days; before that, normal production.
+    titer_decline = np.random.random() < 0.40
+    titer_decline_rate = np.random.uniform(0.08, 0.14) if titer_decline else 0.0
+    titer_peak_day = switch_time + np.random.uniform(0.5, 2.0)
+
+    # L-Aspartic acid crash: ~20% of runs show IC=high then sharp depletion
+    # (matching R0003 IC=1.0 → 0.034 by day 4; R0011 IC=1.0 → -0.188 day 3)
+    asp_crash = (np.random.random() < 0.20) and (ic[IDX_ASP] > 0.7)
+
     state = ic.copy()
     trajectory = [state.copy()]
 
@@ -134,28 +152,36 @@ def generate_synthetic_trajectory(real_ics, n_timepoints=13):
         p  = phase[t_idx]
         dt = time[t_idx] - time[t_idx - 1]
         cd  = state[IDX_CD]
-        glc = state[IDX_GLC]
 
-        # Growth rate: logistic, suppressed in production phase
-        mu_growth = 0.15 * cd * (1.0 - cd)
-        mu_prod   = 0.02 * cd * (1.0 - cd)
-        mu = (1.0 - p) * mu_growth + p * mu_prod
+        # Growth rate: logistic, suppressed in production phase.
+        # Rate 0.25 gives CD ~0.32 at day 5, matching real reactor densities.
+        mu = ((1.0 - p) * 0.25 + p * 0.04) * cd * (1.0 - cd)
 
         dstate = np.zeros(N_COMPONENTS)
 
         # Core metabolites
         dstate[IDX_CD]  = mu
-        dstate[IDX_CV]  = 0.04 * mu + np.random.normal(0, 0.003)  # volume tracks mass
-        dstate[IDX_GLC] = -(0.30 * (1.0 - p) + 0.10 * p) * cd    # glucose consumed
-        dstate[IDX_LAC] = ( 0.08 * (1.0 - p) - 0.04 * p) * cd    # lactate: prod then consumed
-        dstate[IDX_NH4] = ( 0.06 * (1.0 - p) + 0.02 * p) * cd    # NH4 from AA catabolism
-        dstate[IDX_TIT] = ( 0.01 * (1.0 - p) + 0.18 * p) * cd    # titer: rises in production
+        dstate[IDX_CV]  = 0.04 * mu + np.random.normal(0, 0.003)
+        dstate[IDX_GLC] = -(0.30 * (1.0 - p) + 0.10 * p) * cd
+        dstate[IDX_LAC] = ( 0.08 * (1.0 - p) - 0.04 * p) * cd
+        dstate[IDX_NH4] = ( 0.06 * (1.0 - p) + 0.02 * p) * cd
+
+        # Titer production rate 0.40 gets synthetic Titer into [0.7, 1.0] range
+        # matching real reactors. 40% of runs decline post-peak proportionally
+        # (10-14% per day of current value), matching R0002/R0003/R0011.
+        if titer_decline and time[t_idx] > titer_peak_day:
+            dstate[IDX_TIT] = -titer_decline_rate * state[IDX_TIT]
+        else:
+            dstate[IDX_TIT] = (0.01 * (1.0 - p) + 0.40 * p) * cd
 
         # Amino acids
         for aa_idx, growth_rate in _AA_GROWTH_RATES.items():
             prod_rate = growth_rate * _PRODUCTION_RATE_FACTOR
-            effective_rate = (1.0 - p) * growth_rate + p * prod_rate
-            dstate[aa_idx] = effective_rate * cd
+            dstate[aa_idx] = ((1.0 - p) * growth_rate + p * prod_rate) * cd
+
+        # L-Aspartic acid crash: rapid depletion in early growth phase
+        if asp_crash and p < 0.3:
+            dstate[IDX_ASP] += -0.8 * state[IDX_ASP]  # fast crash toward 0
 
         # Add small biological noise
         dstate += np.random.normal(0, 0.002, N_COMPONENTS)
