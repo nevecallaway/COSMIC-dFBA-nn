@@ -1,0 +1,19 @@
+# Generated data files
+*.npz
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model checkpoints
+*.pt
+*.pth
+
+# Colab / notebook outputs
+.virtual_documents/
