@@ -301,10 +301,9 @@ def main():
     EPOCHS     = 200
     PATIENCE   = 40
 
-    # Pre-training: run full 100 epochs on synthetic, no early stopping.
-    # patience=None disables early stopping so every epoch runs.
-    # LR is higher for faster convergence on 1000-sample synthetic data.
-    PRETRAIN_EPOCHS = 100
+    # Pre-training: 50 epochs on 20k synthetic samples with large batches
+    # to saturate the T4 GPU on Colab. patience=None runs all epochs.
+    PRETRAIN_EPOCHS = 50
     PRETRAIN_LR     = 5e-4
 
     # Fine-tuning: lower LR to preserve pre-trained weights (avoid
@@ -336,8 +335,8 @@ def main():
         synth_train_size = int(0.9 * len(synth_dataset))
         synth_val_size   = len(synth_dataset) - synth_train_size
         synth_train, synth_val = random_split(synth_dataset, [synth_train_size, synth_val_size])
-        synth_train_loader = DataLoader(synth_train, batch_size=32, shuffle=True,  collate_fn=dfba_collate_fn)
-        synth_val_loader   = DataLoader(synth_val,   batch_size=32, shuffle=False, collate_fn=dfba_collate_fn)
+        synth_train_loader = DataLoader(synth_train, batch_size=256, shuffle=True,  collate_fn=dfba_collate_fn)
+        synth_val_loader   = DataLoader(synth_val,   batch_size=256, shuffle=False, collate_fn=dfba_collate_fn)
 
         print(f"Device: {device} | Synthetic: Train={synth_train_size}, Val={synth_val_size}")
         pretrain_trainer = Trainer(model, device, learning_rate=PRETRAIN_LR, model_type='enhanced')

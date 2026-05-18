@@ -271,7 +271,7 @@ if __name__ == "__main__":
     import sys
     data_file = sys.argv[1] if len(sys.argv) > 1 else 'data_2.csv'
     generate_dataset(
-        n_samples=1000,
+        n_samples=20000,
         n_timepoints=13,
         data_file=data_file,
         output_file='synthetic_training.npz',
