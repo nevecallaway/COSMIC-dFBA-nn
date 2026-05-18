@@ -13,8 +13,8 @@ from pathlib import Path
 import sys
 import time
 
-from nn.model import CosmicNNSurrogateEnhanced, dFBADataset, dfba_collate_fn
-from nn.utils import load_experimental_data, ModelDiagnostics
+from model import CosmicNNSurrogateEnhanced, dFBADataset, dfba_collate_fn
+from utils import load_experimental_data, ModelDiagnostics
 
 class Trainer:
     """
