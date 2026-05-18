@@ -224,6 +224,16 @@ class Trainer:
         return best_val_loss
 
 
+def load_synthetic_data(npz_path):
+    """Load synthetic .npz dataset produced by generate_synthetic_training.py."""
+    data = np.load(npz_path, allow_pickle=True)
+    trajectories = data['trajectories']               # (N, T, C)
+    times        = data['times']                      # (N, T)
+    ics          = data['ics']                        # (N, C)
+    phases       = data['phases']                     # (N, T)
+    return dFBADataset(trajectories, times, ics, parameters={}, normalize=True, phases=phases)
+
+
 def load_data(data_path):
     """Flexible loader for CSV or NPZ data."""
     p = Path(data_path)
@@ -272,13 +282,20 @@ def main():
     print(f"{'='*70}")
 
     script_dir = Path(__file__).parent
-    DATA_PATH = script_dir / "data_2.csv"
+    DATA_PATH  = script_dir / "data_2.csv"
+    SYNTH_PATH = script_dir / "synthetic_training.npz"
 
     LATENT_DIM = 64
-    N_HEADS = 4
-    LR = 1e-4
-    EPOCHS = 200
-    PATIENCE = 40
+    N_HEADS    = 4
+    LR         = 1e-4
+    EPOCHS     = 200
+    PATIENCE   = 40
+
+    # Pre-training on synthetic data before fine-tuning on real data.
+    # 50 epochs at higher LR lets the model learn general dynamics first.
+    PRETRAIN_EPOCHS   = 50
+    PRETRAIN_LR       = 5e-4
+    PRETRAIN_PATIENCE = 15
 
     try:
         dataset = load_data(str(DATA_PATH))
@@ -286,15 +303,7 @@ def main():
         print(f"Error loading data: {e}")
         return
 
-    train_size = int(0.7 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, collate_fn=dfba_collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, collate_fn=dfba_collate_fn)
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device} | Samples: Train={len(train_dataset)}, Val={len(val_dataset)}")
 
     model = CosmicNNSurrogateEnhanced(
         n_components=dataset.n_components,
@@ -303,6 +312,39 @@ def main():
         n_heads=N_HEADS
     )
 
+    # --- Phase 1: Pre-train on synthetic data (if available) ---
+    if SYNTH_PATH.exists():
+        print(f"\n{'='*70}")
+        print("Phase 1: Pre-training on synthetic data")
+        print(f"{'='*70}")
+        synth_dataset    = load_synthetic_data(str(SYNTH_PATH))
+        synth_train_size = int(0.9 * len(synth_dataset))
+        synth_val_size   = len(synth_dataset) - synth_train_size
+        synth_train, synth_val = random_split(synth_dataset, [synth_train_size, synth_val_size])
+        synth_train_loader = DataLoader(synth_train, batch_size=32, shuffle=True,  collate_fn=dfba_collate_fn)
+        synth_val_loader   = DataLoader(synth_val,   batch_size=32, shuffle=False, collate_fn=dfba_collate_fn)
+
+        print(f"Device: {device} | Synthetic: Train={synth_train_size}, Val={synth_val_size}")
+        pretrain_trainer = Trainer(model, device, learning_rate=PRETRAIN_LR, model_type='enhanced')
+        pretrain_trainer.train(synth_train_loader, synth_val_loader,
+                               epochs=PRETRAIN_EPOCHS, patience=PRETRAIN_PATIENCE)
+        print("Pre-training complete. Switching to real-data fine-tuning.")
+    else:
+        print(f"\nNo synthetic data at {SYNTH_PATH} — skipping pre-training.")
+        print("Run: python generate_synthetic_training.py data_2.csv")
+
+    # --- Phase 2: Fine-tune on real data ---
+    print(f"\n{'='*70}")
+    print("Phase 2: Fine-tuning on real data")
+    print(f"{'='*70}")
+    train_size = int(0.7 * len(dataset))
+    val_size   = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True,  collate_fn=dfba_collate_fn)
+    val_loader   = DataLoader(val_dataset,   batch_size=4, shuffle=False, collate_fn=dfba_collate_fn)
+
+    print(f"Device: {device} | Samples: Train={len(train_dataset)}, Val={len(val_dataset)}")
     trainer = Trainer(model, device, learning_rate=LR, model_type='enhanced')
 
     start_time = time.time()
