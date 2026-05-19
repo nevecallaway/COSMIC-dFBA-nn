@@ -320,9 +320,9 @@ def main():
     EPOCHS     = 200
     PATIENCE   = 40
 
-    # Pre-training: 50 epochs on 20k synthetic samples with large batches
-    # to saturate the T4 GPU on Colab. patience=None runs all epochs.
-    PRETRAIN_EPOCHS = 50
+    # Pre-training: 100 epochs — R2 was still improving at epoch 50 (-0.15),
+    # so more pre-training gives better initialization before fine-tuning.
+    PRETRAIN_EPOCHS = 100
     PRETRAIN_LR     = 5e-4
 
     # Fine-tuning: low LR to avoid catastrophic forgetting, but high enough
