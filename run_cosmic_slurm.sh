@@ -1,32 +1,93 @@
 #!/bin/bash
-#SBATCH --job-name=cosmic_nn
-#SBATCH --output=cosmic_nn_%j.log
-#SBATCH --error=cosmic_nn_%j.err
-#SBATCH --time=02:00:00
+# =============================================================================
+# SLURM job script for COSMIC-dFBA surrogate model training
+# Usage: sbatch run_cosmic_slurm.sh
+# =============================================================================
+
+# ── Edit these to match your cluster ─────────────────────────────────────────
+#SBATCH --job-name=cosmic_dfba
+#SBATCH --partition=gpu                  # GPU partition name (check: sinfo -s)
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --gpus-per-node=1          # Remove if no GPU available
-#SBATCH --mem=16G
-#SBATCH --partition=gpu            # Adjust to your cluster's partition
+#SBATCH --cpus-per-task=4               # Data loading workers
+#SBATCH --gres=gpu:1                    # 1 GPU (any type)
+#SBATCH --mem=24G
+#SBATCH --time=04:00:00                 # hh:mm:ss — 4h is conservative
+#SBATCH --output=logs/cosmic_%j.log     # stdout  (%j = job ID)
+#SBATCH --error=logs/cosmic_%j.err      # stderr
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Load Python module (varies by cluster)
-module load python/3.10            # Check your cluster's module names
-# OR use conda
-# module load conda
+set -euo pipefail   # exit on error, undefined variable, or pipe failure
 
-# Create virtual environment (first time only)
-# python3 -m venv venv
+REPO_DIR="$HOME/COSMIC-dFBA-nn"        # adjust if cloned elsewhere
+CONDA_ENV="cosmic"                      # conda env name  (see SETUP below)
 
-# Activate environment
-source venv/bin/activate
+# ── Logging helpers ───────────────────────────────────────────────────────────
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+log "Job ${SLURM_JOB_ID} starting on $(hostname)"
+log "GPUs: ${CUDA_VISIBLE_DEVICES:-none visible}"
 
-# Install dependencies
-pip install -r nn/requirements.txt
+# ── Create log directory ──────────────────────────────────────────────────────
+mkdir -p "$REPO_DIR/logs"
 
-# Run the demo
-cd COSMIC-dFBA-nn
-python nn/test_demo.py
+# ── Load modules (edit for your cluster) ─────────────────────────────────────
+# Common options — uncomment whichever applies:
+# module load cuda/12.1
+# module load python/3.11
+# module load anaconda3
 
-# Optional: Save outputs
-echo "Job completed at $(date)" >> results.log
+# ── Activate environment ──────────────────────────────────────────────────────
+# Option A — conda (recommended):
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV"
+
+# Option B — virtualenv (comment out Option A and uncomment these):
+# source "$REPO_DIR/venv/bin/activate"
+
+# ── Pull latest code ──────────────────────────────────────────────────────────
+cd "$REPO_DIR"
+log "Pulling latest code..."
+git pull --ff-only
+
+# ── Step 1: Generate synthetic training data ──────────────────────────────────
+log "Generating synthetic training data..."
+python nn/generate_synthetic_training.py
+log "Synthetic data generation complete."
+
+# ── Step 2: Train the model ───────────────────────────────────────────────────
+log "Starting training..."
+python nn/train.py
+log "Training complete."
+
+# ── Copy outputs to a timestamped results directory ──────────────────────────
+RESULTS_DIR="$REPO_DIR/results/job_${SLURM_JOB_ID}"
+mkdir -p "$RESULTS_DIR"
+cp nn/improved_model.pt "$RESULTS_DIR/" 2>/dev/null || true
+cp logs/cosmic_${SLURM_JOB_ID}.log "$RESULTS_DIR/" 2>/dev/null || true
+
+log "Outputs saved to $RESULTS_DIR"
+log "Job complete."
+
+# =============================================================================
+# FIRST-TIME SETUP (run once manually before submitting)
+# =============================================================================
+# 1. Clone the repo:
+#      git clone https://github.com/nevecallaway/COSMIC-dFBA-nn.git ~/COSMIC-dFBA-nn
+#
+# 2. Create the conda environment:
+#      conda create -n cosmic python=3.11 -y
+#      conda activate cosmic
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#      pip install numpy pandas scikit-learn
+#
+# 3. Check your partition and GPU type:
+#      sinfo -s               # list partitions
+#      sinfo -o "%P %G %l"    # partition / GPU type / time limit
+#
+# 4. Submit:
+#      sbatch run_cosmic_slurm.sh
+#
+# 5. Monitor:
+#      squeue -u $USER
+#      tail -f logs/cosmic_<job_id>.log
+# =============================================================================
