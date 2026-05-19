@@ -317,7 +317,8 @@ def generate_dataset(n_samples=1000, n_timepoints=13,
 
 
 def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
-                               data_file='data_2.csv',
+                               data_file='data/data_2.csv',
+                               doe_file='data/data_1.csv',
                                output_file='synthetic_training.npz',
                                noise_scale=1.0):
     """
@@ -329,18 +330,38 @@ def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
          with std = noise_scale * inter-reactor std at that cell (floored at 0.02
          so low-variance components still get some variation).
       3. Clip to [0, 1].
+      4. Copy the base reactor's DoE parameters (O2, AAs, Glc) and add small
+         Gaussian noise so the model sees varied parameter inputs.
 
     This automatically captures every pattern in the real data (glucose fed-batch
     rise, titer post-peak decline, Asp crash, etc.) without any hand-coded ODE.
 
     noise_scale=1.0 means noise σ equals the actual reactor-to-reactor spread.
-    Increase to 1.5–2.0 for more diversity; decrease toward 0.5 for tighter copies.
     """
     print(f"\nLoading real trajectories from {data_file}...")
     real_trajs, real_phases, real_times, components = load_real_trajectories(data_file)
     n_reactors, n_tp, nc = real_trajs.shape
     print(f"  {n_reactors} reactors × {n_tp} timepoints × {nc} components")
     assert nc == N_COMPONENTS, f"Expected {N_COMPONENTS} components, got {nc}"
+
+    # Load DoE parameters (O2, AAs, Glc) for each real reactor
+    reactor_order = sorted(set(  # must match load_real_trajectories ordering
+        pd.read_csv(data_file)['Vessel'].dropna().unique()
+    ))
+    doe_map = {}
+    try:
+        df_doe = pd.read_csv(doe_file, header=1)   # row 0 is merged "Variable Levels" header
+        df_doe = df_doe[df_doe['Vessel'].str.match(r'^R\d{4}$', na=False)]
+        for _, row in df_doe.iterrows():
+            doe_map[str(row['Vessel'])] = np.array(
+                [pd.to_numeric(row['O2'], errors='coerce'),
+                 pd.to_numeric(row['AAs'], errors='coerce'),
+                 pd.to_numeric(row['Glc'], errors='coerce')], dtype=float)
+        print(f"  DoE params loaded for {len(doe_map)} reactors from {doe_file}")
+    except FileNotFoundError:
+        print(f"  (DoE file {doe_file} not found — doe_params will be zeros)")
+
+    real_doe = np.array([doe_map.get(r, np.zeros(3)) for r in reactor_order])  # (n_reactors, 3)
 
     # Per-cell std across reactors — captures true variability at each timepoint
     cell_std = np.std(real_trajs, axis=0)          # (n_tp, nc)
@@ -354,6 +375,7 @@ def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
     times        = np.empty((n_samples, n_tp))
     ics          = np.empty((n_samples, nc))
     phases       = np.empty((n_samples, n_tp))
+    doe_params   = np.empty((n_samples, 3))
 
     for i in range(n_samples):
         base_idx = np.random.randint(n_reactors)
@@ -364,6 +386,8 @@ def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
         times[i]        = real_times[base_idx]
         ics[i]          = traj[0]
         phases[i]       = real_phases[base_idx]
+        # DoE params: base reactor's values + tiny noise so model sees variation
+        doe_params[i]   = real_doe[base_idx] + np.random.normal(0, 0.1, 3)
 
         if (i + 1) % 2000 == 0:
             print(f"  {i + 1}/{n_samples}")
@@ -374,14 +398,16 @@ def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
         times=times,
         ics=ics,
         phases=phases,
+        doe_params=doe_params,
         components=np.array(components, dtype=object),
     )
 
     print(f"\nSaved to {output_file}")
     print(f"  Trajectories: {trajectories.shape}")
+    print(f"  DoE params:   {doe_params.shape}")
     _print_stats(trajectories, components)
 
-    return trajectories, times, ics, phases, components
+    return trajectories, times, ics, phases, doe_params, components
 
 
 def load_synthetic_dataset(filename='synthetic_training.npz'):
@@ -406,12 +432,13 @@ def _print_stats(trajectories, components):
 
 if __name__ == "__main__":
     import sys
-    data_file  = sys.argv[1] if len(sys.argv) > 1 else 'data_2.csv'
+    data_file   = sys.argv[1] if len(sys.argv) > 1 else 'data/data_2.csv'
     noise_scale = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
     generate_gaussian_dataset(
         n_samples=20000,
         n_timepoints=13,
         data_file=data_file,
+        doe_file='data/data_1.csv',
         output_file='synthetic_training.npz',
         noise_scale=noise_scale,
     )

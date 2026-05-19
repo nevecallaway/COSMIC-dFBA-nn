@@ -233,6 +233,8 @@ def load_synthetic_data(npz_path, real_dataset):
     Load synthetic .npz and apply real dataset's normalization stats.
     Both datasets must be in the same normalized space so pre-trained
     weights transfer directly to fine-tuning without a scale mismatch.
+    If the .npz contains 'doe_params' (N, 3) these are passed through as
+    process parameters so the pre-trained model learns to use them.
     """
     data = np.load(npz_path, allow_pickle=True)
     trajectories = data['trajectories'].copy()        # (N, T, C)
@@ -246,7 +248,14 @@ def load_synthetic_data(npz_path, real_dataset):
     ics = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
     ics = np.clip(ics, 0, 1)
 
-    return dFBADataset(trajectories, times, ics, parameters={}, normalize=False, phases=phases)
+    # Build parameters dict from stored DoE params (O2, AAs, Glc) if present
+    parameters = {}
+    if 'doe_params' in data:
+        dp = data['doe_params']       # (N, 3)
+        parameters = {'O2': dp[:, 0], 'AAs': dp[:, 1], 'Glc': dp[:, 2]}
+
+    return dFBADataset(trajectories, times, ics, parameters=parameters,
+                       normalize=False, phases=phases)
 
 
 def load_data(data_path):
@@ -254,9 +263,15 @@ def load_data(data_path):
     p = Path(data_path)
     if p.is_file() and p.suffix == '.csv':
         print(f"Loading real experimental data from {p}...")
-        trajectories, time_points, ics, metadata = load_experimental_data(str(p))
+        doe_file = str(p.parent / 'data_1.csv')
+        trajectories, time_points, ics, metadata = load_experimental_data(str(p), doe_file=doe_file)
         phases = metadata.get('phases', None)
-        dataset = dFBADataset(trajectories, time_points, ics, parameters={}, normalize=True, phases=phases)
+        doe_arr = metadata.get('doe_params', None)   # (n_reactors, 3) or None
+        parameters = {}
+        if doe_arr is not None:
+            parameters = {'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]}
+        dataset = dFBADataset(trajectories, time_points, ics, parameters=parameters,
+                              normalize=True, phases=phases)
         return dataset
 
     elif p.is_dir():
@@ -297,7 +312,7 @@ def main():
     print(f"{'='*70}")
 
     script_dir = Path(__file__).parent
-    DATA_PATH  = script_dir / "data_2.csv"
+    DATA_PATH  = script_dir / "data" / "data_2.csv"
     SYNTH_PATH = script_dir / "synthetic_training.npz"
 
     LATENT_DIM = 64
@@ -323,9 +338,11 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    n_params = dataset.n_params if hasattr(dataset, 'n_params') else 0
+    print(f"Model: n_components={dataset.n_components}, n_params={n_params}")
     model = CosmicNNSurrogateEnhanced(
         n_components=dataset.n_components,
-        n_params=0,
+        n_params=n_params,
         latent_dim=LATENT_DIM,
         n_heads=N_HEADS
     )

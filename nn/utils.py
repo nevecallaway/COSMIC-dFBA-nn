@@ -10,18 +10,42 @@ from pathlib import Path
 from typing import Tuple, Dict, List, Any
 from sklearn.metrics import f1_score, confusion_matrix, r2_score, mean_absolute_percentage_error
 
-def load_experimental_data(data_file: str = "data_2.csv") -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
+def load_doe_parameters(doe_file: str) -> Dict[str, np.ndarray]:
+    """
+    Load DoE variable levels from data_1.csv.
+
+    The file has a merged "Variable Levels" header in row 0 and the real
+    column names (Vessel, O2, AAs, Glc) in row 1, so we read with header=1.
+
+    Returns dict mapping reactor name → np.array([O2, AAs, Glc]) with
+    values in {-1, 0, +1}.  Footer/NaN rows are silently dropped.
+    """
+    df = pd.read_csv(doe_file, header=1)
+    # Drop footer rows (NaN vessel or non-reactor strings like the footnote)
+    df = df[df['Vessel'].str.match(r'^R\d{4}$', na=False)].copy()
+    for col in ['O2', 'AAs', 'Glc']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    result = {}
+    for _, row in df.iterrows():
+        result[str(row['Vessel'])] = np.array([row['O2'], row['AAs'], row['Glc']], dtype=float)
+    return result
+
+
+def load_experimental_data(data_file: str = "data/data_2.csv",
+                           doe_file: str = "data/data_1.csv") -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
     Load real bioprocess data from CSV.
 
     Args:
         data_file: Path to data_2.csv with experimental measurements
+        doe_file:  Path to data_1.csv with DoE variable levels (O2, AAs, Glc).
+                   If the file does not exist, doe_params is returned as None.
 
     Returns:
         trajectories: (n_reactors, n_timepoints, n_components)
         time_points: (n_reactors, n_timepoints)
         initial_conditions: (n_reactors, n_components)
-        metadata: Dict with column info
+        metadata: Dict with column info, including 'doe_params' array (n_reactors, 3)
     """
     # Read CSV
     df = pd.read_csv(data_file)
@@ -109,12 +133,25 @@ def load_experimental_data(data_file: str = "data_2.csv") -> Tuple[np.ndarray, n
 
     initial_conditions = np.array(ics_list)
 
+    # Load DoE parameters (O2, AAs, Glc) if file exists
+    doe_params_array = None
+    try:
+        doe_map = load_doe_parameters(doe_file)
+        doe_params_array = np.array([
+            doe_map.get(r, np.zeros(3)) for r in reactors
+        ], dtype=float)  # (n_reactors, 3)
+        print(f"  DoE params loaded: {doe_params_array.shape} "
+              f"[O2, AAs, Glc] from {doe_file}")
+    except FileNotFoundError:
+        print(f"  (DoE file {doe_file} not found — running without process parameters)")
+
     metadata = {
         'components': key_components,
         'n_components': n_components,
         'n_reactors': n_reactors,
         'reactors': reactors,
-        'phases': phases_padded,  # Ground truth phase information
+        'phases': phases_padded,       # Ground truth phase information
+        'doe_params': doe_params_array, # (n_reactors, 3) or None
     }
 
     print(f"\n✓ Loaded real data:")

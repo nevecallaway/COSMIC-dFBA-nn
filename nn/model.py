@@ -50,6 +50,7 @@ class dFBADataset(Dataset):
         self.n_samples = trajectories.shape[0]
         self.n_components = trajectories.shape[2]
         self.n_timepoints = trajectories.shape[1]
+        self.n_params = len(parameters)  # number of process parameter scalars
 
         if normalize:
             self._normalize()
