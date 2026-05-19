@@ -182,7 +182,7 @@ class Trainer:
 
         return report
 
-    def train(self, train_loader, val_loader, epochs=100, patience=20):
+    def train(self, train_loader, val_loader, epochs=100, patience=20, verbose=True):
         best_val_loss = float('inf')
         patience_counter = 0
 
@@ -199,27 +199,30 @@ class Trainer:
                 patience_counter += 1
                 status = ""
 
-            if epoch % 5 == 0 or epoch == 1:
+            if verbose and (epoch % 5 == 0 or epoch == 1):
                 metric_str = ""
                 if "metrics" in report:
                     m = report['metrics']
-                    # comp_5 = Titer (CD=0, CellVol=1, Glc=2, Lac=3, NH4=4, Titer=5)
-                    titer_r2 = m['component_r2'].get('comp_5', 'N/A')
-                    metric_str = f" | R2: {m['global_r2']:.4f} (Titer: {titer_r2:.4f})"
+                    titer_r2 = m['component_r2'].get('comp_5', float('nan'))
+                    r2_str = f"{m['global_r2']:.4f}" if not np.isnan(m['global_r2']) else "nan"
+                    titer_str = f"{titer_r2:.4f}" if not np.isnan(titer_r2) else "nan"
+                    metric_str = f" | R2: {r2_str} (Titer: {titer_str})"
                 if "phase_metrics" in report:
                     metric_str += f" | F1: {report['phase_metrics']['phase_f1']:.4f}"
 
-                # Print worst/best component R2s every 20 epochs
-                if epoch % 20 == 0 and "metrics" in report:
-                    comp_r2s = report['metrics']['component_r2']
-                    sorted_r2 = sorted(comp_r2s.items(), key=lambda x: x[1])
-                    print(f"  -> Worst R2: {sorted_r2[0]} | Best R2: {sorted_r2[-1]}")
+                if verbose and epoch % 20 == 0 and "metrics" in report:
+                    comp_r2s = {k: v for k, v in report['metrics']['component_r2'].items()
+                                if not np.isnan(v)}
+                    if comp_r2s:
+                        sorted_r2 = sorted(comp_r2s.items(), key=lambda x: x[1])
+                        print(f"  -> Worst R2: {sorted_r2[0]} | Best R2: {sorted_r2[-1]}")
 
                 print(f"Epoch {epoch:3d}: Train={train_loss:.6f} | Val={val_loss:.6f}{status}{metric_str} "
                       f"| IC={comps['ic']:.4f} | NonNeg={comps['pinn_non_neg']:.4f}")
 
             if patience is not None and patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch}")
+                if verbose:
+                    print(f"Early stopping at epoch {epoch}")
                 break
         return best_val_loss
 
@@ -377,7 +380,7 @@ def main():
 
         fold_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced')
         best_val = fold_trainer.train(fold_train_loader, fold_val_loader,
-                                      epochs=EPOCHS, patience=PATIENCE)
+                                      epochs=EPOCHS, patience=PATIENCE, verbose=False)
         report = fold_trainer.validate(fold_val_loader)
 
         r2       = report['metrics']['global_r2']          if 'metrics'       in report else float('nan')
