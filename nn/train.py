@@ -21,13 +21,14 @@ class Trainer:
     Unified trainer for COSMIC-dFBA that handles both standard and
     Physics-Informed Neural Network (PINN) losses.
     """
-    def __init__(self, model, device, learning_rate=5e-4, model_type='enhanced'):
+    def __init__(self, model, device, learning_rate=5e-4, model_type='enhanced',
+                 scheduler_patience=5):
         self.model = model.to(device)
         self.device = device
         self.model_type = model_type
         self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5
+            self.optimizer, mode='min', factor=0.5, patience=scheduler_patience
         )
         self.losses = []
 
@@ -218,7 +219,7 @@ class Trainer:
                         print(f"  -> Worst R2: {sorted_r2[0]} | Best R2: {sorted_r2[-1]}")
 
                 print(f"Epoch {epoch:3d}: Train={train_loss:.6f} | Val={val_loss:.6f}{status}{metric_str} "
-                      f"| IC={comps['ic']:.4f} | NonNeg={comps['pinn_non_neg']:.4f}")
+                      f"| Conc={comps['conc']:.4f} | IC={comps['ic']:.4f} | NonNeg={comps['pinn_non_neg']:.4f}")
 
             if patience is not None and patience_counter >= patience:
                 if verbose:
@@ -309,9 +310,10 @@ def main():
     PRETRAIN_EPOCHS = 50
     PRETRAIN_LR     = 5e-4
 
-    # Fine-tuning: lower LR to preserve pre-trained weights (avoid
-    # catastrophic forgetting with only 7 real samples).
-    FINETUNE_LR = 3e-5
+    # Fine-tuning: low LR to avoid catastrophic forgetting, but high enough
+    # for the scheduler not to kill learning in the first 30 epochs.
+    # scheduler_patience=15 delays LR halving vs the pre-training default of 5.
+    FINETUNE_LR = 1e-4
 
     try:
         dataset = load_data(str(DATA_PATH))
@@ -378,7 +380,8 @@ def main():
         fold_train_loader = DataLoader(fold_train, batch_size=4, shuffle=True,  collate_fn=dfba_collate_fn)
         fold_val_loader   = DataLoader(fold_val,   batch_size=1, shuffle=False, collate_fn=dfba_collate_fn)
 
-        fold_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced')
+        fold_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced',
+                               scheduler_patience=15)
         best_val = fold_trainer.train(fold_train_loader, fold_val_loader,
                                       epochs=EPOCHS, patience=PATIENCE, verbose=False)
         report = fold_trainer.validate(fold_val_loader)
@@ -403,7 +406,8 @@ def main():
     # Save final model (re-trained on all 10 reactors)
     model.load_state_dict(pretrained_state)
     all_loader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=dfba_collate_fn)
-    final_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced')
+    final_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced',
+                            scheduler_patience=15)
     final_trainer.train(all_loader, all_loader, epochs=EPOCHS // 2, patience=PATIENCE)
     torch.save({
         'model_state': model.state_dict(),
