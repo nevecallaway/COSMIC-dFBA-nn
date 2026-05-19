@@ -45,7 +45,7 @@ class Trainer:
 
         # Enhanced / PINN Fused Loss
         conc_pred = predictions['concentrations']
-        phase_logits = predictions['phase_weights']
+        phase_pred = predictions['phase_weights']   # (batch, time, 1) regression in [0,1]
         growth_rates = predictions['growth_rates']
         prod_rates = predictions['prod_rates']
 
@@ -65,52 +65,28 @@ class Trainer:
         # 5. PINN: Concentration Smoothness
         conc_smoothness = 0.1 * torch.mean((conc_pred[:, 1:, :] - conc_pred[:, :-1, :]) ** 2)
 
-        # 6. Binary Phase Classification (with masking)
+        # 6. Phase regression — MSE against continuous 0-1 fraction, all timepoints
         phase_loss = torch.tensor(0.0, device=targets.device)
         if phases_batch is not None:
-            batch_size, n_time = phases_batch.shape
-            phase_targets = torch.zeros((batch_size, n_time), dtype=torch.long, device=phases_batch.device)
-            mask = torch.zeros((batch_size, n_time), dtype=torch.bool, device=phases_batch.device)
-
-            for b in range(batch_size):
-                for t in range(n_time):
-                    p = phases_batch[b, t].item()
-                    if p < 0.2:
-                        phase_targets[b, t] = 0
-                        mask[b, t] = True
-                    elif p > 0.8:
-                        phase_targets[b, t] = 1
-                        mask[b, t] = True
-
-            phase_logits_flat = phase_logits.view(-1, 2)
-            phase_targets_flat = phase_targets.view(-1)
-            mask_flat = mask.view(-1)
-
-            if mask_flat.sum() > 0:
-                phase_loss = 0.5 * nn.functional.cross_entropy(
-                    phase_logits_flat[mask_flat],
-                    phase_targets_flat[mask_flat]
-                )
+            phase_target = phases_batch.unsqueeze(-1)   # (batch, time, 1)
+            phase_loss = 0.5 * nn.functional.mse_loss(phase_pred, phase_target)
 
         # 7. PINN: Rate-based constraints
-        phase_probs = torch.softmax(phase_logits, dim=-1)
-        f = phase_probs[:, :, 1 : 2]
-        blended_rates = (1 - f) * growth_rates + f * prod_rates
+        blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
         rate_smoothness = 0.1 * torch.mean((blended_rates[:, 1:, :] - blended_rates[:, :-1, :]) ** 2)
         rate_magnitude = 0.01 * (torch.mean(torch.abs(growth_rates)) + torch.mean(torch.abs(prod_rates)))
 
-        # 8. Phase smoothness and exploration penalty
-        phase_smoothness = 0.05 * torch.mean((phase_logits[:, 1:, :] - phase_logits[:, :-1, :]) ** 2)
-        phase_penalty = 0.02 * torch.mean((phase_probs[:, :, 1 : 2] - 0.5) ** 2)
+        # 8. Phase smoothness (encourage gradual rather than jittery transitions)
+        phase_smoothness = 0.05 * torch.mean((phase_pred[:, 1:, :] - phase_pred[:, :-1, :]) ** 2)
 
         total_loss = (conc_loss + ic_loss + flatness_penalty + phase_loss +
                       non_neg_loss + conc_smoothness + rate_smoothness +
-                      rate_magnitude + phase_smoothness + phase_penalty)
+                      rate_magnitude + phase_smoothness)
 
         return total_loss, {
             'conc': conc_loss.item(),
             'ic': ic_loss.item(),
-            'phase_ce': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
+            'phase_mse': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
             'pinn_non_neg': non_neg_loss.item(),
             'pinn_rate_smooth': rate_smoothness.item(),
         }
@@ -118,7 +94,7 @@ class Trainer:
     def train_epoch(self, train_loader):
         self.model.train()
         epoch_loss = 0.0
-        components = {'conc': 0, 'ic': 0, 'phase_ce': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
+        components = {'conc': 0, 'ic': 0, 'phase_mse': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
 
         for batch in train_loader:
             ic = batch['initial_conditions'].to(self.device)

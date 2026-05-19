@@ -250,11 +250,16 @@ class ModelDiagnostics:
         }
 
     @staticmethod
-    def calculate_phase_metrics(y_true_phase: np.ndarray, y_pred_logits: np.ndarray) -> Dict[str, Any]:
-        y_pred_phase = np.argmax(y_pred_logits, axis=-1)
-        y_true_binary = (y_true_phase > 0.5).astype(int)
-        f1 = f1_score(y_true_binary.flatten(), y_pred_phase.flatten())
-        cm = confusion_matrix(y_true_binary.flatten(), y_pred_phase.flatten())
+    def calculate_phase_metrics(y_true_phase: np.ndarray, y_pred_phase_prob: np.ndarray) -> Dict[str, Any]:
+        # f < 0.2 → growth state (0), f > 0.8 → production state (1).
+        # Evaluate only on unambiguous timepoints; ignore the 0.2–0.8 transition zone.
+        y_true_flat = y_true_phase.flatten()
+        y_pred_flat = y_pred_phase_prob.squeeze(-1).flatten()
+        mask = (y_true_flat < 0.2) | (y_true_flat > 0.8)
+        y_true_binary = (y_true_flat[mask] > 0.5).astype(int)
+        y_pred_binary = (y_pred_flat[mask] > 0.5).astype(int)
+        f1 = f1_score(y_true_binary, y_pred_binary)
+        cm = confusion_matrix(y_true_binary, y_pred_binary)
         return {
             "phase_f1": f1,
             "confusion_matrix": cm
