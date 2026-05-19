@@ -31,21 +31,59 @@ def load_doe_parameters(doe_file: str) -> Dict[str, np.ndarray]:
     return result
 
 
+def load_specific_rates(rates_file: str, reactors: list) -> np.ndarray:
+    """
+    Load per-reactor phase-specific metabolic rates from data_3.csv.
+
+    Returns array of shape (n_reactors, 50) — 25 growth-phase rates
+    followed by 25 production-phase rates — standardised to N(0,1)
+    per rate column across reactors so all features are comparable.
+
+    Reactor order matches the `reactors` list passed in (must be sorted).
+    """
+    df = pd.read_csv(rates_file)
+    # Row 0 contains reactor names; rows 1+ are the 25 component rates.
+    # Columns 2-11  → growth phase (R0001..R0012 order)
+    # Columns 12-21 → production phase (R0001..R0012 order)
+    data = df.iloc[1:].reset_index(drop=True)
+    # The column order in data_3 is the same sorted reactor order
+    data3_reactors = ['R0001','R0002','R0003','R0004','R0005',
+                      'R0006','R0008','R0010','R0011','R0012']
+    n_r  = len(reactors)
+    n_c  = 25   # components
+    growth = np.zeros((n_r, n_c))
+    prod   = np.zeros((n_r, n_c))
+    for i, reactor in enumerate(reactors):
+        if reactor in data3_reactors:
+            j = data3_reactors.index(reactor)
+            growth[i] = data.iloc[:, 2 + j].values.astype(float)
+            prod[i]   = data.iloc[:, 12 + j].values.astype(float)
+
+    # Standardise each column to N(0,1) across reactors
+    rates = np.concatenate([growth, prod], axis=1)   # (n_r, 50)
+    mean  = rates.mean(axis=0, keepdims=True)
+    std   = np.clip(rates.std(axis=0, keepdims=True), 1e-6, None)
+    return (rates - mean) / std
+
+
 def load_experimental_data(data_file: str = "data/data_2.csv",
-                           doe_file: str = "data/data_1.csv") -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
+                           doe_file: str = "data/data_1.csv",
+                           rates_file: str = "data/data_3.csv") -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
     Load real bioprocess data from CSV.
 
     Args:
-        data_file: Path to data_2.csv with experimental measurements
-        doe_file:  Path to data_1.csv with DoE variable levels (O2, AAs, Glc).
-                   If the file does not exist, doe_params is returned as None.
+        data_file:   Path to data_2.csv with experimental measurements
+        doe_file:    Path to data_1.csv with DoE variable levels (O2, AAs, Glc).
+        rates_file:  Path to data_3.csv with per-reactor phase-specific rates.
+                     Missing files are handled gracefully (params omitted).
 
     Returns:
         trajectories: (n_reactors, n_timepoints, n_components)
         time_points: (n_reactors, n_timepoints)
         initial_conditions: (n_reactors, n_components)
-        metadata: Dict with column info, including 'doe_params' array (n_reactors, 3)
+        metadata: Dict with column info, 'doe_params' (n_reactors, 3),
+                  and 'specific_rates' (n_reactors, 50)
     """
     # Read CSV
     df = pd.read_csv(data_file)
@@ -145,13 +183,23 @@ def load_experimental_data(data_file: str = "data/data_2.csv",
     except FileNotFoundError:
         print(f"  (DoE file {doe_file} not found — running without process parameters)")
 
+    # Load phase-specific metabolic rates (25 growth + 25 production) if file exists
+    specific_rates_array = None
+    try:
+        specific_rates_array = load_specific_rates(rates_file, reactors)  # (n_reactors, 50)
+        print(f"  Specific rates loaded: {specific_rates_array.shape} "
+              f"[25 growth + 25 prod rates] from {rates_file}")
+    except FileNotFoundError:
+        print(f"  (Rates file {rates_file} not found — running without specific rates)")
+
     metadata = {
         'components': key_components,
         'n_components': n_components,
         'n_reactors': n_reactors,
         'reactors': reactors,
-        'phases': phases_padded,       # Ground truth phase information
-        'doe_params': doe_params_array, # (n_reactors, 3) or None
+        'phases': phases_padded,              # Ground truth phase information
+        'doe_params': doe_params_array,        # (n_reactors, 3) or None
+        'specific_rates': specific_rates_array, # (n_reactors, 50) or None
     }
 
     print(f"\n✓ Loaded real data:")

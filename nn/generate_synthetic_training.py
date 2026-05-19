@@ -321,6 +321,7 @@ def generate_dataset(n_samples=1000, n_timepoints=13,
 def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
                                data_file='data/data_2.csv',
                                doe_file='data/data_1.csv',
+                               rates_file='data/data_3.csv',
                                output_file='synthetic_training.npz',
                                noise_scale=1.0):
     """
@@ -328,17 +329,12 @@ def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
 
     For each sample:
       1. Pick a random real reactor as the base trajectory.
-      2. Add independent Gaussian noise at every (timepoint, component) cell,
-         with std = noise_scale * inter-reactor std at that cell (floored at 0.02
-         so low-variance components still get some variation).
-      3. Clip to [0, 1].
-      4. Copy the base reactor's DoE parameters (O2, AAs, Glc) and add small
-         Gaussian noise so the model sees varied parameter inputs.
-
-    This automatically captures every pattern in the real data (glucose fed-batch
-    rise, titer post-peak decline, Asp crash, etc.) without any hand-coded ODE.
-
-    noise_scale=1.0 means noise σ equals the actual reactor-to-reactor spread.
+      2. Add independent Gaussian noise at every (timepoint, component) cell.
+      3. Copy the base reactor's DoE params (O2, AAs, Glc) + small noise.
+      4. Copy the base reactor's 50 specific rates (25 growth + 25 production)
+         + small noise — gives the model per-reactor metabolic rate information
+         that's critical for components like L-Arginine where the IC alone
+         provides no differentiating signal.
     """
     print(f"\nLoading real trajectories from {data_file}...")
     real_trajs, real_phases, real_times, components = load_real_trajectories(data_file)
@@ -346,50 +342,59 @@ def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
     print(f"  {n_reactors} reactors × {n_tp} timepoints × {nc} components")
     assert nc == N_COMPONENTS, f"Expected {N_COMPONENTS} components, got {nc}"
 
-    # Load DoE parameters (O2, AAs, Glc) for each real reactor
-    reactor_order = sorted(set(  # must match load_real_trajectories ordering
+    reactor_order = sorted(set(
         pd.read_csv(data_file)['Vessel'].dropna().unique()
     ))
+
+    # Load DoE parameters (O2, AAs, Glc)
     doe_map = {}
     try:
-        df_doe = pd.read_csv(doe_file, header=1)   # row 0 is merged "Variable Levels" header
+        df_doe = pd.read_csv(doe_file, header=1)
         df_doe = df_doe[df_doe['Vessel'].str.match(r'^R\d{4}$', na=False)]
         for _, row in df_doe.iterrows():
             doe_map[str(row['Vessel'])] = np.array(
                 [pd.to_numeric(row['O2'], errors='coerce'),
                  pd.to_numeric(row['AAs'], errors='coerce'),
                  pd.to_numeric(row['Glc'], errors='coerce')], dtype=float)
-        print(f"  DoE params loaded for {len(doe_map)} reactors from {doe_file}")
+        print(f"  DoE params loaded for {len(doe_map)} reactors")
     except FileNotFoundError:
-        print(f"  (DoE file {doe_file} not found — doe_params will be zeros)")
+        print(f"  (DoE file not found — doe_params will be zeros)")
+    real_doe = np.array([doe_map.get(r, np.zeros(3)) for r in reactor_order])  # (n_r, 3)
 
-    real_doe = np.array([doe_map.get(r, np.zeros(3)) for r in reactor_order])  # (n_reactors, 3)
+    # Load specific rates (25 growth + 25 production per reactor)
+    real_rates = np.zeros((n_reactors, 50))
+    try:
+        from utils import load_specific_rates
+        real_rates = load_specific_rates(rates_file, reactor_order)   # (n_r, 50)
+        print(f"  Specific rates loaded: {real_rates.shape}")
+    except (FileNotFoundError, ImportError):
+        print(f"  (Rates file not found — specific_rates will be zeros)")
 
-    # Per-cell std across reactors — captures true variability at each timepoint
-    cell_std = np.std(real_trajs, axis=0)          # (n_tp, nc)
-    cell_std = np.clip(cell_std, 0.02, None)        # floor so no component is frozen
+    # Per-cell std across reactors
+    cell_std    = np.clip(np.std(real_trajs, axis=0), 0.02, None)
     noise_sigma = noise_scale * cell_std
 
     print(f"Generating {n_samples} Gaussian-augmented trajectories "
           f"(noise_scale={noise_scale})...")
 
-    trajectories = np.empty((n_samples, n_tp, nc))
-    times        = np.empty((n_samples, n_tp))
-    ics          = np.empty((n_samples, nc))
-    phases       = np.empty((n_samples, n_tp))
-    doe_params   = np.empty((n_samples, 3))
+    trajectories    = np.empty((n_samples, n_tp, nc))
+    times           = np.empty((n_samples, n_tp))
+    ics             = np.empty((n_samples, nc))
+    phases          = np.empty((n_samples, n_tp))
+    doe_params      = np.empty((n_samples, 3))
+    specific_rates  = np.empty((n_samples, 50))
 
     for i in range(n_samples):
         base_idx = np.random.randint(n_reactors)
-        noise    = np.random.normal(0.0, noise_sigma)  # (n_tp, nc)
+        noise    = np.random.normal(0.0, noise_sigma)
         traj     = np.clip(real_trajs[base_idx] + noise, 0.0, 1.0)
 
-        trajectories[i] = traj
-        times[i]        = real_times[base_idx]
-        ics[i]          = traj[0]
-        phases[i]       = real_phases[base_idx]
-        # DoE params: base reactor's values + tiny noise so model sees variation
-        doe_params[i]   = real_doe[base_idx] + np.random.normal(0, 0.1, 3)
+        trajectories[i]   = traj
+        times[i]          = real_times[base_idx]
+        ics[i]            = traj[0]
+        phases[i]         = real_phases[base_idx]
+        doe_params[i]     = real_doe[base_idx] + np.random.normal(0, 0.1, 3)
+        specific_rates[i] = real_rates[base_idx] + np.random.normal(0, 0.1, 50)
 
         if (i + 1) % 2000 == 0:
             print(f"  {i + 1}/{n_samples}")
@@ -401,6 +406,7 @@ def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
         ics=ics,
         phases=phases,
         doe_params=doe_params,
+        specific_rates=specific_rates,
         components=np.array(components, dtype=object),
     )
 
@@ -439,5 +445,6 @@ if __name__ == "__main__":
         n_timepoints=13,
         data_file=str(_here / 'data' / 'data_2.csv'),
         doe_file=str(_here / 'data' / 'data_1.csv'),
+        rates_file=str(_here / 'data' / 'data_3.csv'),
         output_file=str(_here / 'synthetic_training.npz'),
     )

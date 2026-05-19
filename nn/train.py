@@ -224,11 +224,15 @@ def load_synthetic_data(npz_path, real_dataset):
     ics = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
     ics = np.clip(ics, 0, 1)
 
-    # Build parameters dict from stored DoE params (O2, AAs, Glc) if present
+    # Build parameters dict from stored DoE params + specific rates
     parameters = {}
     if 'doe_params' in data:
         dp = data['doe_params']       # (N, 3)
-        parameters = {'O2': dp[:, 0], 'AAs': dp[:, 1], 'Glc': dp[:, 2]}
+        parameters.update({'O2': dp[:, 0], 'AAs': dp[:, 1], 'Glc': dp[:, 2]})
+    if 'specific_rates' in data:
+        sr = data['specific_rates']   # (N, 50)
+        for k in range(sr.shape[1]):
+            parameters[f'rate_{k}'] = sr[:, k]
 
     return dFBADataset(trajectories, times, ics, parameters=parameters,
                        normalize=False, phases=phases)
@@ -239,13 +243,19 @@ def load_data(data_path):
     p = Path(data_path)
     if p.is_file() and p.suffix == '.csv':
         print(f"Loading real experimental data from {p}...")
-        doe_file = str(p.parent / 'data_1.csv')
-        trajectories, time_points, ics, metadata = load_experimental_data(str(p), doe_file=doe_file)
-        phases = metadata.get('phases', None)
-        doe_arr = metadata.get('doe_params', None)   # (n_reactors, 3) or None
+        doe_file   = str(p.parent / 'data_1.csv')
+        rates_file = str(p.parent / 'data_3.csv')
+        trajectories, time_points, ics, metadata = load_experimental_data(
+            str(p), doe_file=doe_file, rates_file=rates_file)
+        phases   = metadata.get('phases', None)
+        doe_arr  = metadata.get('doe_params', None)        # (n_reactors, 3) or None
+        rate_arr = metadata.get('specific_rates', None)    # (n_reactors, 50) or None
         parameters = {}
         if doe_arr is not None:
-            parameters = {'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]}
+            parameters.update({'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]})
+        if rate_arr is not None:
+            for k in range(rate_arr.shape[1]):
+                parameters[f'rate_{k}'] = rate_arr[:, k]
         dataset = dFBADataset(trajectories, time_points, ics, parameters=parameters,
                               normalize=True, phases=phases)
         return dataset
