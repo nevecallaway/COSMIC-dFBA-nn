@@ -306,9 +306,9 @@ def main():
     EPOCHS     = 200
     PATIENCE   = 40
 
-    # Pre-training: 100 epochs — R2 was still improving at epoch 50 (-0.15),
-    # so more pre-training gives better initialization before fine-tuning.
-    PRETRAIN_EPOCHS = 100
+    # Pre-training: 200 epochs — R2 only crossed zero at epoch 100 and was
+    # still actively improving, so more pre-training gives better initialization.
+    PRETRAIN_EPOCHS = 200
     PRETRAIN_LR     = 5e-4
 
     # Fine-tuning: low LR to avoid catastrophic forgetting, but high enough
