@@ -106,7 +106,7 @@ def load_real_ics(data_file='data_2.csv'):
     return np.array(ics), components
 
 
-def load_real_trajectories(data_file='data_2.csv'):
+def load_real_trajectories(data_file=None):
     """
     Load full trajectories for every reactor.
     Returns:
@@ -115,6 +115,8 @@ def load_real_trajectories(data_file='data_2.csv'):
       times:        (n_reactors, n_timepoints)
       components:   list of N_COMPONENTS names
     """
+    if data_file is None:
+        data_file = Path(__file__).parent / 'data' / 'data_2.csv'
     df = pd.read_csv(data_file)
     excluded = ['Vessel', 'Time', 'Production phase fraction']
     components = [c for c in df.columns if c not in excluded]
@@ -432,13 +434,14 @@ def _print_stats(trajectories, components):
 
 if __name__ == "__main__":
     import sys
-    data_file   = sys.argv[1] if len(sys.argv) > 1 else 'data/data_2.csv'
-    noise_scale = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
+    from pathlib import Path as _Path
+    _here = _Path(__file__).parent          # nn/ directory, works from any cwd
+    noise_scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
     generate_gaussian_dataset(
         n_samples=20000,
         n_timepoints=13,
-        data_file=data_file,
-        doe_file='data/data_1.csv',
-        output_file='synthetic_training.npz',
+        data_file=str(_here / 'data' / 'data_2.csv'),
+        doe_file=str(_here / 'data' / 'data_1.csv'),
+        output_file=str(_here / 'synthetic_training.npz'),
         noise_scale=noise_scale,
     )
