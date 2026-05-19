@@ -1,0 +1,14 @@
+﻿,Variable Levels,,
+Vessel,O2,AAs,Glc
+R0001,0,0,0
+R0002,-1,0,1
+R0003,0,-1,-1
+R0004,1,0,-1
+R0005,0,1,1
+R0006,1,0,1
+R0008,0,0,0
+R0010,-1,1,0
+R0011,-1,-1,0
+R0012,0,0,0
+,,,
+"*0 represents a central value, +1 and -1 represent increased and reduced values for the independent variable, respectively",,,
