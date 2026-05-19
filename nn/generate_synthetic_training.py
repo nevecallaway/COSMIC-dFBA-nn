@@ -433,15 +433,11 @@ def _print_stats(trajectories, components):
 
 
 if __name__ == "__main__":
-    import sys
-    from pathlib import Path as _Path
-    _here = _Path(__file__).parent          # nn/ directory, works from any cwd
-    noise_scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+    _here = Path(__file__).parent           # nn/ directory, works from any cwd
     generate_gaussian_dataset(
         n_samples=20000,
         n_timepoints=13,
         data_file=str(_here / 'data' / 'data_2.csv'),
         doe_file=str(_here / 'data' / 'data_1.csv'),
         output_file=str(_here / 'synthetic_training.npz'),
-        noise_scale=noise_scale,
     )
