@@ -106,6 +106,57 @@ def load_real_ics(data_file='data_2.csv'):
     return np.array(ics), components
 
 
+def load_real_trajectories(data_file='data_2.csv'):
+    """
+    Load full trajectories for every reactor.
+    Returns:
+      trajectories: (n_reactors, n_timepoints, N_COMPONENTS)  – NaN-filled rows dropped
+      phases:       (n_reactors, n_timepoints)
+      times:        (n_reactors, n_timepoints)
+      components:   list of N_COMPONENTS names
+    """
+    df = pd.read_csv(data_file)
+    excluded = ['Vessel', 'Time', 'Production phase fraction']
+    components = [c for c in df.columns if c not in excluded]
+
+    for col in df.columns:
+        if col != 'Vessel':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=['Time'])
+
+    trajs, phases_list, times_list = [], [], []
+    for reactor in sorted(df['Vessel'].dropna().unique()):
+        rdf = df[df['Vessel'] == reactor].sort_values('Time')
+        traj = rdf[components].values.astype(float)
+        # Drop rows with any NaN component
+        valid = ~np.any(np.isnan(traj), axis=1)
+        traj  = traj[valid]
+        ph    = rdf['Production phase fraction'].values[valid] if 'Production phase fraction' in rdf.columns else np.zeros(valid.sum())
+        t     = rdf['Time'].values[valid]
+        trajs.append(traj)
+        phases_list.append(ph)
+        times_list.append(t)
+
+    # Pad / truncate to the most common length (all real reactors have 13 points)
+    n_tp = max(len(t) for t in times_list)
+    n_r  = len(trajs)
+    nc   = len(components)
+    out_trajs  = np.zeros((n_r, n_tp, nc))
+    out_phases = np.zeros((n_r, n_tp))
+    out_times  = np.zeros((n_r, n_tp))
+    for i, (tr, ph, t) in enumerate(zip(trajs, phases_list, times_list)):
+        nt = len(t)
+        out_trajs[i, :nt]  = tr
+        out_phases[i, :nt] = ph
+        out_times[i, :nt]  = t
+        if nt < n_tp:                     # pad with last value
+            out_trajs[i, nt:]  = tr[-1]
+            out_phases[i, nt:] = ph[-1]
+            out_times[i, nt:]  = t[-1]
+
+    return out_trajs, out_phases, out_times, components
+
+
 def generate_synthetic_trajectory(real_ics, n_timepoints=13):
     """
     Generate one 25-component trajectory.
@@ -145,6 +196,16 @@ def generate_synthetic_trajectory(real_ics, n_timepoints=13):
     # (matching R0003 IC=1.0 → 0.034 by day 4; R0011 IC=1.0 → -0.188 day 3)
     asp_crash = (np.random.random() < 0.20) and (ic[IDX_ASP] > 0.7)
 
+    # Glucose fed-batch dynamics. Real data shows two patterns:
+    #   Low IC (<0.7, 8/10 reactors): glucose is fed over days 0→peak_day,
+    #     rising to 1.0, then either stays high (30%) or declines (70%).
+    #   High IC (≥0.7, R0003/R0004): already at max, consumption only.
+    glc_fed_batch  = ic[IDX_GLC] < 0.7
+    glc_peak_day   = np.random.uniform(2.0, 4.0)
+    glc_stays_high = np.random.random() < 0.30   # 30% stay high post-peak
+    # Constant feed rate that would bring glucose from IC to 1.0 by peak_day
+    glc_feed_rate  = (1.0 - ic[IDX_GLC]) / glc_peak_day if glc_fed_batch else 0.0
+
     state = ic.copy()
     trajectory = [state.copy()]
 
@@ -162,7 +223,15 @@ def generate_synthetic_trajectory(real_ics, n_timepoints=13):
         # Core metabolites
         dstate[IDX_CD]  = mu
         dstate[IDX_CV]  = 0.04 * mu + np.random.normal(0, 0.003)
-        dstate[IDX_GLC] = -(0.30 * (1.0 - p) + 0.10 * p) * cd
+
+        # Glucose: fed-batch rise to 1.0 over peak_day, then either flat or declining.
+        glc_consumption = (0.30 * (1.0 - p) + 0.10 * p) * cd
+        if glc_fed_batch and time[t_idx] < glc_peak_day:
+            dstate[IDX_GLC] = glc_feed_rate - glc_consumption
+        elif glc_stays_high:
+            dstate[IDX_GLC] = -0.01 * cd   # feeding ≈ consumption, nearly flat
+        else:
+            dstate[IDX_GLC] = -glc_consumption
         dstate[IDX_LAC] = ( 0.08 * (1.0 - p) - 0.04 * p) * cd
         dstate[IDX_NH4] = ( 0.06 * (1.0 - p) + 0.02 * p) * cd
 
@@ -247,6 +316,74 @@ def generate_dataset(n_samples=1000, n_timepoints=13,
     return trajectories, times, ics, phases, components
 
 
+def generate_gaussian_dataset(n_samples=20000, n_timepoints=13,
+                               data_file='data_2.csv',
+                               output_file='synthetic_training.npz',
+                               noise_scale=1.0):
+    """
+    Generate synthetic data by Gaussian augmentation of real trajectories.
+
+    For each sample:
+      1. Pick a random real reactor as the base trajectory.
+      2. Add independent Gaussian noise at every (timepoint, component) cell,
+         with std = noise_scale * inter-reactor std at that cell (floored at 0.02
+         so low-variance components still get some variation).
+      3. Clip to [0, 1].
+
+    This automatically captures every pattern in the real data (glucose fed-batch
+    rise, titer post-peak decline, Asp crash, etc.) without any hand-coded ODE.
+
+    noise_scale=1.0 means noise σ equals the actual reactor-to-reactor spread.
+    Increase to 1.5–2.0 for more diversity; decrease toward 0.5 for tighter copies.
+    """
+    print(f"\nLoading real trajectories from {data_file}...")
+    real_trajs, real_phases, real_times, components = load_real_trajectories(data_file)
+    n_reactors, n_tp, nc = real_trajs.shape
+    print(f"  {n_reactors} reactors × {n_tp} timepoints × {nc} components")
+    assert nc == N_COMPONENTS, f"Expected {N_COMPONENTS} components, got {nc}"
+
+    # Per-cell std across reactors — captures true variability at each timepoint
+    cell_std = np.std(real_trajs, axis=0)          # (n_tp, nc)
+    cell_std = np.clip(cell_std, 0.02, None)        # floor so no component is frozen
+    noise_sigma = noise_scale * cell_std
+
+    print(f"Generating {n_samples} Gaussian-augmented trajectories "
+          f"(noise_scale={noise_scale})...")
+
+    trajectories = np.empty((n_samples, n_tp, nc))
+    times        = np.empty((n_samples, n_tp))
+    ics          = np.empty((n_samples, nc))
+    phases       = np.empty((n_samples, n_tp))
+
+    for i in range(n_samples):
+        base_idx = np.random.randint(n_reactors)
+        noise    = np.random.normal(0.0, noise_sigma)  # (n_tp, nc)
+        traj     = np.clip(real_trajs[base_idx] + noise, 0.0, 1.0)
+
+        trajectories[i] = traj
+        times[i]        = real_times[base_idx]
+        ics[i]          = traj[0]
+        phases[i]       = real_phases[base_idx]
+
+        if (i + 1) % 2000 == 0:
+            print(f"  {i + 1}/{n_samples}")
+
+    np.savez(
+        output_file,
+        trajectories=trajectories,
+        times=times,
+        ics=ics,
+        phases=phases,
+        components=np.array(components, dtype=object),
+    )
+
+    print(f"\nSaved to {output_file}")
+    print(f"  Trajectories: {trajectories.shape}")
+    _print_stats(trajectories, components)
+
+    return trajectories, times, ics, phases, components
+
+
 def load_synthetic_dataset(filename='synthetic_training.npz'):
     data = np.load(filename, allow_pickle=True)
     return (
@@ -269,10 +406,12 @@ def _print_stats(trajectories, components):
 
 if __name__ == "__main__":
     import sys
-    data_file = sys.argv[1] if len(sys.argv) > 1 else 'data_2.csv'
-    generate_dataset(
+    data_file  = sys.argv[1] if len(sys.argv) > 1 else 'data_2.csv'
+    noise_scale = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
+    generate_gaussian_dataset(
         n_samples=20000,
         n_timepoints=13,
         data_file=data_file,
         output_file='synthetic_training.npz',
+        noise_scale=noise_scale,
     )
