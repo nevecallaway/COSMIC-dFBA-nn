@@ -196,12 +196,15 @@ class ModelDiagnostics:
 
     @staticmethod
     def calculate_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-        r2 = r2_score(y_true.flatten(), y_pred.flatten())
-        mape = mean_absolute_percentage_error(y_true.flatten(), y_pred.flatten())
+        # r2_score requires ≥2 samples; return nan gracefully for single-reactor LOO folds
+        flat_true, flat_pred = y_true.flatten(), y_pred.flatten()
+        r2   = r2_score(flat_true, flat_pred) if len(flat_true) >= 2 else float('nan')
+        mape = mean_absolute_percentage_error(flat_true, flat_pred)
 
         comp_r2 = {}
         for i in range(y_true.shape[-1]):
-            comp_r2[f"comp_{i}"] = r2_score(y_true[..., i], y_pred[..., i])
+            t, p = y_true[..., i].flatten(), y_pred[..., i].flatten()
+            comp_r2[f"comp_{i}"] = r2_score(t, p) if (len(t) >= 2 and t.var() > 0) else float('nan')
 
         return {
             "global_r2": r2,
