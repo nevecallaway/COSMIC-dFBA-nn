@@ -56,6 +56,7 @@ class dFBADataset(Dataset):
             self._normalize()
 
     def _normalize(self):
+        # Step 1: robust percentile anchor (handles outliers without discarding them)
         self.traj_min = np.percentile(self.trajectories, 1, axis=(0, 1))
         self.traj_max = np.percentile(self.trajectories, 99, axis=(0, 1))
         self.traj_max = np.maximum(self.traj_max, self.traj_min + 1e-6)
@@ -64,11 +65,22 @@ class dFBADataset(Dataset):
         self.ic_max = np.percentile(self.initial_conditions, 99, axis=0)
         self.ic_max = np.maximum(self.ic_max, self.ic_min + 1e-6)
 
-        # No clipping — outliers beyond the 1st-99th percentile range are left
-        # as-is (values may exceed [0,1]). Clipping was creating a pile-up at
-        # 1.0 in the synthetic data histograms and discarding real signal.
-        self.trajectories = (self.trajectories - self.traj_min) / (self.traj_max - self.traj_min)
-        self.initial_conditions = (self.initial_conditions - self.ic_min) / (self.ic_max - self.ic_min)
+        traj_norm = (self.trajectories - self.traj_min) / (self.traj_max - self.traj_min)
+        ic_norm   = (self.initial_conditions - self.ic_min) / (self.ic_max - self.ic_min)
+
+        # Step 2: rescale to exactly [0,1] using the actual min/max of the
+        # normalised values — no clipping, no pile-up at boundaries,
+        # outliers land near 0 or 1 rather than being squashed onto them.
+        self.traj_scale_min = traj_norm.min(axis=(0, 1))
+        self.traj_scale_max = traj_norm.max(axis=(0, 1))
+        self.traj_scale_max = np.maximum(self.traj_scale_max, self.traj_scale_min + 1e-6)
+
+        self.ic_scale_min = ic_norm.min(axis=0)
+        self.ic_scale_max = ic_norm.max(axis=0)
+        self.ic_scale_max = np.maximum(self.ic_scale_max, self.ic_scale_min + 1e-6)
+
+        self.trajectories = (traj_norm - self.traj_scale_min) / (self.traj_scale_max - self.traj_scale_min)
+        self.initial_conditions = (ic_norm - self.ic_scale_min) / (self.ic_scale_max - self.ic_scale_min)
 
     def __len__(self):
         return self.n_samples

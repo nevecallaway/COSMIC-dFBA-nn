@@ -237,10 +237,13 @@ def load_synthetic_data(npz_path, real_dataset):
     ics          = data['ics'].copy()                 # (N, C)
     phases       = data['phases']                     # (N, T)
 
-    # Apply real data's normalization (fit on 10 reactors) to synthetic.
-    # No clipping — preserve the full distribution including outlier tails.
-    trajectories = (trajectories - real_dataset.traj_min) / (real_dataset.traj_max - real_dataset.traj_min)
-    ics = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
+    # Apply real data's two-step normalization to synthetic data so both
+    # datasets share the same scale.
+    traj_norm = (trajectories - real_dataset.traj_min) / (real_dataset.traj_max - real_dataset.traj_min)
+    trajectories = (traj_norm - real_dataset.traj_scale_min) / (real_dataset.traj_scale_max - real_dataset.traj_scale_min)
+
+    ic_norm = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
+    ics = (ic_norm - real_dataset.ic_scale_min) / (real_dataset.ic_scale_max - real_dataset.ic_scale_min)
 
     # Build parameters dict from stored DoE params + specific rates
     parameters = {}
