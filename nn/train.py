@@ -100,7 +100,6 @@ class Trainer:
             'conc': conc_loss.item(),
             'titer_endpoint': endpoint_loss.item(),
             'titer_mono': mono_loss.item(),
-            'nll': nll_loss.item(),
             'ic': ic_loss.item(),
             'phase_mse': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
             'pinn_non_neg': non_neg_loss.item(),
@@ -110,7 +109,7 @@ class Trainer:
     def train_epoch(self, train_loader):
         self.model.train()
         epoch_loss = 0.0
-        components = {'conc': 0, 'titer_endpoint': 0, 'titer_mono': 0, 'nll': 0,
+        components = {'conc': 0, 'titer_endpoint': 0, 'titer_mono': 0,
                       'ic': 0, 'phase_mse': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
 
         for batch in train_loader:
@@ -144,7 +143,7 @@ class Trainer:
     def validate(self, val_loader):
         self.model.eval()
         val_loss = 0.0
-        all_targets, all_preds, all_sigmas, all_phase_targets, all_phase_preds = [], [], [], [], []
+        all_targets, all_preds, all_phase_targets, all_phase_preds = [], [], [], []
 
         with torch.no_grad():
             for batch in val_loader:
@@ -159,8 +158,6 @@ class Trainer:
 
                 all_targets.append(target.cpu().numpy())
                 all_preds.append(predictions['concentrations'].cpu().numpy() if isinstance(predictions, dict) else predictions.cpu().numpy())
-                if isinstance(predictions, dict) and 'sigma' in predictions:
-                    all_sigmas.append(predictions['sigma'].cpu().numpy())
                 if 'phases' in batch:
                     all_phase_targets.append(batch['phases'].cpu().numpy())
                     all_phase_preds.append(predictions['phase_weights'].cpu().numpy() if isinstance(predictions, dict) else None)
@@ -172,8 +169,6 @@ class Trainer:
             y_pred = np.concatenate(all_preds, axis=0)
             report["metrics"] = ModelDiagnostics.calculate_regression_metrics(y_true, y_pred)
             report["spearman"] = ModelDiagnostics.calculate_spearman_metrics(y_true, y_pred)
-            if all_sigmas:
-                report["sigma"] = np.concatenate(all_sigmas, axis=0)
             report["y_true"] = y_true
             report["y_pred"] = y_pred
             if all_phase_targets:

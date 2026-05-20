@@ -71,12 +71,11 @@ def run_inference(model, dataset, device):
         out = model(ic, time, params)
 
     y_pred  = out['concentrations'].cpu().numpy()   # (N, T, C)
-    sigma   = out['sigma'].cpu().numpy() if 'sigma' in out else None  # (N, T, C)
     y_true  = target.cpu().numpy()
     phases_pred = out['phase_weights'].cpu().numpy()  # (N, T, 1)
     phases_true = batch['phases'].cpu().numpy() if 'phases' in batch else None
 
-    return y_true, y_pred, sigma, phases_true, phases_pred
+    return y_true, y_pred, phases_true, phases_pred
 
 
 def print_metrics(y_true, y_pred, phases_true, phases_pred, reactors):
@@ -183,56 +182,56 @@ def plot_titer_summary(y_true, y_pred, reactors, out_dir):
 
 
 # ── Conformal prediction ──────────────────────────────────────────────────────
-def build_conformal_intervals(conformal_cal, y_pred, sigma, alpha=0.1):
+def build_conformal_intervals(conformal_cal, y_pred, alpha=0.1):
     """
     Split conformal and adjusted (normalised) conformal prediction intervals.
 
-    conformal_cal: list of dicts with 'y_true', 'y_pred', 'sigma' from LOO folds
-    y_pred:  (N, T, C) — new predictions to wrap with intervals
-    sigma:   (N, T, C) — predicted uncertainty for those predictions
-    alpha:   miscoverage rate (0.1 → 90% coverage)
+    conformal_cal: list of dicts with 'y_true', 'y_pred' from LOO folds
+    y_pred: (N, T, C) — predictions to wrap with intervals
+    alpha:  miscoverage rate (0.1 → 90% coverage)
 
-    Returns dict with 'split' and 'adjusted' keys, each containing
-    'lower' and 'upper' arrays of shape (N, T, C).
+    Split conformal: fixed-width intervals from raw LOO residual quantile.
+    Adjusted conformal: locally adaptive intervals — sigma derived from the
+    per-(timepoint, component) std of LOO residuals, so the interval width
+    reflects how consistently wrong the model is at each point in time.
+
+    Returns dict with 'split' and 'adjusted' keys, each with 'lower'/'upper'
+    arrays of shape (N, T, C).
     """
     if not conformal_cal:
         return None
 
-    # Stack calibration residuals: (n_cal_reactors, T, C)
-    cal_true  = np.concatenate([c['y_true'] for c in conformal_cal], axis=0)
-    cal_pred  = np.concatenate([c['y_pred'] for c in conformal_cal], axis=0)
-    cal_sigma = np.concatenate([c['sigma']  for c in conformal_cal], axis=0) \
-                if conformal_cal[0]['sigma'] is not None else None
-
+    cal_true = np.concatenate([c['y_true'] for c in conformal_cal], axis=0)
+    cal_pred = np.concatenate([c['y_pred'] for c in conformal_cal], axis=0)
     raw_residuals = np.abs(cal_true - cal_pred)   # (n_cal, T, C)
 
-    # Split conformal: quantile of raw absolute residuals
     n_cal = raw_residuals.shape[0]
-    level = np.ceil((n_cal + 1) * (1 - alpha)) / n_cal
-    level = min(level, 1.0)
-    q_split = np.quantile(raw_residuals, level, axis=0)   # (T, C)
+    level = min(np.ceil((n_cal + 1) * (1 - alpha)) / n_cal, 1.0)
 
+    # Split conformal: one quantile per (T, C) position
+    q_split = np.quantile(raw_residuals, level, axis=0)   # (T, C)
     split = {
         'lower': y_pred - q_split,
         'upper': y_pred + q_split,
         'q': q_split,
     }
 
-    # Adjusted conformal: normalise residuals by predicted sigma
-    adjusted = None
-    if cal_sigma is not None and sigma is not None:
-        norm_residuals = raw_residuals / (cal_sigma + 1e-8)   # (n_cal, T, C)
-        q_adj = np.quantile(norm_residuals, level, axis=0)    # (T, C)
-        adjusted = {
-            'lower': y_pred - q_adj * sigma,
-            'upper': y_pred + q_adj * sigma,
-            'q': q_adj,
-        }
+    # Adjusted conformal: sigma = std of LOO residuals per (T, C)
+    # Normalise calibration scores by this sigma, then scale new intervals
+    sigma_cal = np.std(raw_residuals, axis=0) + 1e-8       # (T, C)
+    norm_residuals = raw_residuals / sigma_cal              # (n_cal, T, C)
+    q_adj = np.quantile(norm_residuals, level, axis=0)     # (T, C)
+    adjusted = {
+        'lower': y_pred - q_adj * sigma_cal,
+        'upper': y_pred + q_adj * sigma_cal,
+        'q': q_adj,
+        'sigma': sigma_cal,
+    }
 
     return {'split': split, 'adjusted': adjusted}
 
 
-def plot_conformal_titer(y_true, y_pred, sigma, intervals, reactors, out_dir):
+def plot_conformal_titer(y_true, y_pred, intervals, reactors, out_dir):
     """Per-reactor titer trajectory with split and adjusted conformal bands."""
     n = y_true.shape[0]
     T = y_true.shape[1]
@@ -260,11 +259,6 @@ def plot_conformal_titer(y_true, y_pred, sigma, intervals, reactors, out_dir):
             hi = intervals['adjusted']['upper'][r, :, IDX_TITER]
             ax.fill_between(t, lo, hi, alpha=0.25, color='#FF6F00', label='Adjusted 90% CI')
 
-        if sigma is not None:
-            ax.fill_between(t,
-                            y_pred[r, :, IDX_TITER] - sigma[r, :, IDX_TITER],
-                            y_pred[r, :, IDX_TITER] + sigma[r, :, IDX_TITER],
-                            alpha=0.2, color='gray', label='±1σ (model)')
 
         ax.set_title(name, fontsize=9)
         ax.set_xlabel('Normalised time', fontsize=7)
@@ -279,7 +273,7 @@ def plot_conformal_titer(y_true, y_pred, sigma, intervals, reactors, out_dir):
     print('  saved eval_conformal_titer.png')
 
 
-def plot_problem_reactors(y_true, y_pred, sigma, phases_true, phases_pred,
+def plot_problem_reactors(y_true, y_pred, phases_true, phases_pred,
                           reactors, out_dir):
     """
     Deep-dive plots for reactors with negative titer Spearman.
@@ -320,11 +314,6 @@ def plot_problem_reactors(y_true, y_pred, sigma, phases_true, phases_pred,
                     markersize=3, linewidth=1, label='Actual')
             ax.plot(t, y_pred[r_idx, :, c], 's--', color='#E53935',
                     markersize=3, linewidth=1, label='Predicted')
-            if sigma is not None:
-                ax.fill_between(t,
-                                y_pred[r_idx, :, c] - sigma[r_idx, :, c],
-                                y_pred[r_idx, :, c] + sigma[r_idx, :, c],
-                                alpha=0.2, color='gray')
             cname = COMPONENT_NAMES[c] if c < len(COMPONENT_NAMES) else f'comp_{c}'
             # Highlight titer
             color = '#B71C1C' if c == IDX_TITER else 'black'
@@ -393,29 +382,27 @@ def main():
     conformal_cal = ckpt.get('conformal_cal', [])
 
     # Inference
-    y_true, y_pred, sigma, phases_true, phases_pred = run_inference(model, dataset, device)
+    y_true, y_pred, phases_true, phases_pred = run_inference(model, dataset, device)
 
     # Metrics
     print_metrics(y_true, y_pred, phases_true, phases_pred, reactors)
 
-    # Conformal intervals
-    intervals = build_conformal_intervals(conformal_cal, y_pred, sigma, alpha=0.1)
+    # Conformal intervals from LOO calibration residuals
+    intervals = build_conformal_intervals(conformal_cal, y_pred, alpha=0.1)
     if intervals:
         print(f"\nConformal prediction (90% coverage):")
         q = intervals['split']['q'][:, IDX_TITER]
-        print(f"  Split interval half-width (titer, mean over time): ±{q.mean():.4f}")
-        if intervals['adjusted']:
-            q_adj = intervals['adjusted']['q'][:, IDX_TITER]
-            print(f"  Adjusted interval scale  (titer, mean over time): ×{q_adj.mean():.4f}σ")
+        print(f"  Split interval half-width (titer, mean over time)   : ±{q.mean():.4f}")
+        q_adj = intervals['adjusted']['q'][:, IDX_TITER]
+        print(f"  Adjusted interval scale   (titer, mean over time)   : ×{q_adj.mean():.4f} × σ_cal")
 
     # Plots
     out_dir = here / 'figures'
     out_dir.mkdir(exist_ok=True)
     plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)
     plot_titer_summary(y_true, y_pred, reactors, out_dir)
-    plot_conformal_titer(y_true, y_pred, sigma, intervals, reactors, out_dir)
-    plot_problem_reactors(y_true, y_pred, sigma, phases_true, phases_pred,
-                          reactors, out_dir)
+    plot_conformal_titer(y_true, y_pred, intervals, reactors, out_dir)
+    plot_problem_reactors(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)
 
 
 if __name__ == '__main__':
