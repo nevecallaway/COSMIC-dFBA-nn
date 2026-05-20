@@ -1,0 +1,61 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+# =============================================================================
+# Apptainer definition for COSMIC-dFBA surrogate model training.
+#
+# Build (once, on a machine with root or fakeroot):
+#   apptainer build cosmic.sif cosmic.def
+#
+# Or use --fakeroot on clusters that support it:
+#   apptainer build --fakeroot cosmic.sif cosmic.def
+#
+# Transfer to cluster:
+#   scp cosmic.sif <user>@<cluster>:~/cosmic-dfba/
+#
+# Run (see run_cosmic_apptainer.sh for the full SLURM script):
+#   apptainer exec --nv --bind $WORK_DIR:/workspace cosmic.sif \
+#       bash -c "cd /workspace && python generate_synthetic_training.py && python train.py"
+# =============================================================================
+
+%post
+    # System packages
+    apt-get update -qq && apt-get install -y --no-install-recommends \
+        git \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Python packages not in the base pytorch image
+    pip install --no-cache-dir \
+        pandas \
+        scikit-learn \
+        scipy \
+        matplotlib \
+        umap-learn
+
+    # Confirm GPU is accessible at build time (informational only)
+    python -c "import torch; print('PyTorch', torch.__version__)"
+
+%environment
+    export PYTHONUNBUFFERED=1
+
+%labels
+    Author "Neve Callaway"
+    Project "COSMIC-dFBA surrogate model"
+    Base "pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime"
+
+%help
+    COSMIC-dFBA surrogate model training environment.
+    Includes: PyTorch 2.2, CUDA 12.1, pandas, scikit-learn, scipy, matplotlib.
+
+    Minimal files needed on the cluster (bind-mounted at /workspace):
+      train.py
+      model.py
+      utils.py
+      generate_synthetic_training.py
+      data/data_1.csv
+      data/data_2.csv
+      data/data_3.csv
+
+    Full run:
+      apptainer exec --nv --bind /path/to/files:/workspace cosmic.sif \
+          bash -c "cd /workspace && python generate_synthetic_training.py && python train.py"

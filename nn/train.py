@@ -16,6 +16,8 @@ import time
 from model import CosmicNNSurrogateEnhanced, dFBADataset, dfba_collate_fn
 from utils import load_experimental_data, ModelDiagnostics
 
+IDX_TITER = 5   # column index of Titer in the 25-component trajectory
+
 class Trainer:
     """
     Unified trainer for COSMIC-dFBA that handles both standard and
@@ -49,8 +51,18 @@ class Trainer:
         growth_rates = predictions['growth_rates']
         prod_rates = predictions['prod_rates']
 
-        # 1. Main Concentration MSE
-        conc_loss = nn.functional.mse_loss(conc_pred, targets)
+        # 1. Weighted concentration MSE — titer gets 8× weight
+        comp_weights = torch.ones(targets.shape[-1], device=targets.device)
+        comp_weights[IDX_TITER] = 8.0
+        conc_loss = (((conc_pred - targets) ** 2) * comp_weights).mean()
+
+        # 1a. Endpoint titer loss — directly penalise final-timepoint titer error
+        endpoint_loss = 2.0 * nn.functional.mse_loss(
+            conc_pred[:, -1, IDX_TITER], targets[:, -1, IDX_TITER])
+
+        # 1b. Monotonicity — titer should never decrease
+        titer_diff = conc_pred[:, 1:, IDX_TITER] - conc_pred[:, :-1, IDX_TITER]
+        mono_loss = 0.5 * torch.mean(torch.clamp(-titer_diff, min=0) ** 2)
 
         # 2. IC constraint
         ic_loss = 0.1 * torch.mean((conc_pred[:, 0, :] - ics) ** 2)
@@ -79,12 +91,15 @@ class Trainer:
         # 8. Phase smoothness (encourage gradual rather than jittery transitions)
         phase_smoothness = 0.05 * torch.mean((phase_pred[:, 1:, :] - phase_pred[:, :-1, :]) ** 2)
 
-        total_loss = (conc_loss + ic_loss + flatness_penalty + phase_loss +
+        total_loss = (conc_loss + endpoint_loss + mono_loss +
+                      ic_loss + flatness_penalty + phase_loss +
                       non_neg_loss + conc_smoothness + rate_smoothness +
                       rate_magnitude + phase_smoothness)
 
         return total_loss, {
             'conc': conc_loss.item(),
+            'titer_endpoint': endpoint_loss.item(),
+            'titer_mono': mono_loss.item(),
             'ic': ic_loss.item(),
             'phase_mse': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
             'pinn_non_neg': non_neg_loss.item(),
@@ -94,7 +109,8 @@ class Trainer:
     def train_epoch(self, train_loader):
         self.model.train()
         epoch_loss = 0.0
-        components = {'conc': 0, 'ic': 0, 'phase_mse': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
+        components = {'conc': 0, 'titer_endpoint': 0, 'titer_mono': 0,
+                      'ic': 0, 'phase_mse': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
 
         for batch in train_loader:
             ic = batch['initial_conditions'].to(self.device)
