@@ -9,6 +9,7 @@ import torch
 from pathlib import Path
 from typing import Tuple, Dict, List, Any
 from sklearn.metrics import f1_score, confusion_matrix, r2_score, mean_absolute_percentage_error
+from scipy.stats import spearmanr
 
 def load_doe_parameters(doe_file: str) -> Dict[str, np.ndarray]:
     """
@@ -295,6 +296,42 @@ class ModelDiagnostics:
             "global_r2": r2,
             "global_mape": mape,
             "component_r2": comp_r2
+        }
+
+    @staticmethod
+    def calculate_spearman_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+        """
+        Within-reactor Spearman correlation across timepoints, per component.
+
+        y_true / y_pred: (n_reactors, n_timepoints, n_components)
+
+        For each reactor × component pair, compute Spearman rank correlation
+        of the predicted vs actual trajectory over time.  Returns the mean
+        across reactors for each component, plus the titer (comp 5) result.
+        """
+        n_reactors, n_timepoints, n_components = y_true.shape
+        # (n_reactors, n_components)
+        rho_matrix = np.full((n_reactors, n_components), np.nan)
+
+        for r in range(n_reactors):
+            for c in range(n_components):
+                t = y_true[r, :, c]
+                p = y_pred[r, :, c]
+                # Need variance in both series to compute correlation
+                if t.std() > 1e-8 and p.std() > 1e-8:
+                    rho, _ = spearmanr(t, p)
+                    rho_matrix[r, c] = rho
+
+        mean_rho_per_comp = np.nanmean(rho_matrix, axis=0)  # (n_components,)
+        comp_spearman = {f"comp_{i}": mean_rho_per_comp[i] for i in range(n_components)}
+
+        return {
+            "mean_spearman": float(np.nanmean(rho_matrix)),
+            "titer_spearman": float(mean_rho_per_comp[5]),   # comp 5 = Titer
+            "component_spearman": comp_spearman,
+            "per_reactor_titer_spearman": {
+                f"reactor_{r}": float(rho_matrix[r, 5]) for r in range(n_reactors)
+            },
         }
 
     @staticmethod

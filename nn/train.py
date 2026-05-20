@@ -168,6 +168,7 @@ class Trainer:
             y_true = np.concatenate(all_targets, axis=0)
             y_pred = np.concatenate(all_preds, axis=0)
             report["metrics"] = ModelDiagnostics.calculate_regression_metrics(y_true, y_pred)
+            report["spearman"] = ModelDiagnostics.calculate_spearman_metrics(y_true, y_pred)
             if all_phase_targets:
                 p_true = np.concatenate(all_phase_targets, axis=0)
                 p_pred = np.concatenate(all_phase_preds, axis=0)
@@ -234,11 +235,10 @@ def load_synthetic_data(npz_path, real_dataset):
     ics          = data['ics'].copy()                 # (N, C)
     phases       = data['phases']                     # (N, T)
 
-    # Apply real data's normalization (fit on 10 reactors) to synthetic
+    # Apply real data's normalization (fit on 10 reactors) to synthetic.
+    # No clipping — preserve the full distribution including outlier tails.
     trajectories = (trajectories - real_dataset.traj_min) / (real_dataset.traj_max - real_dataset.traj_min)
-    trajectories = np.clip(trajectories, 0, 1)
     ics = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
-    ics = np.clip(ics, 0, 1)
 
     # Build parameters dict from stored DoE params + specific rates
     parameters = {}
@@ -309,9 +309,17 @@ def load_data(data_path):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--no-synthetic', action='store_true',
+                        help='Skip pre-training on synthetic data, train on real data only')
+    args = parser.parse_args()
+
     print(f"\n{'='*70}")
     print("COSMIC-dFBA Unified Training")
     print(f"{'='*70}")
+
+    USE_SYNTHETIC = not args.no_synthetic
 
     script_dir = Path(__file__).parent
     DATA_PATH  = script_dir / "data" / "data_2.csv"
@@ -349,8 +357,8 @@ def main():
         n_heads=N_HEADS
     )
 
-    # --- Phase 1: Pre-train on synthetic data (if available) ---
-    if SYNTH_PATH.exists():
+    # --- Phase 1: Pre-train on synthetic data (if available and enabled) ---
+    if USE_SYNTHETIC and SYNTH_PATH.exists():
         print(f"\n{'='*70}")
         print("Phase 1: Pre-training on synthetic data")
         print(f"{'='*70}")
@@ -383,6 +391,7 @@ def main():
 
     n_reactors  = len(dataset)
     loo_val_losses, loo_r2s, loo_titer_r2s, loo_f1s = [], [], [], []
+    loo_spearman, loo_titer_spearman = [], []
     pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
 
     start_time = time.time()
@@ -405,22 +414,28 @@ def main():
                                       epochs=EPOCHS, patience=PATIENCE, verbose=False)
         report = fold_trainer.validate(fold_val_loader)
 
-        r2       = report['metrics']['global_r2']          if 'metrics'       in report else float('nan')
-        titer_r2 = report['metrics']['component_r2'].get('comp_5', float('nan')) if 'metrics' in report else float('nan')
-        f1       = report['phase_metrics']['phase_f1']     if 'phase_metrics' in report else float('nan')
+        r2            = report['metrics']['global_r2']                          if 'metrics'       in report else float('nan')
+        titer_r2      = report['metrics']['component_r2'].get('comp_5', float('nan')) if 'metrics' in report else float('nan')
+        f1            = report['phase_metrics']['phase_f1']                    if 'phase_metrics' in report else float('nan')
+        spearman_mean = report['spearman']['mean_spearman']                    if 'spearman'      in report else float('nan')
+        titer_spear   = report['spearman']['titer_spearman']                   if 'spearman'      in report else float('nan')
         loo_val_losses.append(best_val)
         loo_r2s.append(r2)
         loo_titer_r2s.append(titer_r2)
         loo_f1s.append(f1)
+        loo_spearman.append(spearman_mean)
+        loo_titer_spearman.append(titer_spear)
         print(f"  Fold {fold+1:2d}/10 (val=reactor {fold}): "
-              f"loss={best_val:.4f} | R2={r2:.4f} | TiterR2={titer_r2:.4f} | F1={f1:.4f}")
+              f"R2={r2:.4f} | TiterR2={titer_r2:.4f} | "
+              f"Spearman={spearman_mean:.4f} | TiterSpearman={titer_spear:.4f} | F1={f1:.4f}")
 
     elapsed = time.time() - start_time
     print(f"\n✓ LOO complete in {elapsed:.1f}s")
-    print(f"  Mean val loss : {np.mean(loo_val_losses):.4f} ± {np.std(loo_val_losses):.4f}")
-    print(f"  Mean R2       : {np.mean(loo_r2s):.4f} ± {np.std(loo_r2s):.4f}")
-    print(f"  Mean Titer R2 : {np.mean(loo_titer_r2s):.4f} ± {np.std(loo_titer_r2s):.4f}")
-    print(f"  Mean F1       : {np.mean(loo_f1s):.4f} ± {np.std(loo_f1s):.4f}")
+    print(f"  Mean R2             : {np.mean(loo_r2s):.4f} ± {np.std(loo_r2s):.4f}")
+    print(f"  Mean Titer R2       : {np.mean(loo_titer_r2s):.4f} ± {np.std(loo_titer_r2s):.4f}")
+    print(f"  Mean Spearman       : {np.mean(loo_spearman):.4f} ± {np.std(loo_spearman):.4f}")
+    print(f"  Mean Titer Spearman : {np.mean(loo_titer_spearman):.4f} ± {np.std(loo_titer_spearman):.4f}")
+    print(f"  Mean F1             : {np.mean(loo_f1s):.4f} ± {np.std(loo_f1s):.4f}")
 
     # Save final model (re-trained on all 10 reactors)
     model.load_state_dict(pretrained_state)
@@ -431,9 +446,16 @@ def main():
     torch.save({
         'model_state': model.state_dict(),
         'model_type': 'enhanced',
-        'hyperparams': {'latent_dim': LATENT_DIM, 'n_heads': N_HEADS, 'n_components': dataset.n_components},
+        'hyperparams': {
+            'latent_dim': LATENT_DIM,
+            'n_heads': N_HEADS,
+            'n_components': dataset.n_components,
+            'n_params': dataset.n_params,
+        },
         'loo_mean_r2': float(np.mean(loo_r2s)),
         'loo_mean_titer_r2': float(np.mean(loo_titer_r2s)),
+        'loo_mean_spearman': float(np.mean(loo_spearman)),
+        'loo_mean_titer_spearman': float(np.mean(loo_titer_spearman)),
     }, 'improved_model.pt')
     print(f"✓ Model saved: improved_model.pt")
 

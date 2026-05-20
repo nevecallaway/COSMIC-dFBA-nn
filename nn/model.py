@@ -64,10 +64,11 @@ class dFBADataset(Dataset):
         self.ic_max = np.percentile(self.initial_conditions, 99, axis=0)
         self.ic_max = np.maximum(self.ic_max, self.ic_min + 1e-6)
 
+        # No clipping — outliers beyond the 1st-99th percentile range are left
+        # as-is (values may exceed [0,1]). Clipping was creating a pile-up at
+        # 1.0 in the synthetic data histograms and discarding real signal.
         self.trajectories = (self.trajectories - self.traj_min) / (self.traj_max - self.traj_min)
-        self.trajectories = np.clip(self.trajectories, 0, 1)
         self.initial_conditions = (self.initial_conditions - self.ic_min) / (self.ic_max - self.ic_min)
-        self.initial_conditions = np.clip(self.initial_conditions, 0, 1)
 
     def __len__(self):
         return self.n_samples
