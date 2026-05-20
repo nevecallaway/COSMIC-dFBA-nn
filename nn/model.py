@@ -176,13 +176,13 @@ class MultiHeadTemporalDecoder(nn.Module):
         blended_rates_initial = (1 - f_initial) * growth_rates + f_initial * prod_rates
         concentrations = self.integrator(initial_conditions, blended_rates_initial, time_points)
 
-        phase_pred = self.state_weighting(latent_state, concentrations)  # (batch, time, 1) in [0,1]
+        phase_pred = self.state_weighting(latent_state, concentrations)
         final_blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
         final_concentrations = self.integrator(initial_conditions, final_blended_rates, time_points)
 
         return {
             'concentrations': final_concentrations,
-            'phase_weights': phase_pred,   # continuous regression output, not logits
+            'phase_weights': phase_pred,
             'growth_rates': growth_rates,
             'prod_rates': prod_rates,
         }

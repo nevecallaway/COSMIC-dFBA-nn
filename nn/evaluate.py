@@ -71,11 +71,12 @@ def run_inference(model, dataset, device):
         out = model(ic, time, params)
 
     y_pred  = out['concentrations'].cpu().numpy()   # (N, T, C)
+    sigma   = out['sigma'].cpu().numpy() if 'sigma' in out else None  # (N, T, C)
     y_true  = target.cpu().numpy()
     phases_pred = out['phase_weights'].cpu().numpy()  # (N, T, 1)
     phases_true = batch['phases'].cpu().numpy() if 'phases' in batch else None
 
-    return y_true, y_pred, phases_true, phases_pred
+    return y_true, y_pred, sigma, phases_true, phases_pred
 
 
 def print_metrics(y_true, y_pred, phases_true, phases_pred, reactors):
@@ -181,6 +182,182 @@ def plot_titer_summary(y_true, y_pred, reactors, out_dir):
     print("  saved eval_titer_scatter.png")
 
 
+# ── Conformal prediction ──────────────────────────────────────────────────────
+def build_conformal_intervals(conformal_cal, y_pred, sigma, alpha=0.1):
+    """
+    Split conformal and adjusted (normalised) conformal prediction intervals.
+
+    conformal_cal: list of dicts with 'y_true', 'y_pred', 'sigma' from LOO folds
+    y_pred:  (N, T, C) — new predictions to wrap with intervals
+    sigma:   (N, T, C) — predicted uncertainty for those predictions
+    alpha:   miscoverage rate (0.1 → 90% coverage)
+
+    Returns dict with 'split' and 'adjusted' keys, each containing
+    'lower' and 'upper' arrays of shape (N, T, C).
+    """
+    if not conformal_cal:
+        return None
+
+    # Stack calibration residuals: (n_cal_reactors, T, C)
+    cal_true  = np.concatenate([c['y_true'] for c in conformal_cal], axis=0)
+    cal_pred  = np.concatenate([c['y_pred'] for c in conformal_cal], axis=0)
+    cal_sigma = np.concatenate([c['sigma']  for c in conformal_cal], axis=0) \
+                if conformal_cal[0]['sigma'] is not None else None
+
+    raw_residuals = np.abs(cal_true - cal_pred)   # (n_cal, T, C)
+
+    # Split conformal: quantile of raw absolute residuals
+    n_cal = raw_residuals.shape[0]
+    level = np.ceil((n_cal + 1) * (1 - alpha)) / n_cal
+    level = min(level, 1.0)
+    q_split = np.quantile(raw_residuals, level, axis=0)   # (T, C)
+
+    split = {
+        'lower': y_pred - q_split,
+        'upper': y_pred + q_split,
+        'q': q_split,
+    }
+
+    # Adjusted conformal: normalise residuals by predicted sigma
+    adjusted = None
+    if cal_sigma is not None and sigma is not None:
+        norm_residuals = raw_residuals / (cal_sigma + 1e-8)   # (n_cal, T, C)
+        q_adj = np.quantile(norm_residuals, level, axis=0)    # (T, C)
+        adjusted = {
+            'lower': y_pred - q_adj * sigma,
+            'upper': y_pred + q_adj * sigma,
+            'q': q_adj,
+        }
+
+    return {'split': split, 'adjusted': adjusted}
+
+
+def plot_conformal_titer(y_true, y_pred, sigma, intervals, reactors, out_dir):
+    """Per-reactor titer trajectory with split and adjusted conformal bands."""
+    n = y_true.shape[0]
+    T = y_true.shape[1]
+    t = np.linspace(0, 1, T)
+
+    fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharey=False)
+    axes = axes.flatten()
+
+    for r in range(n):
+        ax = axes[r]
+        name = reactors[r] if r < len(reactors) else f"R{r}"
+
+        ax.plot(t, y_true[r, :, IDX_TITER], 'o-', color='#1565C0',
+                label='Actual', markersize=5, zorder=4)
+        ax.plot(t, y_pred[r, :, IDX_TITER], 's--', color='#E53935',
+                label='Predicted', markersize=4, zorder=3)
+
+        if intervals and intervals['split']:
+            lo = intervals['split']['lower'][r, :, IDX_TITER]
+            hi = intervals['split']['upper'][r, :, IDX_TITER]
+            ax.fill_between(t, lo, hi, alpha=0.15, color='#E53935', label='Split 90% CI')
+
+        if intervals and intervals['adjusted']:
+            lo = intervals['adjusted']['lower'][r, :, IDX_TITER]
+            hi = intervals['adjusted']['upper'][r, :, IDX_TITER]
+            ax.fill_between(t, lo, hi, alpha=0.25, color='#FF6F00', label='Adjusted 90% CI')
+
+        if sigma is not None:
+            ax.fill_between(t,
+                            y_pred[r, :, IDX_TITER] - sigma[r, :, IDX_TITER],
+                            y_pred[r, :, IDX_TITER] + sigma[r, :, IDX_TITER],
+                            alpha=0.2, color='gray', label='±1σ (model)')
+
+        ax.set_title(name, fontsize=9)
+        ax.set_xlabel('Normalised time', fontsize=7)
+        ax.tick_params(labelsize=7)
+        if r == 0:
+            ax.legend(fontsize=6)
+
+    fig.suptitle('Titer Trajectories with Conformal Prediction Intervals', fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_dir / 'eval_conformal_titer.png', dpi=150)
+    plt.close(fig)
+    print('  saved eval_conformal_titer.png')
+
+
+def plot_problem_reactors(y_true, y_pred, sigma, phases_true, phases_pred,
+                          reactors, out_dir):
+    """
+    Deep-dive plots for reactors with negative titer Spearman.
+    Shows all 25 components side by side for the problem cases.
+    """
+    from scipy.stats import spearmanr
+
+    # Identify problem reactors (titer Spearman < 0)
+    problem = []
+    for r in range(y_true.shape[0]):
+        t = y_true[r, :, IDX_TITER]
+        p = y_pred[r, :, IDX_TITER]
+        if t.std() > 1e-8 and p.std() > 1e-8:
+            rho, _ = spearmanr(t, p)
+            if rho < 0:
+                problem.append((r, rho))
+
+    if not problem:
+        print('  No problem reactors found (all titer Spearman ≥ 0)')
+        return
+
+    print(f'  Problem reactors (negative titer Spearman): '
+          f'{[reactors[r] for r, _ in problem]}')
+
+    T = y_true.shape[1]
+    t = np.linspace(0, 1, T)
+    ncols = 5
+    nrows = 5  # 25 components in a 5×5 grid
+
+    for r_idx, rho in problem:
+        name = reactors[r_idx] if r_idx < len(reactors) else f"R{r_idx}"
+        fig, axes = plt.subplots(nrows, ncols, figsize=(18, 14))
+        axes = axes.flatten()
+
+        for c in range(25):
+            ax = axes[c]
+            ax.plot(t, y_true[r_idx, :, c], 'o-', color='#1565C0',
+                    markersize=3, linewidth=1, label='Actual')
+            ax.plot(t, y_pred[r_idx, :, c], 's--', color='#E53935',
+                    markersize=3, linewidth=1, label='Predicted')
+            if sigma is not None:
+                ax.fill_between(t,
+                                y_pred[r_idx, :, c] - sigma[r_idx, :, c],
+                                y_pred[r_idx, :, c] + sigma[r_idx, :, c],
+                                alpha=0.2, color='gray')
+            cname = COMPONENT_NAMES[c] if c < len(COMPONENT_NAMES) else f'comp_{c}'
+            # Highlight titer
+            color = '#B71C1C' if c == IDX_TITER else 'black'
+            ax.set_title(cname, fontsize=7, color=color)
+            ax.tick_params(labelsize=6)
+            if c == 0:
+                ax.legend(fontsize=6)
+
+        fig.suptitle(f'{name} — All Components  |  Titer Spearman = {rho:.3f}',
+                     fontsize=12)
+        fig.tight_layout()
+        fig.savefig(out_dir / f'eval_problem_{name}.png', dpi=150)
+        plt.close(fig)
+        print(f'  saved eval_problem_{name}.png')
+
+        # Also plot the phase trajectory for this reactor
+        if phases_true is not None:
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.plot(t, phases_true[r_idx], 'o-', color='#1565C0', label='Actual f')
+            ax.plot(t, phases_pred[r_idx, :, 0], 's--', color='#E53935', label='Predicted f')
+            ax.axhline(0.2, color='gray', linestyle=':', linewidth=0.8)
+            ax.axhline(0.8, color='gray', linestyle=':', linewidth=0.8)
+            ax.set_ylim(-0.05, 1.05)
+            ax.set_xlabel('Normalised time')
+            ax.set_ylabel('f (phase fraction)')
+            ax.set_title(f'{name} — Phase Trajectory')
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(out_dir / f'eval_problem_{name}_phase.png', dpi=150)
+            plt.close(fig)
+            print(f'  saved eval_problem_{name}_phase.png')
+
+
 def main():
     here = Path(__file__).parent
     parser = argparse.ArgumentParser()
@@ -211,20 +388,34 @@ def main():
     dataset = dFBADataset(trajs, times, ics, parameters=parameters,
                           normalize=True, phases=phases)
 
-    # Load model
-    model, _ = load_model(args.model, device)
+    # Load model and calibration data
+    model, ckpt = load_model(args.model, device)
+    conformal_cal = ckpt.get('conformal_cal', [])
 
     # Inference
-    y_true, y_pred, phases_true, phases_pred = run_inference(model, dataset, device)
+    y_true, y_pred, sigma, phases_true, phases_pred = run_inference(model, dataset, device)
 
     # Metrics
     print_metrics(y_true, y_pred, phases_true, phases_pred, reactors)
+
+    # Conformal intervals
+    intervals = build_conformal_intervals(conformal_cal, y_pred, sigma, alpha=0.1)
+    if intervals:
+        print(f"\nConformal prediction (90% coverage):")
+        q = intervals['split']['q'][:, IDX_TITER]
+        print(f"  Split interval half-width (titer, mean over time): ±{q.mean():.4f}")
+        if intervals['adjusted']:
+            q_adj = intervals['adjusted']['q'][:, IDX_TITER]
+            print(f"  Adjusted interval scale  (titer, mean over time): ×{q_adj.mean():.4f}σ")
 
     # Plots
     out_dir = here / 'figures'
     out_dir.mkdir(exist_ok=True)
     plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)
     plot_titer_summary(y_true, y_pred, reactors, out_dir)
+    plot_conformal_titer(y_true, y_pred, sigma, intervals, reactors, out_dir)
+    plot_problem_reactors(y_true, y_pred, sigma, phases_true, phases_pred,
+                          reactors, out_dir)
 
 
 if __name__ == '__main__':

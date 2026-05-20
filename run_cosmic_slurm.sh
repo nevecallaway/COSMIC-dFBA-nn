@@ -6,6 +6,7 @@
 
 # ── Edit these to match your cluster ─────────────────────────────────────────
 #SBATCH --job-name=cosmic_dfba
+#SBATCH --account=jth54
 #SBATCH --partition=m9g                  # GPU partition (m8g also available)
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -15,11 +16,12 @@
 #SBATCH --time=08:00:00                 # 8h — conservative for 500 pretrain + 400 finetune epochs
 #SBATCH --output=logs/cosmic_%j.log     # stdout  (%j = job ID)
 #SBATCH --error=logs/cosmic_%j.err      # stderr
+#SBATCH --mail-type=BEGIN,END,FAIL
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail   # exit on error, undefined variable, or pipe failure
 
-REPO_DIR="$HOME/COSMIC-dFBA-nn"        # adjust if cloned elsewhere
+REPO_DIR="$HOME/cosmic"
 CONDA_ENV="cosmic"                      # conda env name  (see SETUP below)
 
 # ── Logging helpers ───────────────────────────────────────────────────────────
@@ -36,27 +38,19 @@ mkdir -p "$REPO_DIR/logs"
 # module load python/3.11
 # module load anaconda3
 
-# ── Activate environment ──────────────────────────────────────────────────────
-# Option A — conda (recommended):
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV"
+# ── Python from conda env (bypasses activation issues in batch jobs) ──────────
+PYTHON="/home/nevecc/.conda/envs/cosmic/bin/python"
 
-# Option B — virtualenv (comment out Option A and uncomment these):
-# source "$REPO_DIR/venv/bin/activate"
-
-# ── Pull latest code ──────────────────────────────────────────────────────────
 cd "$REPO_DIR"
-log "Pulling latest code..."
-git pull --ff-only
 
 # ── Step 1: Generate synthetic training data ──────────────────────────────────
 log "Generating synthetic training data..."
-python nn/generate_synthetic_training.py
+$PYTHON generate_synthetic_training.py
 log "Synthetic data generation complete."
 
 # ── Step 2: Train the model ───────────────────────────────────────────────────
 log "Starting training..."
-python nn/train.py
+$PYTHON train.py
 log "Training complete."
 
 # ── Copy outputs to a timestamped results directory ──────────────────────────

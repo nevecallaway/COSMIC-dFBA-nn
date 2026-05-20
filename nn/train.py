@@ -100,6 +100,7 @@ class Trainer:
             'conc': conc_loss.item(),
             'titer_endpoint': endpoint_loss.item(),
             'titer_mono': mono_loss.item(),
+            'nll': nll_loss.item(),
             'ic': ic_loss.item(),
             'phase_mse': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
             'pinn_non_neg': non_neg_loss.item(),
@@ -109,7 +110,7 @@ class Trainer:
     def train_epoch(self, train_loader):
         self.model.train()
         epoch_loss = 0.0
-        components = {'conc': 0, 'titer_endpoint': 0, 'titer_mono': 0,
+        components = {'conc': 0, 'titer_endpoint': 0, 'titer_mono': 0, 'nll': 0,
                       'ic': 0, 'phase_mse': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
 
         for batch in train_loader:
@@ -143,7 +144,7 @@ class Trainer:
     def validate(self, val_loader):
         self.model.eval()
         val_loss = 0.0
-        all_targets, all_preds, all_phase_targets, all_phase_preds = [], [], [], []
+        all_targets, all_preds, all_sigmas, all_phase_targets, all_phase_preds = [], [], [], [], []
 
         with torch.no_grad():
             for batch in val_loader:
@@ -158,6 +159,8 @@ class Trainer:
 
                 all_targets.append(target.cpu().numpy())
                 all_preds.append(predictions['concentrations'].cpu().numpy() if isinstance(predictions, dict) else predictions.cpu().numpy())
+                if isinstance(predictions, dict) and 'sigma' in predictions:
+                    all_sigmas.append(predictions['sigma'].cpu().numpy())
                 if 'phases' in batch:
                     all_phase_targets.append(batch['phases'].cpu().numpy())
                     all_phase_preds.append(predictions['phase_weights'].cpu().numpy() if isinstance(predictions, dict) else None)
@@ -169,6 +172,10 @@ class Trainer:
             y_pred = np.concatenate(all_preds, axis=0)
             report["metrics"] = ModelDiagnostics.calculate_regression_metrics(y_true, y_pred)
             report["spearman"] = ModelDiagnostics.calculate_spearman_metrics(y_true, y_pred)
+            if all_sigmas:
+                report["sigma"] = np.concatenate(all_sigmas, axis=0)
+            report["y_true"] = y_true
+            report["y_pred"] = y_pred
             if all_phase_targets:
                 p_true = np.concatenate(all_phase_targets, axis=0)
                 p_pred = np.concatenate(all_phase_preds, axis=0)
@@ -392,6 +399,8 @@ def main():
     n_reactors  = len(dataset)
     loo_val_losses, loo_r2s, loo_titer_r2s, loo_f1s = [], [], [], []
     loo_spearman, loo_titer_spearman = [], []
+    # Calibration data for conformal prediction: list of (y_true, y_pred, sigma) per fold
+    conformal_cal = []
     pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
 
     start_time = time.time()
@@ -425,6 +434,13 @@ def main():
         loo_f1s.append(f1)
         loo_spearman.append(spearman_mean)
         loo_titer_spearman.append(titer_spear)
+        if 'y_true' in report and 'y_pred' in report:
+            conformal_cal.append({
+                'fold': fold,
+                'y_true': report['y_true'],        # (1, T, C)
+                'y_pred': report['y_pred'],        # (1, T, C)
+                'sigma':  report.get('sigma'),     # (1, T, C) or None
+            })
         print(f"  Fold {fold+1:2d}/10 (val=reactor {fold}): "
               f"R2={r2:.4f} | TiterR2={titer_r2:.4f} | "
               f"Spearman={spearman_mean:.4f} | TiterSpearman={titer_spear:.4f} | F1={f1:.4f}")
@@ -456,6 +472,7 @@ def main():
         'loo_mean_titer_r2': float(np.mean(loo_titer_r2s)),
         'loo_mean_spearman': float(np.mean(loo_spearman)),
         'loo_mean_titer_spearman': float(np.mean(loo_titer_spearman)),
+        'conformal_cal': conformal_cal,   # LOO residuals for conformal prediction
     }, 'improved_model.pt')
     print(f"✓ Model saved: improved_model.pt")
 
