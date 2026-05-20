@@ -213,8 +213,7 @@ class Trainer:
                         sorted_r2 = sorted(comp_r2s.items(), key=lambda x: x[1])
                         print(f"  -> Worst R2: {sorted_r2[0]} | Best R2: {sorted_r2[-1]}")
 
-                print(f"Epoch {epoch:3d}: Train={train_loss:.6f} | Val={val_loss:.6f}{status}{metric_str} "
-                      f"| Conc={comps['conc']:.4f} | IC={comps['ic']:.4f} | NonNeg={comps['pinn_non_neg']:.4f}")
+                print(f"Epoch {epoch:3d}{status}{metric_str}")
 
             if patience is not None and patience_counter >= patience:
                 if verbose:

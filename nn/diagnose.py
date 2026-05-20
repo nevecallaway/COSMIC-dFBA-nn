@@ -65,7 +65,7 @@ def load_everything(model_path, here):
                           normalize=True, phases=phases)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    ckpt   = torch.load(model_path, map_location=device)
+    ckpt   = torch.load(model_path, map_location=device, weights_only=False)
     hp     = ckpt['hyperparams']
     model  = CosmicNNSurrogateEnhanced(
         n_components=hp['n_components'], n_params=hp['n_params'],

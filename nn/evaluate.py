@@ -39,7 +39,7 @@ IDX_TITER = 5
 
 
 def load_model(checkpoint_path, device):
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     hp = ckpt['hyperparams']
     model = CosmicNNSurrogateEnhanced(
         n_components=hp['n_components'],
