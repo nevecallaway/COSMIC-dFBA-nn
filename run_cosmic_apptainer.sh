@@ -11,7 +11,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1
 #SBATCH --mem=24G
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=logs/cosmic_%j.log
 #SBATCH --error=logs/cosmic_%j.err
 

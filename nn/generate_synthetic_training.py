@@ -441,7 +441,7 @@ def _print_stats(trajectories, components):
 if __name__ == "__main__":
     _here = Path(__file__).parent           # nn/ directory, works from any cwd
     generate_gaussian_dataset(
-        n_samples=20000,
+        n_samples=50000,
         n_timepoints=13,
         data_file=str(_here / 'data' / 'data_2.csv'),
         doe_file=str(_here / 'data' / 'data_1.csv'),

@@ -319,12 +319,12 @@ def main():
 
     LATENT_DIM = 64
     N_HEADS    = 4
-    EPOCHS     = 200
-    PATIENCE   = 40
+    EPOCHS     = 400
+    PATIENCE   = 80
 
-    # Pre-training: 200 epochs — R2 only crossed zero at epoch 100 and was
-    # still actively improving, so more pre-training gives better initialization.
-    PRETRAIN_EPOCHS = 200
+    # Pre-training: 500 epochs on GPU — more synthetic data and compute budget
+    # means pre-training can converge more fully before fine-tuning begins.
+    PRETRAIN_EPOCHS = 500
     PRETRAIN_LR     = 5e-4
 
     # Fine-tuning: low LR to avoid catastrophic forgetting, but high enough
