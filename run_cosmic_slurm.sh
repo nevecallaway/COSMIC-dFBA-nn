@@ -6,13 +6,13 @@
 
 # ── Edit these to match your cluster ─────────────────────────────────────────
 #SBATCH --job-name=cosmic_dfba
-#SBATCH --partition=gpu                  # GPU partition name (check: sinfo -s)
+#SBATCH --partition=m9g                  # GPU partition (m8g also available)
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4               # Data loading workers
-#SBATCH --gres=gpu:1                    # 1 GPU (any type)
+#SBATCH --gres=gpu:p100:1               # 1x P100 GPU
 #SBATCH --mem=24G
-#SBATCH --time=04:00:00                 # hh:mm:ss — 4h is conservative
+#SBATCH --time=08:00:00                 # 8h — conservative for 500 pretrain + 400 finetune epochs
 #SBATCH --output=logs/cosmic_%j.log     # stdout  (%j = job ID)
 #SBATCH --error=logs/cosmic_%j.err      # stderr
 # ─────────────────────────────────────────────────────────────────────────────
