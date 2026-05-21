@@ -53,7 +53,7 @@ class Trainer:
 
         # 1. Weighted concentration MSE — titer gets 8× weight
         comp_weights = torch.ones(targets.shape[-1], device=targets.device)
-        comp_weights[IDX_TITER] = 8.0
+        comp_weights[IDX_TITER] = 5.0
         conc_loss = (((conc_pred - targets) ** 2) * comp_weights).mean()
 
         # 1a. Endpoint titer loss — directly penalise final-timepoint titer error
@@ -69,7 +69,7 @@ class Trainer:
         true_peak_w = torch.softmax(targets[:, :, IDX_TITER] * 5.0, dim=1)
         pred_peak_t = (pred_peak_w * t_idx).sum(dim=1)   # (batch,)
         true_peak_t = (true_peak_w * t_idx).sum(dim=1)   # (batch,)
-        peak_time_loss = 1.0 * torch.mean((pred_peak_t - true_peak_t) ** 2)
+        peak_time_loss = 3.0 * torch.mean((pred_peak_t - true_peak_t) ** 2)
 
         # 2. IC constraint
         ic_loss = 0.1 * torch.mean((conc_pred[:, 0, :] - ics) ** 2)
@@ -462,7 +462,7 @@ def main():
     all_loader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=dfba_collate_fn)
     final_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced',
                             scheduler_patience=15)
-    final_trainer.train(all_loader, all_loader, epochs=EPOCHS // 2, patience=PATIENCE)
+    final_trainer.train(all_loader, all_loader, epochs=EPOCHS, patience=PATIENCE)
     torch.save({
         'model_state': model.state_dict(),
         'model_type': 'enhanced',
