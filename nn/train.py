@@ -60,9 +60,16 @@ class Trainer:
         endpoint_loss = 2.0 * nn.functional.mse_loss(
             conc_pred[:, -1, IDX_TITER], targets[:, -1, IDX_TITER])
 
-        # 1b. Monotonicity — titer should never decrease
-        titer_diff = conc_pred[:, 1:, IDX_TITER] - conc_pred[:, :-1, IDX_TITER]
-        mono_loss = 0.5 * torch.mean(torch.clamp(-titer_diff, min=0) ** 2)
+        # 1b. Peak-time loss — soft argmax to align predicted titer peak with actual.
+        # Replaces the monotonicity penalty, which was fighting the real rise-then-fall
+        # dynamics seen in the data.
+        T = conc_pred.shape[1]
+        t_idx = torch.arange(T, dtype=torch.float32, device=targets.device) / max(T - 1, 1)
+        pred_peak_w = torch.softmax(conc_pred[:, :, IDX_TITER] * 5.0, dim=1)
+        true_peak_w = torch.softmax(targets[:, :, IDX_TITER] * 5.0, dim=1)
+        pred_peak_t = (pred_peak_w * t_idx).sum(dim=1)   # (batch,)
+        true_peak_t = (true_peak_w * t_idx).sum(dim=1)   # (batch,)
+        peak_time_loss = 1.0 * torch.mean((pred_peak_t - true_peak_t) ** 2)
 
         # 2. IC constraint
         ic_loss = 0.1 * torch.mean((conc_pred[:, 0, :] - ics) ** 2)
@@ -91,7 +98,7 @@ class Trainer:
         # 8. Phase smoothness (encourage gradual rather than jittery transitions)
         phase_smoothness = 0.05 * torch.mean((phase_pred[:, 1:, :] - phase_pred[:, :-1, :]) ** 2)
 
-        total_loss = (conc_loss + endpoint_loss + mono_loss +
+        total_loss = (conc_loss + endpoint_loss + peak_time_loss +
                       ic_loss + flatness_penalty + phase_loss +
                       non_neg_loss + conc_smoothness + rate_smoothness +
                       rate_magnitude + phase_smoothness)
@@ -99,7 +106,7 @@ class Trainer:
         return total_loss, {
             'conc': conc_loss.item(),
             'titer_endpoint': endpoint_loss.item(),
-            'titer_mono': mono_loss.item(),
+            'titer_peak': peak_time_loss.item(),
             'ic': ic_loss.item(),
             'phase_mse': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
             'pinn_non_neg': non_neg_loss.item(),
@@ -109,7 +116,7 @@ class Trainer:
     def train_epoch(self, train_loader):
         self.model.train()
         epoch_loss = 0.0
-        components = {'conc': 0, 'titer_endpoint': 0, 'titer_mono': 0,
+        components = {'conc': 0, 'titer_endpoint': 0, 'titer_peak': 0,
                       'ic': 0, 'phase_mse': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
 
         for batch in train_loader:
