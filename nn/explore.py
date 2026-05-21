@@ -266,6 +266,7 @@ def plot_trajectory_clustering(y_true, y_pred, reactors, out_dir):
 
     # Correlation-based dissimilarity
     corr = np.corrcoef(titer)                    # (N, N)
+    corr = (corr + corr.T) / 2                   # enforce symmetry (fp rounding)
     dist = np.clip(1 - corr, 0, None)
     np.fill_diagonal(dist, 0)
     Z = linkage(squareform(dist), method='average')
