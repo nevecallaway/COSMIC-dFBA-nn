@@ -237,10 +237,37 @@ def plot_transition_times(phases_true, phases_pred, time_points, reactors, out_d
     print('  saved eval_transition_times.png')
 
 
+def print_final_titer_metrics(y_true, y_pred, reactors):
+    """
+    Paper-aligned titer metric: predicted vs actual final (day-13) titer.
+    The COSMIC paper reports 'within 10% of measured data' as its titer benchmark.
+    All values are in normalised space; fractional errors are still meaningful.
+    """
+    actual_final    = y_true[:, -1, IDX_TITER]
+    predicted_final = y_pred[:, -1, IDX_TITER]
+    frac_errors     = np.abs(predicted_final - actual_final) / (np.abs(actual_final) + 1e-8)
+    within_10pct    = (frac_errors <= 0.10).sum()
+    within_20pct    = (frac_errors <= 0.20).sum()
+    N               = len(reactors)
+
+    print(f"\n{'='*65}")
+    print("Final Titer Metrics  (paper benchmark: within 10% of measured)")
+    print(f"{'='*65}")
+    print(f"  Within 10% : {within_10pct}/{N}  ({within_10pct/N*100:.0f}%)   (paper: 10/10 → 100%)")
+    print(f"  Within 20% : {within_20pct}/{N}  ({within_20pct/N*100:.0f}%)")
+    print(f"  Mean fractional error : {frac_errors.mean()*100:.1f}%")
+    print(f"\n  Per-reactor (actual → predicted, error%):")
+    for i, name in enumerate(reactors):
+        print(f"    {name}: {actual_final[i]:.3f} → {predicted_final[i]:.3f}  "
+              f"({frac_errors[i]*100:.1f}%)")
+
+
 def plot_titer_summary(y_true, y_pred, reactors, out_dir):
     """Scatter of predicted vs actual final titer across all reactors."""
     actual_final    = y_true[:, -1, IDX_TITER]
     predicted_final = y_pred[:, -1, IDX_TITER]
+    frac_errors     = np.abs(predicted_final - actual_final) / (np.abs(actual_final) + 1e-8)
+    within_10 = (frac_errors <= 0.10).sum()
 
     fig, ax = plt.subplots(figsize=(5, 5))
     ax.scatter(actual_final, predicted_final, s=60, zorder=3)
@@ -249,10 +276,14 @@ def plot_titer_summary(y_true, y_pred, reactors, out_dir):
                     fontsize=7, textcoords='offset points', xytext=(4, 4))
     lo = min(actual_final.min(), predicted_final.min()) - 0.05
     hi = max(actual_final.max(), predicted_final.max()) + 0.05
-    ax.plot([lo, hi], [lo, hi], 'k--', linewidth=1, label='y = x')
+    ax.plot([lo, hi], [lo, hi], 'k--', linewidth=1, label='y = x  (perfect)')
+    # ±10% bands
+    ax.fill_between([lo, hi], [lo*0.9, hi*0.9], [lo*1.1, hi*1.1],
+                    alpha=0.1, color='green', label='±10% band')
     ax.set_xlabel('Actual final titer (normalised)')
     ax.set_ylabel('Predicted final titer (normalised)')
-    ax.set_title('Final Titer: Predicted vs Actual')
+    ax.set_title(f'Final Titer: Predicted vs Actual\n'
+                 f'{within_10}/{len(reactors)} within 10%  (paper benchmark: 10/10)')
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out_dir / 'eval_titer_scatter.png', dpi=150)
@@ -465,6 +496,7 @@ def main():
 
     # Metrics
     print_metrics(y_true, y_pred, phases_true, phases_pred, reactors)
+    print_final_titer_metrics(y_true, y_pred, reactors)
     print_transition_metrics(phases_true, phases_pred, times, reactors)
 
     # Conformal intervals from LOO calibration residuals
