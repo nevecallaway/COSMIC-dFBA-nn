@@ -351,6 +351,77 @@ class ModelDiagnostics:
         }
 
     @staticmethod
+    def _interp_transition_time(f_traj: np.ndarray, time_points: np.ndarray,
+                                threshold: float = 0.5) -> float:
+        """Linearly interpolate the day when f(t) first crosses `threshold`.
+
+        If f never reaches the threshold, returns the last timepoint (late
+        transition) or first timepoint (already past threshold at t=0).
+        """
+        for i in range(len(f_traj) - 1):
+            f0, f1 = f_traj[i], f_traj[i + 1]
+            if (f0 <= threshold <= f1) or (f0 >= threshold >= f1):
+                t0, t1 = time_points[i], time_points[i + 1]
+                if abs(f1 - f0) < 1e-8:
+                    return float(t0)
+                return float(t0 + (threshold - f0) * (t1 - t0) / (f1 - f0))
+        # f stayed below threshold — transition never happened
+        if f_traj[-1] < threshold:
+            return float(time_points[-1])
+        # f was above threshold from the start — already in production
+        return float(time_points[0])
+
+    @staticmethod
+    def calculate_transition_metrics(phases_true: np.ndarray,
+                                     phases_pred: np.ndarray,
+                                     time_points: np.ndarray) -> Dict[str, Any]:
+        """Compute transition-timing and f(t) accuracy metrics.
+
+        Matches the COSMIC paper's evaluation (section 2.3):
+          - % of timepoints where |f_pred - f_true| < 0.1  (paper: 72%)
+          - % of timepoints where |f_pred - f_true| < 0.2  (paper: 91%)
+          - Per-reactor transition time (day f first crosses 0.5)
+          - MAE of predicted vs actual transition time (in days)
+
+        Args:
+            phases_true : (N, T) or (N, T, 1) — actual f(t) per reactor
+            phases_pred : (N, T, 1) — predicted f(t) per reactor
+            time_points : (N, T) or (T,) — actual day values
+        """
+        # Normalise shapes
+        if phases_true.ndim == 3:
+            phases_true = phases_true.squeeze(-1)   # (N, T)
+        if phases_pred.ndim == 3:
+            phases_pred = phases_pred.squeeze(-1)   # (N, T)
+        if time_points.ndim == 1:
+            time_points = np.tile(time_points, (phases_true.shape[0], 1))
+
+        N = phases_true.shape[0]
+        true_t = np.array([
+            ModelDiagnostics._interp_transition_time(phases_true[r], time_points[r])
+            for r in range(N)])
+        pred_t = np.array([
+            ModelDiagnostics._interp_transition_time(phases_pred[r], time_points[r])
+            for r in range(N)])
+
+        errors = np.abs(pred_t - true_t)
+
+        # Paper accuracy: % of timepoints within ±0.1 and ±0.2 of measured f
+        abs_f_err = np.abs(phases_pred - phases_true)
+        acc_01 = float((abs_f_err < 0.1).mean())
+        acc_02 = float((abs_f_err < 0.2).mean())
+
+        return {
+            'transition_mae_days':        float(errors.mean()),
+            'transition_std_days':        float(errors.std()),
+            'transition_errors_per_reactor': errors,      # (N,) in days
+            'true_transition_days':       true_t,
+            'pred_transition_days':       pred_t,
+            'f_accuracy_01':              acc_01,   # paper metric (±0.1)
+            'f_accuracy_02':              acc_02,   # paper metric (±0.2)
+        }
+
+    @staticmethod
     def analyze_modality_dominance(model, ic, time_points, params, device='cpu'):
         model.eval()
         ic = torch.FloatTensor(ic).to(device).requires_grad_(True)

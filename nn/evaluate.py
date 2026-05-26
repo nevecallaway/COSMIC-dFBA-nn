@@ -123,6 +123,26 @@ def print_metrics(y_true, y_pred, phases_true, phases_pred, reactors):
         print(f"  Confusion matrix:\n{pm['confusion_matrix']}")
 
 
+def print_transition_metrics(phases_true, phases_pred, time_points, reactors):
+    """Print COSMIC-paper-aligned transition timing metrics."""
+    if phases_true is None:
+        return
+    tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, time_points)
+
+    print(f"\n{'='*65}")
+    print("Transition-Time Metrics  (primary metric per supervisor)")
+    print(f"{'='*65}")
+    print(f"  Mean transition MAE    : {tm['transition_mae_days']:.2f} ± {tm['transition_std_days']:.2f} days")
+    print(f"  f(t) accuracy  ±0.1   : {tm['f_accuracy_01']*100:.1f}%  (paper benchmark: 72%)")
+    print(f"  f(t) accuracy  ±0.2   : {tm['f_accuracy_02']*100:.1f}%  (paper benchmark: 91%)")
+    print(f"\n  Per-reactor transition day (actual → predicted):")
+    for r, name in enumerate(reactors):
+        t_true = tm['true_transition_days'][r]
+        t_pred = tm['pred_transition_days'][r]
+        err    = tm['transition_errors_per_reactor'][r]
+        print(f"    {name}: {t_true:.1f}d → {t_pred:.1f}d  (error={err:.1f}d)")
+
+
 def plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_dir):
     """One figure per reactor: predicted vs actual for key metabolites."""
     key_comps = [0, 2, 3, IDX_TITER, 6]  # CD, Glc, Lac, Titer, Gln
@@ -164,6 +184,54 @@ def plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_di
         plt.close(fig)
 
     print(f"\nTrajectory plots saved to {out_dir}/")
+
+
+def plot_transition_times(phases_true, phases_pred, time_points, reactors, out_dir):
+    """Bar chart: actual vs predicted transition day per reactor."""
+    if phases_true is None:
+        return
+    tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, time_points)
+    true_t = tm['true_transition_days']
+    pred_t = tm['pred_transition_days']
+    N = len(reactors)
+    x = np.arange(N)
+    w = 0.35
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # Left: bar chart of actual vs predicted transition day
+    ax = axes[0]
+    ax.bar(x - w/2, true_t, w, label='Actual',    color='#1565C0', alpha=0.8)
+    ax.bar(x + w/2, pred_t, w, label='Predicted', color='#E53935', alpha=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(reactors, rotation=45, ha='right', fontsize=8)
+    ax.set_ylabel('Transition day (f crosses 0.5)')
+    ax.set_title(f'Transition Time: Actual vs Predicted\n'
+                 f'MAE = {tm["transition_mae_days"]:.2f} days')
+    ax.legend()
+    ax.axhline(true_t.mean(), color='#1565C0', linewidth=0.8, linestyle='--', alpha=0.5)
+
+    # Right: scatter predicted vs actual (identity line = perfect)
+    ax = axes[1]
+    ax.scatter(true_t, pred_t, s=80, zorder=3, color='#E53935', edgecolors='black', linewidths=0.6)
+    for i, name in enumerate(reactors):
+        ax.annotate(name, (true_t[i], pred_t[i]),
+                    fontsize=7, textcoords='offset points', xytext=(5, 5))
+    lo = min(true_t.min(), pred_t.min()) - 0.5
+    hi = max(true_t.max(), pred_t.max()) + 0.5
+    ax.plot([lo, hi], [lo, hi], 'k--', linewidth=1, label='y = x  (perfect)')
+    ax.set_xlabel('Actual transition day')
+    ax.set_ylabel('Predicted transition day')
+    ax.set_title(f'Predicted vs Actual Transition Day\n'
+                 f'f(t) acc ±0.1: {tm["f_accuracy_01"]*100:.1f}%  '
+                 f'±0.2: {tm["f_accuracy_02"]*100:.1f}%')
+    ax.legend(fontsize=8)
+
+    fig.suptitle('State Transition Timing  (f(t) crosses 0.5)', fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_dir / 'eval_transition_times.png', dpi=150)
+    plt.close(fig)
+    print('  saved eval_transition_times.png')
 
 
 def plot_titer_summary(y_true, y_pred, reactors, out_dir):
@@ -394,6 +462,7 @@ def main():
 
     # Metrics
     print_metrics(y_true, y_pred, phases_true, phases_pred, reactors)
+    print_transition_metrics(phases_true, phases_pred, times, reactors)
 
     # Conformal intervals from LOO calibration residuals
     intervals = build_conformal_intervals(conformal_cal, y_pred, alpha=0.1)
@@ -408,6 +477,7 @@ def main():
     out_dir = here / 'figures'
     out_dir.mkdir(exist_ok=True)
     plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)
+    plot_transition_times(phases_true, phases_pred, times, reactors, out_dir)
     plot_titer_summary(y_true, y_pred, reactors, out_dir)
     plot_conformal_titer(y_true, y_pred, intervals, reactors, out_dir)
     plot_problem_reactors(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)

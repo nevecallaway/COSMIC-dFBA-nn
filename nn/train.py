@@ -150,7 +150,8 @@ class Trainer:
     def validate(self, val_loader):
         self.model.eval()
         val_loss = 0.0
-        all_targets, all_preds, all_phase_targets, all_phase_preds = [], [], [], []
+        all_targets, all_preds = [], []
+        all_phase_targets, all_phase_preds, all_times = [], [], []
 
         with torch.no_grad():
             for batch in val_loader:
@@ -168,6 +169,7 @@ class Trainer:
                 if 'phases' in batch:
                     all_phase_targets.append(batch['phases'].cpu().numpy())
                     all_phase_preds.append(predictions['phase_weights'].cpu().numpy() if isinstance(predictions, dict) else None)
+                    all_times.append(batch['time'].cpu().numpy())
 
         val_loss /= len(val_loader)
         report = {"val_loss": val_loss}
@@ -181,7 +183,9 @@ class Trainer:
             if all_phase_targets:
                 p_true = np.concatenate(all_phase_targets, axis=0)
                 p_pred = np.concatenate(all_phase_preds, axis=0)
-                report["phase_metrics"] = ModelDiagnostics.calculate_phase_metrics(p_true, p_pred)
+                t_pts  = np.concatenate(all_times, axis=0)
+                report["phase_metrics"]   = ModelDiagnostics.calculate_phase_metrics(p_true, p_pred)
+                report["transition"]      = ModelDiagnostics.calculate_transition_metrics(p_true, p_pred, t_pts)
 
         return report
 
@@ -458,6 +462,7 @@ def main():
     n_reactors  = len(dataset)
     loo_val_losses, loo_r2s, loo_titer_r2s, loo_f1s = [], [], [], []
     loo_spearman, loo_titer_spearman = [], []
+    loo_trans_mae = []   # transition time MAE per fold (days)
     # Calibration data for conformal prediction: list of (y_true, y_pred, sigma) per fold
     conformal_cal = []
     pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -482,17 +487,19 @@ def main():
                                       epochs=EPOCHS, patience=PATIENCE, verbose=False)
         report = fold_trainer.validate(fold_val_loader)
 
-        r2            = report['metrics']['global_r2']                          if 'metrics'       in report else float('nan')
-        titer_r2      = report['metrics']['component_r2'].get('comp_5', float('nan')) if 'metrics' in report else float('nan')
-        f1            = report['phase_metrics']['phase_f1']                    if 'phase_metrics' in report else float('nan')
-        spearman_mean = report['spearman']['mean_spearman']                    if 'spearman'      in report else float('nan')
-        titer_spear   = report['spearman']['titer_spearman']                   if 'spearman'      in report else float('nan')
+        r2            = report['metrics']['global_r2']                               if 'metrics'    in report else float('nan')
+        titer_r2      = report['metrics']['component_r2'].get('comp_5', float('nan')) if 'metrics'   in report else float('nan')
+        f1            = report['phase_metrics']['phase_f1']                          if 'phase_metrics' in report else float('nan')
+        spearman_mean = report['spearman']['mean_spearman']                          if 'spearman'   in report else float('nan')
+        titer_spear   = report['spearman']['titer_spearman']                         if 'spearman'   in report else float('nan')
+        trans_mae     = report['transition']['transition_mae_days']                  if 'transition' in report else float('nan')
         loo_val_losses.append(best_val)
         loo_r2s.append(r2)
         loo_titer_r2s.append(titer_r2)
         loo_f1s.append(f1)
         loo_spearman.append(spearman_mean)
         loo_titer_spearman.append(titer_spear)
+        loo_trans_mae.append(trans_mae)
         if 'y_true' in report and 'y_pred' in report:
             conformal_cal.append({
                 'fold': fold,
@@ -500,17 +507,19 @@ def main():
                 'y_pred': report['y_pred'],        # (1, T, C)
                 'sigma':  report.get('sigma'),     # (1, T, C) or None
             })
+        trans_str = f"{trans_mae:.2f}d" if not np.isnan(trans_mae) else "n/a"
         print(f"  Fold {fold+1:2d}/10 (val=reactor {fold}): "
-              f"R2={r2:.4f} | TiterR2={titer_r2:.4f} | "
-              f"Spearman={spearman_mean:.4f} | TiterSpearman={titer_spear:.4f} | F1={f1:.4f}")
+              f"TransitionMAE={trans_str} | TiterSpearman={titer_spear:.4f} | "
+              f"F1={f1:.4f} | R2={r2:.4f}")
 
     elapsed = time.time() - start_time
     print(f"\n✓ LOO complete in {elapsed:.1f}s")
+    print(f"  Mean Transition MAE : {np.nanmean(loo_trans_mae):.2f} ± {np.nanstd(loo_trans_mae):.2f} days  ← primary metric")
+    print(f"  Mean Titer Spearman : {np.mean(loo_titer_spearman):.4f} ± {np.std(loo_titer_spearman):.4f}")
+    print(f"  Mean F1             : {np.mean(loo_f1s):.4f} ± {np.std(loo_f1s):.4f}")
     print(f"  Mean R2             : {np.mean(loo_r2s):.4f} ± {np.std(loo_r2s):.4f}")
     print(f"  Mean Titer R2       : {np.mean(loo_titer_r2s):.4f} ± {np.std(loo_titer_r2s):.4f}")
     print(f"  Mean Spearman       : {np.mean(loo_spearman):.4f} ± {np.std(loo_spearman):.4f}")
-    print(f"  Mean Titer Spearman : {np.mean(loo_titer_spearman):.4f} ± {np.std(loo_titer_spearman):.4f}")
-    print(f"  Mean F1             : {np.mean(loo_f1s):.4f} ± {np.std(loo_f1s):.4f}")
 
     # Save final model (re-trained on all 10 reactors)
     model.load_state_dict(pretrained_state)
