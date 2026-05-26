@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from model import CosmicNNSurrogateEnhanced, dFBADataset, dfba_collate_fn
+from model import CosmicNNSurrogateEnhanced, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
 from utils import load_experimental_data, ModelDiagnostics
 from torch.utils.data import DataLoader
 
@@ -41,12 +41,20 @@ IDX_TITER = 5
 def load_model(checkpoint_path, device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     hp = ckpt['hyperparams']
-    model = CosmicNNSurrogateEnhanced(
-        n_components=hp['n_components'],
-        n_params=hp['n_params'],
-        latent_dim=hp['latent_dim'],
-        n_heads=hp['n_heads'],
-    )
+    if hp.get('arch', 'transformer') == 'lstm':
+        model = CosmicNNSurrogateLSTM(
+            n_components=hp['n_components'],
+            n_params=hp['n_params'],
+            latent_dim=hp['latent_dim'],
+            n_layers=hp.get('n_layers', 2),
+        )
+    else:
+        model = CosmicNNSurrogateEnhanced(
+            n_components=hp['n_components'],
+            n_params=hp['n_params'],
+            latent_dim=hp['latent_dim'],
+            n_heads=hp['n_heads'],
+        )
     model.load_state_dict(ckpt['model_state'])
     model.to(device).eval()
     print(f"Loaded model from {checkpoint_path}")

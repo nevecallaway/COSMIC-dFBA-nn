@@ -200,6 +200,66 @@ class MultiHeadTemporalDecoder(nn.Module):
         }
 
 
+class LSTMTemporalDecoder(nn.Module):
+    """
+    LSTM-based temporal decoder. Replaces transformer attention with an LSTM
+    that steps through time sequentially, which suits rise-then-fall trajectories
+    better than attention (which treats all timepoints equally).
+
+    The latent vector initialises the LSTM hidden and cell states.
+    Time embeddings are the per-step inputs.
+    Rate prediction heads and the differentiable integrator are kept identical
+    to MultiHeadTemporalDecoder so the physics-informed structure is preserved.
+    """
+    def __init__(self, n_components, latent_dim=64, n_layers=2):
+        super().__init__()
+        self.time_embed  = nn.Sequential(nn.Linear(1, 32), nn.ReLU(), nn.Linear(32, latent_dim))
+        self.h0_proj     = nn.Linear(latent_dim, latent_dim)
+        self.c0_proj     = nn.Linear(latent_dim, latent_dim)
+        self.lstm        = nn.LSTM(input_size=latent_dim, hidden_size=latent_dim,
+                                   num_layers=n_layers, batch_first=True,
+                                   dropout=0.2 if n_layers > 1 else 0.0)
+        self.growth_rates = nn.Sequential(
+            nn.Linear(latent_dim, 128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(128, n_components), nn.Tanh())
+        self.prod_rates   = nn.Sequential(
+            nn.Linear(latent_dim, 128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(128, n_components), nn.Tanh())
+        self.state_weighting = StateWeightingLayer(n_components, latent_dim)
+        self.integrator      = DifferentiableIntegrator()
+        self.n_layers = n_layers
+
+    def forward(self, latent_state, time_points, initial_conditions):
+        B, T = time_points.shape
+        time_embedded = self.time_embed(time_points.unsqueeze(-1))   # (B, T, latent_dim)
+
+        # Initialise LSTM hidden/cell from latent vector
+        h0 = self.h0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
+        c0 = self.c0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
+        lstm_out, _ = self.lstm(time_embedded, (h0, c0))             # (B, T, latent_dim)
+
+        growth_rates = self.growth_rates(lstm_out)   # (B, T, C)
+        prod_rates   = self.prod_rates(lstm_out)     # (B, T, C)
+
+        # Two-pass phase blending (same as MultiHeadTemporalDecoder)
+        f_init = torch.zeros(B, T, 1, device=latent_state.device)
+        concentrations = self.integrator(
+            initial_conditions, (1 - f_init) * growth_rates + f_init * prod_rates, time_points)
+
+        phase_pred = self.state_weighting(latent_state, concentrations)
+        final_concentrations = self.integrator(
+            initial_conditions,
+            (1 - phase_pred) * growth_rates + phase_pred * prod_rates,
+            time_points)
+
+        return {
+            'concentrations': final_concentrations,
+            'phase_weights':  phase_pred,
+            'growth_rates':   growth_rates,
+            'prod_rates':     prod_rates,
+        }
+
+
 class TemporalDecoder(nn.Module):
     def __init__(self, n_components, latent_dim=64, n_heads=4):
         super().__init__()
@@ -259,6 +319,20 @@ class CosmicNNSurrogateEnhanced(nn.Module):
         super().__init__()
         self.encoder = DynamicsEncoder(n_components, n_params, latent_dim)
         self.decoder = MultiHeadTemporalDecoder(n_components, latent_dim, n_heads)
+        self.n_components = n_components
+        self.n_params = n_params
+
+    def forward(self, initial_conditions, time_points, parameters):
+        latent = self.encoder(initial_conditions, parameters)
+        return self.decoder(latent, time_points, initial_conditions)
+
+
+class CosmicNNSurrogateLSTM(nn.Module):
+    """Same encoder as CosmicNNSurrogateEnhanced, LSTM decoder instead of attention."""
+    def __init__(self, n_components, n_params, latent_dim=64, n_layers=2):
+        super().__init__()
+        self.encoder = DynamicsEncoder(n_components, n_params, latent_dim)
+        self.decoder = LSTMTemporalDecoder(n_components, latent_dim, n_layers)
         self.n_components = n_components
         self.n_params = n_params
 

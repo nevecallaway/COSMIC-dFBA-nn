@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 import time
 
-from model import CosmicNNSurrogateEnhanced, dFBADataset, dfba_collate_fn
+from model import CosmicNNSurrogateEnhanced, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
 from utils import load_experimental_data, ModelDiagnostics
 
 IDX_TITER = 5   # column index of Titer in the 25-component trajectory
@@ -324,6 +324,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--no-synthetic', action='store_true',
                         help='Skip pre-training on synthetic data, train on real data only')
+    parser.add_argument('--lstm', action='store_true',
+                        help='Use LSTM decoder instead of transformer attention')
     args = parser.parse_args()
 
     print(f"\n{'='*70}")
@@ -331,6 +333,7 @@ def main():
     print(f"{'='*70}")
 
     USE_SYNTHETIC = not args.no_synthetic
+    USE_LSTM      = args.lstm
 
     script_dir = Path(__file__).parent
     DATA_PATH  = script_dir / "data" / "data_2.csv"
@@ -360,13 +363,23 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     n_params = dataset.n_params if hasattr(dataset, 'n_params') else 0
-    print(f"Model: n_components={dataset.n_components}, n_params={n_params}")
-    model = CosmicNNSurrogateEnhanced(
-        n_components=dataset.n_components,
-        n_params=n_params,
-        latent_dim=LATENT_DIM,
-        n_heads=N_HEADS
-    )
+    if USE_LSTM:
+        N_LAYERS = 2
+        print(f"Model: LSTM  n_components={dataset.n_components}, n_params={n_params}, n_layers={N_LAYERS}")
+        model = CosmicNNSurrogateLSTM(
+            n_components=dataset.n_components,
+            n_params=n_params,
+            latent_dim=LATENT_DIM,
+            n_layers=N_LAYERS,
+        )
+    else:
+        print(f"Model: Transformer  n_components={dataset.n_components}, n_params={n_params}, n_heads={N_HEADS}")
+        model = CosmicNNSurrogateEnhanced(
+            n_components=dataset.n_components,
+            n_params=n_params,
+            latent_dim=LATENT_DIM,
+            n_heads=N_HEADS,
+        )
 
     # --- Phase 1: Pre-train on synthetic data (if available and enabled) ---
     if USE_SYNTHETIC and SYNTH_PATH.exists():
@@ -467,8 +480,10 @@ def main():
         'model_state': model.state_dict(),
         'model_type': 'enhanced',
         'hyperparams': {
+            'arch': 'lstm' if USE_LSTM else 'transformer',
             'latent_dim': LATENT_DIM,
             'n_heads': N_HEADS,
+            'n_layers': N_LAYERS if USE_LSTM else 2,
             'n_components': dataset.n_components,
             'n_params': dataset.n_params,
         },
