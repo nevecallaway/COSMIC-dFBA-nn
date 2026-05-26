@@ -139,19 +139,38 @@ class StateWeightingLayer(nn.Module):
 
 
 class RatePredictionHead(nn.Module):
+    """
+    Predicts growth and production rates at each time step.
+
+    Previous implementation used attention(Q=time_embed, K=V=latent_expanded).
+    Since all rows of latent_expanded are identical, the attention output was
+    constant across time — making rates constant per reactor and giving the
+    decoder a bypass route that ignored the latent code.
+
+    Fixed: directly concatenate per-step time embedding with the latent so rates
+    are genuinely time-varying AND reactor-specific.
+    """
+    TIME_DIM = 32
+
     def __init__(self, n_components, latent_dim=64, n_heads=4):
         super().__init__()
-        self.time_embed = nn.Sequential(nn.Linear(1, 32), nn.ReLU(), nn.Linear(32, latent_dim))
-        self.attention = nn.MultiheadAttention(latent_dim, n_heads, batch_first=True)
-        self.growth_rates = nn.Sequential(nn.Linear(latent_dim * 2, 128), nn.ReLU(), nn.Dropout(0.2), nn.Linear(128, n_components), nn.Tanh())
-        self.prod_rates = nn.Sequential(nn.Linear(latent_dim * 2, 128), nn.ReLU(), nn.Dropout(0.2), nn.Linear(128, n_components), nn.Tanh())
+        # n_heads retained in signature for API compat but no longer used
+        in_dim = latent_dim + self.TIME_DIM
+        self.time_embed = nn.Sequential(
+            nn.Linear(1, self.TIME_DIM), nn.ReLU(),
+            nn.Linear(self.TIME_DIM, self.TIME_DIM))
+        self.growth_rates = nn.Sequential(
+            nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(128, n_components), nn.Tanh())
+        self.prod_rates = nn.Sequential(
+            nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(128, n_components), nn.Tanh())
 
     def forward(self, latent_state, time_points):
-        time_expanded = time_points.unsqueeze(-1)
-        time_embedded = self.time_embed(time_expanded)
-        latent_expanded = latent_state.unsqueeze(1).expand(-1, time_points.shape[1], -1)
-        attn_out, _ = self.attention(time_embedded, latent_expanded, latent_expanded)
-        combined = torch.cat([latent_expanded, attn_out], dim=-1)
+        B, T = time_points.shape
+        time_emb = self.time_embed(time_points.unsqueeze(-1))              # (B, T, TIME_DIM)
+        latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)     # (B, T, latent_dim)
+        combined = torch.cat([latent_expanded, time_emb], dim=-1)         # (B, T, latent_dim+TIME_DIM)
         return self.growth_rates(combined), self.prod_rates(combined)
 
 
@@ -170,18 +189,12 @@ class DifferentiableIntegrator(nn.Module):
 class MultiHeadTemporalDecoder(nn.Module):
     def __init__(self, n_components, latent_dim=64, n_heads=4):
         super().__init__()
-        self.time_embed = nn.Sequential(nn.Linear(1, 32), nn.ReLU(), nn.Linear(32, latent_dim))
-        self.attention = nn.MultiheadAttention(latent_dim, n_heads, batch_first=True)
+        # n_heads kept for API compat; attention removed (was computing dead output)
         self.integrator = DifferentiableIntegrator()
         self.state_weighting = StateWeightingLayer(n_components, latent_dim)
         self.rate_predictor = RatePredictionHead(n_components, latent_dim, n_heads)
 
     def forward(self, latent_state, time_points, initial_conditions):
-        time_expanded = time_points.unsqueeze(-1)
-        time_embedded = self.time_embed(time_expanded)
-        latent_expanded = latent_state.unsqueeze(1).expand(-1, time_points.shape[1], -1)
-        attn_out, _ = self.attention(time_embedded, latent_expanded, latent_expanded)
-
         growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
 
         f_initial = torch.zeros(latent_state.shape[0], time_points.shape[1], 1, device=latent_state.device)
