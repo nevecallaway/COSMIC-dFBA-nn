@@ -408,6 +408,93 @@ def plot_ic_pca(y_true, y_pred, reactors, out_dir):
           f'(PC1={var[0]*100:.1f}%  PC2={var[1]*100:.1f}%)')
 
 
+# ── 8. Latent collapse diagnostic ────────────────────────────────────────────
+
+def plot_latent_collapse(latent_np, y_true, y_pred, reactors, out_dir):
+    """
+    Check whether the encoder is producing distinguishable latent codes.
+    If all codes cluster tightly together the decoder is ignoring the encoder
+    and outputting a memorised mean trajectory — matching the shuffled baseline.
+
+    Prints:
+      - Latent std per dimension (mean across dims)
+      - Pairwise cosine distances between reactors
+      - Fraction of variance explained by PC1 (high → collapsed to a line)
+
+    Saves:
+      - explore_8_latent_collapse.png  (pairwise distance matrix + PCA scatter)
+    """
+    from scipy.spatial.distance import cosine
+
+    N = latent_np.shape[0]
+    titer_rho = titer_spearman(y_true, y_pred)
+
+    # --- stats ---
+    per_dim_std = latent_np.std(axis=0)          # (latent_dim,)
+    mean_std    = per_dim_std.mean()
+    near_zero   = (per_dim_std < 0.05).sum()
+
+    pca = PCA()
+    z   = pca.fit_transform(latent_np)
+    var = pca.explained_variance_ratio_
+
+    print(f"\n  [Latent collapse diagnostic]")
+    print(f"    Mean latent std across dims : {mean_std:.4f}  "
+          f"(< 0.05 per-dim means dead dims)")
+    print(f"    Dead dimensions (std<0.05)  : {near_zero} / {latent_np.shape[1]}")
+    print(f"    PC1 explains               : {var[0]*100:.1f}% of variance "
+          f"  (> 80% suggests collapse)")
+    print(f"    Top-3 PCs explain          : {var[:3].sum()*100:.1f}%")
+
+    # pairwise cosine distances
+    dist_mat = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            if i != j:
+                dist_mat[i, j] = cosine(latent_np[i], latent_np[j])
+    mean_dist = dist_mat[dist_mat > 0].mean()
+    print(f"    Mean pairwise cosine dist  : {mean_dist:.4f}  "
+          f"(< 0.01 suggests near-identical codes)")
+
+    # --- figure ---
+    cmap = plt.cm.RdYlGn
+    norm = plt.Normalize(-1, 1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # Left: pairwise cosine distance matrix
+    ax = axes[0]
+    im = ax.imshow(dist_mat, cmap='viridis', aspect='auto')
+    ax.set_xticks(range(N)); ax.set_xticklabels(reactors, rotation=45, ha='right', fontsize=7)
+    ax.set_yticks(range(N)); ax.set_yticklabels(reactors, fontsize=7)
+    ax.set_title(f'Pairwise cosine distance\n(mean={mean_dist:.4f}; '
+                 f'near-zero = collapsed encoder)')
+    plt.colorbar(im, ax=ax)
+
+    # Right: PC1 vs PC2 colored by Titer Spearman
+    ax = axes[1]
+    sc = ax.scatter(z[:, 0], z[:, 1],
+                    c=titer_rho, cmap=cmap, norm=norm,
+                    s=160, edgecolors='black', linewidths=0.8, zorder=3)
+    for r, name in enumerate(reactors):
+        ax.annotate(name, (z[r, 0], z[r, 1]),
+                    fontsize=8, textcoords='offset points', xytext=(5, 5))
+    plt.colorbar(sc, ax=ax, label='Titer Spearman ρ')
+    ax.set_xlabel(f'PC1 ({var[0]*100:.1f}%)')
+    ax.set_ylabel(f'PC2 ({var[1]*100:.1f}%)')
+    ax.set_title(f'Latent PCA  (PC1+PC2={var[:2].sum()*100:.1f}%)\n'
+                 f'dead dims: {near_zero}/{latent_np.shape[1]}  '
+                 f'mean std: {mean_std:.3f}')
+
+    fig.suptitle('Latent Collapse Diagnostic\n'
+                 'Tightly clustered codes = decoder ignoring encoder = '
+                 'memorising mean trajectory', fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out_dir / 'explore_8_latent_collapse.png', dpi=150)
+    plt.close(fig)
+    print('  saved explore_8_latent_collapse.png')
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
@@ -433,8 +520,9 @@ def main():
     plot_all_titer(y_true, y_pred, reactors, out_dir)
     plot_residual_autocorr(y_true, y_pred, reactors, out_dir)
     plot_ic_pca(y_true, y_pred, reactors, out_dir)
+    plot_latent_collapse(latent_np, y_true, y_pred, reactors, out_dir)
 
-    print(f'\nDone. 7 figures saved to {out_dir}/')
+    print(f'\nDone. 8 figures saved to {out_dir}/')
 
 
 if __name__ == '__main__':
