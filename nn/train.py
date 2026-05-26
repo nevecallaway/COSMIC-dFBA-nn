@@ -490,6 +490,7 @@ def main():
         r2            = report['metrics']['global_r2']                               if 'metrics'    in report else float('nan')
         titer_r2      = report['metrics']['component_r2'].get('comp_5', float('nan')) if 'metrics'   in report else float('nan')
         f1            = report['phase_metrics']['phase_f1']                          if 'phase_metrics' in report else float('nan')
+        mcc           = report['phase_metrics'].get('mcc', float('nan'))              if 'phase_metrics' in report else float('nan')
         spearman_mean = report['spearman']['mean_spearman']                          if 'spearman'   in report else float('nan')
         titer_spear   = report['spearman']['titer_spearman']                         if 'spearman'   in report else float('nan')
         trans_mae     = report['transition']['transition_mae_days']                  if 'transition' in report else float('nan')
@@ -508,15 +509,16 @@ def main():
                 'sigma':  report.get('sigma'),     # (1, T, C) or None
             })
         trans_str = f"{trans_mae:.2f}d" if not np.isnan(trans_mae) else "n/a"
+        mcc_str   = f"{mcc:.3f}"        if not np.isnan(mcc)       else "n/a"
         print(f"  Fold {fold+1:2d}/10 (val=reactor {fold}): "
               f"TransitionMAE={trans_str} | TiterSpearman={titer_spear:.4f} | "
-              f"F1={f1:.4f} | R2={r2:.4f}")
+              f"F1={f1:.4f} | MCC={mcc_str}")
 
     elapsed = time.time() - start_time
     print(f"\n✓ LOO complete in {elapsed:.1f}s")
     print(f"  Mean Transition MAE : {np.nanmean(loo_trans_mae):.2f} ± {np.nanstd(loo_trans_mae):.2f} days  ← primary metric")
     print(f"  Mean Titer Spearman : {np.mean(loo_titer_spearman):.4f} ± {np.std(loo_titer_spearman):.4f}")
-    print(f"  Mean F1             : {np.mean(loo_f1s):.4f} ± {np.std(loo_f1s):.4f}")
+    print(f"  Mean F1             : {np.mean(loo_f1s):.4f} ± {np.std(loo_f1s):.4f}   (paper: 0.731)")
     print(f"  Mean R2             : {np.mean(loo_r2s):.4f} ± {np.std(loo_r2s):.4f}")
     print(f"  Mean Titer R2       : {np.mean(loo_titer_r2s):.4f} ± {np.std(loo_titer_r2s):.4f}")
     print(f"  Mean Spearman       : {np.mean(loo_spearman):.4f} ± {np.std(loo_spearman):.4f}")

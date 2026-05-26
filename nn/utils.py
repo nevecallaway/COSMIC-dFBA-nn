@@ -8,7 +8,9 @@ import pandas as pd
 import torch
 from pathlib import Path
 from typing import Tuple, Dict, List, Any
-from sklearn.metrics import f1_score, confusion_matrix, r2_score, mean_absolute_percentage_error
+from sklearn.metrics import (f1_score, confusion_matrix, r2_score,
+                             mean_absolute_percentage_error,
+                             matthews_corrcoef)
 from scipy.stats import spearmanr
 
 def load_doe_parameters(doe_file: str) -> Dict[str, np.ndarray]:
@@ -338,16 +340,28 @@ class ModelDiagnostics:
     def calculate_phase_metrics(y_true_phase: np.ndarray, y_pred_phase_prob: np.ndarray) -> Dict[str, Any]:
         # f < 0.2 → growth state (0), f > 0.8 → production state (1).
         # Evaluate only on unambiguous timepoints; ignore the 0.2–0.8 transition zone.
+        # Matches the paper's evaluation protocol (section 2.3).
         y_true_flat = y_true_phase.flatten()
         y_pred_flat = y_pred_phase_prob.squeeze(-1).flatten()
         mask = (y_true_flat < 0.2) | (y_true_flat > 0.8)
         y_true_binary = (y_true_flat[mask] > 0.5).astype(int)
         y_pred_binary = (y_pred_flat[mask] > 0.5).astype(int)
-        f1 = f1_score(y_true_binary, y_pred_binary)
-        cm = confusion_matrix(y_true_binary, y_pred_binary)
+
+        f1  = f1_score(y_true_binary, y_pred_binary)
+        mcc = matthews_corrcoef(y_true_binary, y_pred_binary)
+        cm  = confusion_matrix(y_true_binary, y_pred_binary)
+
+        # Specificity = TN / (TN + FP),  Sensitivity (recall) = TP / (TP + FN)
+        tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else float('nan')
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else float('nan')
+
         return {
-            "phase_f1": f1,
-            "confusion_matrix": cm
+            "phase_f1":        f1,
+            "mcc":             mcc,
+            "specificity":     specificity,
+            "sensitivity":     sensitivity,
+            "confusion_matrix": cm,
         }
 
     @staticmethod

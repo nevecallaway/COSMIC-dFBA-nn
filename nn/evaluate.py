@@ -116,10 +116,13 @@ def print_metrics(y_true, y_pred, phases_true, phases_pred, reactors):
 
     if phases_true is not None:
         print(f"\n{'='*65}")
-        print("Phase Metrics")
+        print("Phase Metrics  (paper benchmarks: F1=0.731, MCC=0.454, Spec=0.78, Sens=0.681)")
         print(f"{'='*65}")
         pm = ModelDiagnostics.calculate_phase_metrics(phases_true, phases_pred)
-        print(f"  Phase F1 : {pm['phase_f1']:.4f}")
+        print(f"  F1          : {pm['phase_f1']:.4f}   (paper: 0.731)")
+        print(f"  MCC         : {pm['mcc']:.4f}   (paper: 0.454)")
+        print(f"  Specificity : {pm['specificity']:.4f}   (paper: 0.780)")
+        print(f"  Sensitivity : {pm['sensitivity']:.4f}   (paper: 0.681)")
         print(f"  Confusion matrix:\n{pm['confusion_matrix']}")
 
 
