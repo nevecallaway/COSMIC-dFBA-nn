@@ -319,6 +319,37 @@ def load_data(data_path):
         raise ValueError(f"Unsupported data path: {data_path}. Provide a .csv file or a directory of .npz files.")
 
 
+def shuffle_dataset(dataset):
+    """
+    Permutation baseline: independently shuffle inputs (ICs + params) and
+    outputs (trajectories + phases) so there is no real signal to learn.
+    The model trained on this data establishes chance-level performance.
+    Data is already normalised so normalize=False is passed through.
+    """
+    N = len(dataset)
+    idx_in  = np.random.permutation(N)   # shuffled input order
+    idx_out = np.random.permutation(N)   # shuffled output order (independent)
+
+    new_trajs  = dataset.trajectories[idx_out]
+    new_times  = dataset.time_points[idx_out]
+    new_ics    = dataset.initial_conditions[idx_in]
+    new_phases = dataset.phases[idx_out] if dataset.phases is not None else None
+
+    new_params = {}
+    for key, val in dataset.parameters.items():
+        if val is not None:
+            new_params[key] = np.array([val[i] for i in idx_in])
+
+    shuffled = dFBADataset(new_trajs, new_times, new_ics,
+                           parameters=new_params, normalize=False,
+                           phases=new_phases)
+    # Copy normalisation stats so scale is identical to the real dataset
+    for attr in ('traj_min', 'traj_max', 'traj_scale_min', 'traj_scale_max',
+                 'ic_min', 'ic_max', 'ic_scale_min', 'ic_scale_max'):
+        setattr(shuffled, attr, getattr(dataset, attr))
+    return shuffled
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -326,6 +357,9 @@ def main():
                         help='Skip pre-training on synthetic data, train on real data only')
     parser.add_argument('--lstm', action='store_true',
                         help='Use LSTM decoder instead of transformer attention')
+    parser.add_argument('--shuffle', action='store_true',
+                        help='Permutation baseline: shuffle inputs vs outputs before '
+                             'training to establish chance-level performance')
     args = parser.parse_args()
 
     print(f"\n{'='*70}")
@@ -334,6 +368,7 @@ def main():
 
     USE_SYNTHETIC = not args.no_synthetic
     USE_LSTM      = args.lstm
+    USE_SHUFFLE   = args.shuffle
 
     script_dir = Path(__file__).parent
     DATA_PATH  = script_dir / "data" / "data_2.csv"
@@ -359,6 +394,13 @@ def main():
     except Exception as e:
         print(f"Error loading data: {e}")
         return
+
+    if USE_SHUFFLE:
+        print("\n*** PERMUTATION BASELINE: inputs and outputs independently shuffled ***")
+        print("*** Train on this to establish chance-level performance             ***\n")
+        dataset = shuffle_dataset(dataset)
+
+    OUTPUT_PATH = 'shuffled_model.pt' if USE_SHUFFLE else 'improved_model.pt'
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -492,8 +534,8 @@ def main():
         'loo_mean_spearman': float(np.mean(loo_spearman)),
         'loo_mean_titer_spearman': float(np.mean(loo_titer_spearman)),
         'conformal_cal': conformal_cal,   # LOO residuals for conformal prediction
-    }, 'improved_model.pt')
-    print(f"✓ Model saved: improved_model.pt")
+    }, OUTPUT_PATH)
+    print(f"✓ Model saved: {OUTPUT_PATH}")
 
 if __name__ == "__main__":
     main()
