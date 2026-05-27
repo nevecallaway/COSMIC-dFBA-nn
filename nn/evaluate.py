@@ -55,7 +55,11 @@ def load_model(checkpoint_path, device):
             latent_dim=hp['latent_dim'],
             n_heads=hp['n_heads'],
         )
-    model.load_state_dict(ckpt['model_state'])
+    result = model.load_state_dict(ckpt['model_state'], strict=False)
+    if result.missing_keys or result.unexpected_keys:
+        print(f"  Warning: architecture mismatch (checkpoint may be from an older version)")
+        print(f"    Missing : {result.missing_keys}")
+        print(f"    Unexpected: {result.unexpected_keys}")
     model.to(device).eval()
     def _fmt(v): return f"{v:.4f}" if isinstance(v, float) else "n/a"
     print(f"Loaded model from {checkpoint_path}")
