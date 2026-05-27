@@ -341,6 +341,93 @@ def print_final_titer_metrics(y_true, y_pred, reactors):
               f"({frac_errors[i]*100:.1f}%)")
 
 
+def plot_paper_comparison(real_m, real_loo, out_dir):
+    """
+    Bar chart comparing our model's metrics against the paper's COSMIC dFBA values.
+
+    Binary classification (MCC, F1, Spec, Sens) uses LOO values from the
+    checkpoint where available — that is the fair comparison since the paper
+    evaluates its mechanistic model on all 10 reactors without fitting.
+    Continuous f(t) accuracy is compared on the full dataset (same basis as paper).
+    """
+    PAPER = {
+        'MCC':            0.454,
+        'F1':             0.731,
+        'Specificity':    0.780,
+        'Sensitivity':    0.681,
+        'f(t) ±0.1':      0.723,
+        'f(t) ±0.2':      0.908,
+    }
+
+    def _loo_or_full(loo_key, full_key):
+        v = real_loo.get(loo_key) if real_loo else None
+        return v if v is not None else real_m.get(full_key)
+
+    def _is_loo(loo_key):
+        return real_loo is not None and real_loo.get(loo_key) is not None
+
+    # Prefer LOO for binary metrics; fall back to full-dataset
+    ours = {
+        'MCC':         _loo_or_full('mcc',  'mcc'),
+        'F1':          _loo_or_full('f1',   'f1'),
+        'Specificity': _loo_or_full('spec', 'specificity'),
+        'Sensitivity': _loo_or_full('sens', 'sensitivity'),
+        'f(t) ±0.1':   real_m.get('f_acc_01'),
+        'f(t) ±0.2':   real_m.get('f_acc_02'),
+    }
+
+    # LOO flag per metric — drives annotation
+    is_loo = {
+        'MCC':         _is_loo('mcc'),
+        'F1':          _is_loo('f1'),
+        'Specificity': _is_loo('spec'),
+        'Sensitivity': _is_loo('sens'),
+        'f(t) ±0.1':   False,
+        'f(t) ±0.2':   False,
+    }
+
+    labels = list(PAPER.keys())
+    paper_vals = [PAPER[k] for k in labels]
+    our_vals   = [ours[k]  for k in labels]
+
+    x   = np.arange(len(labels))
+    w   = 0.35
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    bars_paper = ax.bar(x - w/2, paper_vals, w, label='COSMIC dFBA (paper)',
+                        color='#1565C0', alpha=0.85)
+    bars_ours  = ax.bar(x + w/2, our_vals,   w, label='Our NN surrogate',
+                        color='#E53935', alpha=0.85)
+
+    # Value labels on bars
+    for bar in bars_paper:
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                f'{bar.get_height():.3f}', ha='center', va='bottom', fontsize=8,
+                color='#1565C0')
+    for bar, key in zip(bars_ours, labels):
+        suffix = ' (LOO)' if is_loo[key] else ''
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                f'{bar.get_height():.3f}{suffix}', ha='center', va='bottom',
+                fontsize=8, color='#E53935')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=10)
+    ax.set_ylim(0, 1.15)
+    ax.set_ylabel('Score', fontsize=11)
+    ax.set_title('NN Surrogate vs COSMIC dFBA (Gopalakrishnan et al.)\n'
+                 'Binary metrics: LOO where available; f(t) accuracy: full dataset',
+                 fontsize=11)
+    ax.legend(fontsize=10)
+    ax.axhline(1.0, color='gray', linewidth=0.7, linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(out_dir / 'eval_paper_comparison.png', dpi=150)
+    plt.close(fig)
+    print('  saved eval_paper_comparison.png')
+
+
 def plot_titer_summary(y_true, y_pred, reactors, out_dir):
     """Scatter of predicted vs actual final titer across all reactors."""
     actual_final    = y_true[:, -1, IDX_TITER]
@@ -580,6 +667,8 @@ def main():
         'trans_mae': ckpt.get('loo_mean_trans_mae'),
         'mcc':       ckpt.get('loo_mean_mcc'),
         'f1':        ckpt.get('loo_mean_f1'),
+        'spec':      ckpt.get('loo_mean_spec'),
+        'sens':      ckpt.get('loo_mean_sens'),
     }
 
     # Collect real-model metrics and inference outputs
@@ -614,6 +703,7 @@ def main():
     # Plots
     out_dir = here / 'figures'
     out_dir.mkdir(exist_ok=True)
+    plot_paper_comparison(real_m, real_loo, out_dir)
     plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)
     plot_transition_times(phases_true, phases_pred, times, reactors, out_dir)
     plot_titer_summary(y_true, y_pred, reactors, out_dir)
