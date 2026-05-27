@@ -7,6 +7,7 @@ Provides the NN definitions and the corresponding PyTorch Dataset.
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from typing import Dict, List, Tuple, Optional
 
@@ -128,22 +129,43 @@ class DynamicsEncoder(nn.Module):
         return self.fc(x)
 
 
-class StateWeightingLayer(nn.Module):
+class PhaseTransitionHead(nn.Module):
+    """
+    Predicts f(t) = sigmoid((t - mu) / sigma) conditioned on the
+    concentration trajectory and the latent state.
+
+    The concentration trajectory (from a first-pass ODE integration with
+    f=0) encodes the metabolic state that triggers the phase switch —
+    e.g. glucose depletion drives cells from growth to production.
+    A mean-pool over time summarises which nutrients depleted and how fast.
+    This is combined with the latent state to predict:
+
+      mu   in (0,1): normalised transition midpoint (mu * 13 = transition day)
+      sigma > 0:     transition width — small = sharp, large = gradual
+
+    f(t) = sigmoid((t - mu) / sigma) is monotone by construction and
+    directly parameterises what transition MAE measures.
+    """
     def __init__(self, n_components, latent_dim=64):
         super().__init__()
-        self.trigger_weights = nn.Parameter(torch.randn(n_components, 1))
-        self.bias = nn.Parameter(torch.zeros(1))
-        self.mlp = nn.Sequential(nn.Linear(latent_dim, 64), nn.ReLU(), nn.Linear(64, 1))
+        self.conc_encoder = nn.Sequential(
+            nn.Linear(n_components, 32), nn.ReLU(),
+            nn.Linear(32, 16)
+        )
+        self.head = nn.Sequential(
+            nn.Linear(latent_dim + 16, 64), nn.ReLU(),
+            nn.Linear(64, 2)
+        )
 
-    def forward(self, latent_state, concentrations):
-        trigger = torch.matmul(concentrations, self.trigger_weights) + self.bias
-        modulation = self.mlp(latent_state).unsqueeze(1)
-        w = trigger + modulation                                  # (batch, time, 1)
-        # Cumulative softmax: enforces p_m >= p_{m-1} (monotone) and p_M = 1
-        # Matches paper constraints Eq 4-6. The softmax weights are a learned
-        # probability density over time; the CDF is the phase fraction.
-        weights = torch.softmax(w.squeeze(-1), dim=1)             # (batch, time)
-        return torch.cumsum(weights, dim=1).unsqueeze(-1)         # (batch, time, 1)
+    def forward(self, latent_state, time_points, concentrations):
+        # concentrations: (B, T, C) — mean-pool over time → (B, C)
+        conc_summary = self.conc_encoder(concentrations.mean(dim=1))   # (B, 16)
+        combined = torch.cat([latent_state, conc_summary], dim=-1)     # (B, latent+16)
+        raw   = self.head(combined)                                     # (B, 2)
+        mu    = torch.sigmoid(raw[:, 0])                               # (B,) in (0, 1)
+        sigma = F.softplus(raw[:, 1]) + 0.01                          # (B,) > 0
+        f = torch.sigmoid((time_points - mu.unsqueeze(1)) / sigma.unsqueeze(1))
+        return f.unsqueeze(-1)                                         # (B, T, 1)
 
 
 class RatePredictionHead(nn.Module):
@@ -255,28 +277,29 @@ class DifferentiableIntegrator(nn.Module):
 class MultiHeadTemporalDecoder(nn.Module):
     def __init__(self, n_components, latent_dim=64, n_heads=4):
         super().__init__()
-        # n_heads kept for API compat; attention removed (was computing dead output)
-        self.integrator = DifferentiableIntegrator()
-        self.state_weighting = StateWeightingLayer(n_components, latent_dim)
+        self.integrator     = DifferentiableIntegrator()
+        self.phase_head     = PhaseTransitionHead(n_components, latent_dim)
         self.rate_predictor = RatePredictionHead(n_components, latent_dim, n_heads)
 
     def forward(self, latent_state, time_points, initial_conditions, doe_params=None):
-        T = time_points.shape[1]
         growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
 
-        f_initial = torch.zeros(latent_state.shape[0], T, 1, device=latent_state.device)
-        blended_rates_initial = (1 - f_initial) * growth_rates + f_initial * prod_rates
-        concentrations = self.integrator(initial_conditions, blended_rates_initial, time_points, doe_params)
+        # Pass 1: integrate with f=0 to get growth-phase concentration trajectory
+        f_zero = torch.zeros(*time_points.shape, 1, device=latent_state.device)
+        conc_pass1 = self.integrator(initial_conditions,
+                                     growth_rates,   # f=0 → pure growth rates
+                                     time_points, doe_params)
 
-        phase_pred = self.state_weighting(latent_state, concentrations)
-        final_blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
-        final_concentrations = self.integrator(initial_conditions, final_blended_rates, time_points, doe_params)
+        # Pass 2: condition phase prediction on concentrations, then re-integrate
+        phase_pred    = self.phase_head(latent_state, time_points, conc_pass1)
+        blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
+        concentrations = self.integrator(initial_conditions, blended_rates, time_points, doe_params)
 
         return {
-            'concentrations': final_concentrations,
-            'phase_weights': phase_pred,
-            'growth_rates': growth_rates,
-            'prod_rates': prod_rates,
+            'concentrations': concentrations,
+            'phase_weights':  phase_pred,
+            'growth_rates':   growth_rates,
+            'prod_rates':     prod_rates,
         }
 
 
@@ -308,9 +331,9 @@ class LSTMTemporalDecoder(nn.Module):
         self.prod_rates   = nn.Sequential(
             nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
             nn.Linear(128, n_components), nn.Tanh())
-        self.state_weighting = StateWeightingLayer(n_components, latent_dim)
-        self.integrator      = DifferentiableIntegrator()
-        self.n_layers = n_layers
+        self.phase_head  = PhaseTransitionHead(n_components, latent_dim)
+        self.integrator  = DifferentiableIntegrator()
+        self.n_layers    = n_layers
 
     def forward(self, latent_state, time_points, initial_conditions, doe_params=None):
         B, T = time_points.shape
@@ -324,19 +347,16 @@ class LSTMTemporalDecoder(nn.Module):
         growth_rates    = self.growth_rates(combined)
         prod_rates      = self.prod_rates(combined)
 
-        f_init = torch.zeros(B, T, 1, device=latent_state.device)
-        concentrations = self.integrator(
-            initial_conditions, (1 - f_init) * growth_rates + f_init * prod_rates,
-            time_points, doe_params)
+        # Pass 1: pure growth-phase concentrations to inform transition timing
+        conc_pass1 = self.integrator(initial_conditions, growth_rates, time_points, doe_params)
 
-        phase_pred = self.state_weighting(latent_state, concentrations)
-        final_concentrations = self.integrator(
-            initial_conditions,
-            (1 - phase_pred) * growth_rates + phase_pred * prod_rates,
-            time_points, doe_params)
+        # Pass 2: condition phase prediction on concentrations, then re-integrate
+        phase_pred    = self.phase_head(latent_state, time_points, conc_pass1)
+        blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
+        concentrations = self.integrator(initial_conditions, blended_rates, time_points, doe_params)
 
         return {
-            'concentrations': final_concentrations,
+            'concentrations': concentrations,
             'phase_weights':  phase_pred,
             'growth_rates':   growth_rates,
             'prod_rates':     prod_rates,

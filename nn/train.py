@@ -84,11 +84,13 @@ class Trainer:
         # 5. PINN: Concentration Smoothness
         conc_smoothness = 0.1 * torch.mean((conc_pred[:, 1:, :] - conc_pred[:, :-1, :]) ** 2)
 
-        # 6. Phase regression — MSE against continuous 0-1 fraction, all timepoints
+        # 6. Phase regression — MSE against continuous 0-1 fraction, all timepoints.
+        # Weight raised to 3.0: f(t) trajectory accuracy is the primary metric and
+        # was under-penalised at 0.5 relative to the concentration losses.
         phase_loss = torch.tensor(0.0, device=targets.device)
         if phases_batch is not None:
             phase_target = phases_batch.unsqueeze(-1)   # (batch, time, 1)
-            phase_loss = 0.5 * nn.functional.mse_loss(phase_pred, phase_target)
+            phase_loss = 3.0 * nn.functional.mse_loss(phase_pred, phase_target)
 
         # 7. PINN: Rate-based constraints
         blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
