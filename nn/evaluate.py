@@ -57,11 +57,12 @@ def load_model(checkpoint_path, device):
         )
     model.load_state_dict(ckpt['model_state'])
     model.to(device).eval()
+    def _fmt(v): return f"{v:.4f}" if isinstance(v, float) else "n/a"
     print(f"Loaded model from {checkpoint_path}")
-    print(f"  Saved LOO R²             : {ckpt.get('loo_mean_r2', 'n/a'):.4f}")
-    print(f"  Saved LOO Titer R²       : {ckpt.get('loo_mean_titer_r2', 'n/a'):.4f}")
-    print(f"  Saved LOO Spearman       : {ckpt.get('loo_mean_spearman', 'n/a'):.4f}")
-    print(f"  Saved LOO Titer Spearman : {ckpt.get('loo_mean_titer_spearman', 'n/a'):.4f}")
+    print(f"  Saved LOO Trans MAE      : {_fmt(ckpt.get('loo_mean_trans_mae'))}")
+    print(f"  Saved LOO MCC            : {_fmt(ckpt.get('loo_mean_mcc'))}")
+    print(f"  Saved LOO F1             : {_fmt(ckpt.get('loo_mean_f1'))}")
+    print(f"  Saved LOO Titer Spearman : {_fmt(ckpt.get('loo_mean_titer_spearman'))}")
     return model, ckpt
 
 
