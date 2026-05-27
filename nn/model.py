@@ -232,11 +232,14 @@ class LSTMTemporalDecoder(nn.Module):
         self.lstm        = nn.LSTM(input_size=latent_dim, hidden_size=latent_dim,
                                    num_layers=n_layers, batch_first=True,
                                    dropout=0.2 if n_layers > 1 else 0.0)
+        # Skip-connect the original latent so reactor identity is always
+        # explicitly available at every timestep, not just via LSTM hidden state.
+        in_dim = latent_dim * 2
         self.growth_rates = nn.Sequential(
-            nn.Linear(latent_dim, 128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
             nn.Linear(128, n_components), nn.Tanh())
         self.prod_rates   = nn.Sequential(
-            nn.Linear(latent_dim, 128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
             nn.Linear(128, n_components), nn.Tanh())
         self.state_weighting = StateWeightingLayer(n_components, latent_dim)
         self.integrator      = DifferentiableIntegrator()
@@ -251,8 +254,10 @@ class LSTMTemporalDecoder(nn.Module):
         c0 = self.c0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
         lstm_out, _ = self.lstm(time_embedded, (h0, c0))             # (B, T, latent_dim)
 
-        growth_rates = self.growth_rates(lstm_out)   # (B, T, C)
-        prod_rates   = self.prod_rates(lstm_out)     # (B, T, C)
+        latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)         # (B, T, latent_dim)
+        combined = torch.cat([lstm_out, latent_expanded], dim=-1)             # (B, T, 2*latent_dim)
+        growth_rates = self.growth_rates(combined)   # (B, T, C)
+        prod_rates   = self.prod_rates(combined)     # (B, T, C)
 
         # Two-pass phase blending (same as MultiHeadTemporalDecoder)
         f_init = torch.zeros(B, T, 1, device=latent_state.device)
