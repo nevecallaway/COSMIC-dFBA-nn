@@ -461,11 +461,12 @@ def main():
     print(f"{'='*70}")
 
     n_reactors  = len(dataset)
-    loo_val_losses, loo_r2s, loo_titer_r2s, loo_f1s = [], [], [], []
-    loo_spearman, loo_titer_spearman = [], []
-    loo_trans_mae = []   # transition time MAE per fold (days)
-    loo_mcc       = []   # MCC per fold
-    loo_within10  = []   # fraction of reactors with final titer within 10%
+    loo_val_losses, loo_f1s = [], []
+    loo_trans_mae  = []   # transition time MAE per fold (days)
+    loo_mcc        = []
+    loo_spec       = []   # specificity per fold  (paper: 0.780)
+    loo_sens       = []   # sensitivity per fold  (paper: 0.681)
+    loo_within10   = []   # fraction of reactors with final titer within 10%
     # Calibration data for conformal prediction: list of (y_true, y_pred, sigma) per fold
     conformal_cal = []
     pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -490,13 +491,11 @@ def main():
                                       epochs=EPOCHS, patience=PATIENCE, verbose=False)
         report = fold_trainer.validate(fold_val_loader)
 
-        r2            = report['metrics']['global_r2']                               if 'metrics'    in report else float('nan')
-        titer_r2      = report['metrics']['component_r2'].get('comp_5', float('nan')) if 'metrics'   in report else float('nan')
-        f1            = report['phase_metrics']['phase_f1']                          if 'phase_metrics' in report else float('nan')
-        mcc           = report['phase_metrics'].get('mcc', float('nan'))              if 'phase_metrics' in report else float('nan')
-        spearman_mean = report['spearman']['mean_spearman']                          if 'spearman'   in report else float('nan')
-        titer_spear   = report['spearman']['titer_spearman']                         if 'spearman'   in report else float('nan')
-        trans_mae     = report['transition']['transition_mae_days']                  if 'transition' in report else float('nan')
+        f1        = report['phase_metrics']['phase_f1']               if 'phase_metrics' in report else float('nan')
+        mcc       = report['phase_metrics'].get('mcc', float('nan'))  if 'phase_metrics' in report else float('nan')
+        spec      = report['phase_metrics'].get('specificity', float('nan')) if 'phase_metrics' in report else float('nan')
+        sens      = report['phase_metrics'].get('sensitivity', float('nan')) if 'phase_metrics' in report else float('nan')
+        trans_mae = report['transition']['transition_mae_days']        if 'transition'    in report else float('nan')
 
         # Compute within-10% final titer in original (denormalized) units
         within10 = float('nan')
@@ -509,37 +508,38 @@ def main():
             within10 = float(np.mean(np.abs(_denorm(y_p) - _denorm(y_t)) / (np.abs(_denorm(y_t)) + 1e-8) <= 0.10))
 
         loo_val_losses.append(best_val)
-        loo_r2s.append(r2)
-        loo_titer_r2s.append(titer_r2)
         loo_f1s.append(f1)
         loo_mcc.append(mcc)
-        loo_spearman.append(spearman_mean)
-        loo_titer_spearman.append(titer_spear)
+        loo_spec.append(spec)
+        loo_sens.append(sens)
         loo_trans_mae.append(trans_mae)
         loo_within10.append(within10)
         if 'y_true' in report and 'y_pred' in report:
             conformal_cal.append({
                 'fold': fold,
-                'y_true': report['y_true'],        # (1, T, C)
-                'y_pred': report['y_pred'],        # (1, T, C)
-                'sigma':  report.get('sigma'),     # (1, T, C) or None
+                'y_true': report['y_true'],
+                'y_pred': report['y_pred'],
+                'sigma':  report.get('sigma'),
             })
-        trans_str    = f"{trans_mae:.2f}d" if not np.isnan(trans_mae) else "n/a"
-        mcc_str      = f"{mcc:.3f}"        if not np.isnan(mcc)       else "n/a"
-        within10_str = f"{within10*100:.0f}%" if not np.isnan(within10) else "n/a"
+        trans_str    = f"{trans_mae:.2f}d"        if not np.isnan(trans_mae) else "n/a"
+        mcc_str      = f"{mcc:.3f}"               if not np.isnan(mcc)       else "n/a"
+        spec_str     = f"{spec:.3f}"              if not np.isnan(spec)      else "n/a"
+        sens_str     = f"{sens:.3f}"              if not np.isnan(sens)      else "n/a"
+        within10_str = f"{within10*100:.0f}%"     if not np.isnan(within10)  else "n/a"
         print(f"  Fold {fold+1:2d}/10 (val=reactor {fold}): "
               f"TransMAE={trans_str} | MCC={mcc_str} | F1={f1:.4f} | "
-              f"TiterSpearman={titer_spear:.4f} | Within10%={within10_str}")
+              f"Spec={spec_str} | Sens={sens_str} | Within10%={within10_str}")
 
     elapsed = time.time() - start_time
     valid_within10 = [x for x in loo_within10 if not np.isnan(x)]
     within10_count = sum(1 for x in valid_within10 if x > 0.5)
     print(f"\n✓ LOO complete in {elapsed:.1f}s")
     print(f"  Mean Transition MAE : {np.nanmean(loo_trans_mae):.2f} ± {np.nanstd(loo_trans_mae):.2f} days  ← primary metric")
-    print(f"  Mean MCC            : {np.nanmean(loo_mcc):.4f} ± {np.nanstd(loo_mcc):.4f}         (paper: 0.454)")
-    print(f"  Mean F1             : {np.nanmean(loo_f1s):.4f} ± {np.nanstd(loo_f1s):.4f}         (paper: 0.731)")
+    print(f"  Mean MCC            : {np.nanmean(loo_mcc):.4f} ± {np.nanstd(loo_mcc):.4f}   (paper: 0.454)")
+    print(f"  Mean F1             : {np.nanmean(loo_f1s):.4f} ± {np.nanstd(loo_f1s):.4f}   (paper: 0.731)")
+    print(f"  Mean Specificity    : {np.nanmean(loo_spec):.4f} ± {np.nanstd(loo_spec):.4f}   (paper: 0.780)")
+    print(f"  Mean Sensitivity    : {np.nanmean(loo_sens):.4f} ± {np.nanstd(loo_sens):.4f}   (paper: 0.681)")
     print(f"  Titer Within 10%    : {within10_count}/{len(valid_within10)} reactors")
-    print(f"  Mean Titer Spearman : {np.nanmean(loo_titer_spearman):.4f} ± {np.nanstd(loo_titer_spearman):.4f}")
 
     # Save final model (re-trained on all 10 reactors)
     model.load_state_dict(pretrained_state)
@@ -558,12 +558,13 @@ def main():
             'n_components': dataset.n_components,
             'n_params': dataset.n_params,
         },
-        'loo_mean_trans_mae': float(np.nanmean(loo_trans_mae)),
-        'loo_mean_mcc': float(np.nanmean(loo_mcc)),
-        'loo_mean_f1': float(np.nanmean(loo_f1s)),
-        'loo_titer_within10': within10_count,
-        'loo_mean_titer_spearman': float(np.nanmean(loo_titer_spearman)),
-        'conformal_cal': conformal_cal,   # LOO residuals for conformal prediction
+        'loo_mean_trans_mae':  float(np.nanmean(loo_trans_mae)),
+        'loo_mean_mcc':        float(np.nanmean(loo_mcc)),
+        'loo_mean_f1':         float(np.nanmean(loo_f1s)),
+        'loo_mean_spec':       float(np.nanmean(loo_spec)),
+        'loo_mean_sens':       float(np.nanmean(loo_sens)),
+        'loo_titer_within10':  within10_count,
+        'conformal_cal': conformal_cal,
     }, OUTPUT_PATH)
     print(f"✓ Model saved: {OUTPUT_PATH}")
 

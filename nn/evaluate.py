@@ -59,10 +59,9 @@ def load_model(checkpoint_path, device):
     model.to(device).eval()
     def _fmt(v): return f"{v:.4f}" if isinstance(v, float) else "n/a"
     print(f"Loaded model from {checkpoint_path}")
-    print(f"  Saved LOO Trans MAE      : {_fmt(ckpt.get('loo_mean_trans_mae'))}")
-    print(f"  Saved LOO MCC            : {_fmt(ckpt.get('loo_mean_mcc'))}")
-    print(f"  Saved LOO F1             : {_fmt(ckpt.get('loo_mean_f1'))}")
-    print(f"  Saved LOO Titer Spearman : {_fmt(ckpt.get('loo_mean_titer_spearman'))}")
+    print(f"  Saved LOO Trans MAE : {_fmt(ckpt.get('loo_mean_trans_mae'))}")
+    print(f"  Saved LOO MCC       : {_fmt(ckpt.get('loo_mean_mcc'))}")
+    print(f"  Saved LOO F1        : {_fmt(ckpt.get('loo_mean_f1'))}")
     return model, ckpt
 
 
@@ -75,6 +74,11 @@ def run_inference(model, dataset, device):
     time   = batch['time'].to(device)
     params = batch['parameters'].to(device)
     target = batch['trajectory'].to(device)
+
+    # Truncate params if the model was trained with fewer features than the
+    # current dataset provides (e.g. shuffled model trained before FBA features).
+    if params.shape[1] != model.n_params:
+        params = params[:, :model.n_params]
 
     with torch.no_grad():
         out = model(ic, time, params)
@@ -249,14 +253,14 @@ def collect_metrics(model, dataset, device, times_days):
     m = {}
     if phases_true is not None:
         pm = ModelDiagnostics.calculate_phase_metrics(phases_true, phases_pred)
-        m['mcc']  = pm['mcc']
-        m['f1']   = pm['phase_f1']
+        m['mcc']         = pm['mcc']
+        m['f1']          = pm['phase_f1']
+        m['specificity'] = pm['specificity']
+        m['sensitivity'] = pm['sensitivity']
         tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, times_days)
         m['trans_mae'] = tm['transition_mae_days']
         m['f_acc_01']  = tm['f_accuracy_01']
         m['f_acc_02']  = tm['f_accuracy_02']
-    spear = ModelDiagnostics.calculate_spearman_metrics(y_true, y_pred)
-    m['titer_spearman'] = spear['titer_spearman']
     actual_final    = y_true[:, -1, IDX_TITER]
     predicted_final = y_pred[:, -1, IDX_TITER]
     frac_err = np.abs(predicted_final - actual_final) / (np.abs(actual_final) + 1e-8)
@@ -269,48 +273,42 @@ def collect_metrics(model, dataset, device, times_days):
 def print_summary_table(real_m, shuffled_m=None, real_loo=None):
     """
     Print the paper-aligned summary table.
-
-    real_loo: dict with keys 'trans_mae', 'mcc', 'f1', 'titer_spearman',
-              'titer_within10' — pulled from the saved checkpoint.
+    Columns: metric | our model | shuffled baseline | paper benchmark
+    Paper benchmarks from Gopalakrishnan et al. (COSMIC dFBA).
     """
     N = real_m['n_reactors']
 
-    def fmt_mae(v):   return f"{v:.2f}d"  if v is not None else "—"
-    def fmt_f(v):     return f"{v:.3f}"   if v is not None else "—"
-    def fmt_pct(v):   return f"{v*100:.1f}%" if v is not None else "—"
-    def fmt_n10(v, n): return f"{v}/{n}"  if v is not None else "—"
+    def fmt_mae(v):    return f"{v:.2f}d"     if v is not None else "—"
+    def fmt_f(v):      return f"{v:.3f}"      if v is not None else "—"
+    def fmt_pct(v):    return f"{v*100:.1f}%" if v is not None else "—"
+    def fmt_n10(v, n): return f"{v}/{n}"      if v is not None else "—"
+    def shuf(key):     return real_m.get(key) if shuffled_m is None else shuffled_m.get(key)
 
-    loo_trans  = real_loo.get('trans_mae')     if real_loo else None
-    loo_spear  = real_loo.get('titer_spearman') if real_loo else None
-    loo_w10    = real_loo.get('titer_within10') if real_loo else None
+    loo_trans = real_loo.get('trans_mae') if real_loo else None
 
     rows = [
-        ("Transition MAE (LOO)",    fmt_mae(loo_trans),
-                                    "—"),
-        ("Transition MAE (full)",   fmt_mae(real_m.get('trans_mae')),
-                                    fmt_mae(shuffled_m.get('trans_mae') if shuffled_m else None)),
-        ("LOO Titer Spearman",      fmt_f(loo_spear),
-                                    "—"),
-        ("Titer Spearman (full)",   fmt_f(real_m.get('titer_spearman')),
-                                    fmt_f(shuffled_m.get('titer_spearman') if shuffled_m else None)),
-        ("MCC",                     fmt_f(real_m.get('mcc')),
-                                    fmt_f(shuffled_m.get('mcc') if shuffled_m else None)),
-        ("Final titer mean error",  fmt_pct(real_m.get('titer_mean_err')),
-                                    fmt_pct(shuffled_m.get('titer_mean_err') if shuffled_m else None)),
-        ("Within 10% titer",        fmt_n10(real_m.get('within10'), N),
-                                    fmt_n10(shuffled_m.get('within10'), N) if shuffled_m else "—"),
-        ("f(t) ±0.1 accuracy",      fmt_pct(real_m.get('f_acc_01')),
-                                    fmt_pct(shuffled_m.get('f_acc_01') if shuffled_m else None)),
+        # (label, ours, shuffled, paper)
+        ("Transition MAE (LOO)",  fmt_mae(loo_trans),                    "—",                           "—"),
+        ("Transition MAE (full)", fmt_mae(real_m.get('trans_mae')),       fmt_mae(shuf('trans_mae')),     "—"),
+        ("MCC",                   fmt_f(real_m.get('mcc')),               fmt_f(shuf('mcc')),             "0.454"),
+        ("F1",                    fmt_f(real_m.get('f1')),                fmt_f(shuf('f1')),              "0.731"),
+        ("Specificity",           fmt_f(real_m.get('specificity')),       fmt_f(shuf('specificity')),     "0.780"),
+        ("Sensitivity",           fmt_f(real_m.get('sensitivity')),       fmt_f(shuf('sensitivity')),     "0.681"),
+        ("f(t) ±0.1 accuracy",    fmt_pct(real_m.get('f_acc_01')),        fmt_pct(shuf('f_acc_01')),      "72.3%"),
+        ("f(t) ±0.2 accuracy",    fmt_pct(real_m.get('f_acc_02')),        fmt_pct(shuf('f_acc_02')),      "90.8%"),
+        ("Final titer mean error",fmt_pct(real_m.get('titer_mean_err')),  fmt_pct(shuf('titer_mean_err')),"—"),
+        ("Within 10% titer",      fmt_n10(real_m.get('within10'), N),     fmt_n10(shuf('within10'), N) if shuffled_m else "—", "—"),
     ]
 
     c0 = max(len(r[0]) for r in rows)
     c1 = max(len(r[1]) for r in rows) + 2
     c2 = max(len(r[2]) for r in rows) + 2
-    hdr = f"{'Metric':<{c0}}  {'Real model':<{c1}}  {'Shuffled baseline':<{c2}}"
+    c3 = max(len(r[3]) for r in rows) + 2
+    hdr = f"{'Metric':<{c0}}  {'Our model':<{c1}}  {'Shuffled':<{c2}}  {'Paper':<{c3}}"
     sep = "=" * len(hdr)
     print(f"\n{sep}\n{hdr}\n{'-'*len(hdr)}")
     for r in rows:
-        print(f"{r[0]:<{c0}}  {r[1]:<{c1}}  {r[2]:<{c2}}")
+        print(f"{r[0]:<{c0}}  {r[1]:<{c1}}  {r[2]:<{c2}}  {r[3]:<{c3}}")
     print(sep)
 
 
@@ -575,11 +573,9 @@ def main():
     model, ckpt = load_model(args.model, device)
     conformal_cal = ckpt.get('conformal_cal', [])
     real_loo = {
-        'trans_mae':      ckpt.get('loo_mean_trans_mae'),
-        'mcc':            ckpt.get('loo_mean_mcc'),
-        'f1':             ckpt.get('loo_mean_f1'),
-        'titer_spearman': ckpt.get('loo_mean_titer_spearman'),
-        'titer_within10': ckpt.get('loo_titer_within10'),
+        'trans_mae': ckpt.get('loo_mean_trans_mae'),
+        'mcc':       ckpt.get('loo_mean_mcc'),
+        'f1':        ckpt.get('loo_mean_f1'),
     }
 
     # Collect real-model metrics and inference outputs
