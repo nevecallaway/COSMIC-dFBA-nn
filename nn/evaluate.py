@@ -237,6 +237,82 @@ def plot_transition_times(phases_true, phases_pred, time_points, reactors, out_d
     print('  saved eval_transition_times.png')
 
 
+def collect_metrics(model, dataset, device, times_days):
+    """
+    Run inference and return a flat dict of all summary-table metrics.
+
+    times_days: (n_reactors, T) actual day values — used for transition MAE.
+    """
+    y_true, y_pred, phases_true, phases_pred = run_inference(model, dataset, device)
+
+    m = {}
+    if phases_true is not None:
+        pm = ModelDiagnostics.calculate_phase_metrics(phases_true, phases_pred)
+        m['mcc']  = pm['mcc']
+        m['f1']   = pm['phase_f1']
+        tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, times_days)
+        m['trans_mae'] = tm['transition_mae_days']
+        m['f_acc_01']  = tm['f_accuracy_01']
+        m['f_acc_02']  = tm['f_accuracy_02']
+    spear = ModelDiagnostics.calculate_spearman_metrics(y_true, y_pred)
+    m['titer_spearman'] = spear['titer_spearman']
+    actual_final    = y_true[:, -1, IDX_TITER]
+    predicted_final = y_pred[:, -1, IDX_TITER]
+    frac_err = np.abs(predicted_final - actual_final) / (np.abs(actual_final) + 1e-8)
+    m['titer_mean_err'] = float(frac_err.mean())
+    m['within10']       = int((frac_err <= 0.10).sum())
+    m['n_reactors']     = len(actual_final)
+    return m, y_true, y_pred, phases_true, phases_pred
+
+
+def print_summary_table(real_m, shuffled_m=None, real_loo=None):
+    """
+    Print the paper-aligned summary table.
+
+    real_loo: dict with keys 'trans_mae', 'mcc', 'f1', 'titer_spearman',
+              'titer_within10' — pulled from the saved checkpoint.
+    """
+    N = real_m['n_reactors']
+
+    def fmt_mae(v):   return f"{v:.2f}d"  if v is not None else "—"
+    def fmt_f(v):     return f"{v:.3f}"   if v is not None else "—"
+    def fmt_pct(v):   return f"{v*100:.1f}%" if v is not None else "—"
+    def fmt_n10(v, n): return f"{v}/{n}"  if v is not None else "—"
+
+    loo_trans  = real_loo.get('trans_mae')     if real_loo else None
+    loo_spear  = real_loo.get('titer_spearman') if real_loo else None
+    loo_w10    = real_loo.get('titer_within10') if real_loo else None
+
+    rows = [
+        ("Transition MAE (LOO)",    fmt_mae(loo_trans),
+                                    "—"),
+        ("Transition MAE (full)",   fmt_mae(real_m.get('trans_mae')),
+                                    fmt_mae(shuffled_m.get('trans_mae') if shuffled_m else None)),
+        ("LOO Titer Spearman",      fmt_f(loo_spear),
+                                    "—"),
+        ("Titer Spearman (full)",   fmt_f(real_m.get('titer_spearman')),
+                                    fmt_f(shuffled_m.get('titer_spearman') if shuffled_m else None)),
+        ("MCC",                     fmt_f(real_m.get('mcc')),
+                                    fmt_f(shuffled_m.get('mcc') if shuffled_m else None)),
+        ("Final titer mean error",  fmt_pct(real_m.get('titer_mean_err')),
+                                    fmt_pct(shuffled_m.get('titer_mean_err') if shuffled_m else None)),
+        ("Within 10% titer",        fmt_n10(real_m.get('within10'), N),
+                                    fmt_n10(shuffled_m.get('within10'), N) if shuffled_m else "—"),
+        ("f(t) ±0.1 accuracy",      fmt_pct(real_m.get('f_acc_01')),
+                                    fmt_pct(shuffled_m.get('f_acc_01') if shuffled_m else None)),
+    ]
+
+    c0 = max(len(r[0]) for r in rows)
+    c1 = max(len(r[1]) for r in rows) + 2
+    c2 = max(len(r[2]) for r in rows) + 2
+    hdr = f"{'Metric':<{c0}}  {'Real model':<{c1}}  {'Shuffled baseline':<{c2}}"
+    sep = "=" * len(hdr)
+    print(f"\n{sep}\n{hdr}\n{'-'*len(hdr)}")
+    for r in rows:
+        print(f"{r[0]:<{c0}}  {r[1]:<{c1}}  {r[2]:<{c2}}")
+    print(sep)
+
+
 def print_final_titer_metrics(y_true, y_pred, reactors):
     """
     Paper-aligned titer metric: predicted vs actual final (day-13) titer.
@@ -460,22 +536,26 @@ def plot_problem_reactors(y_true, y_pred, phases_true, phases_pred,
 def main():
     here = Path(__file__).parent
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', default=str(here / 'improved_model.pt'))
+    parser.add_argument('--model',          default=str(here / 'improved_model.pt'))
+    parser.add_argument('--shuffled-model', default=str(here / 'shuffled_model.pt'),
+                        help='Path to permutation-baseline model for comparison table')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    # Load data
+    # Load data — include all feature files so n_params matches the trained model
     doe_file   = str(here / 'data' / 'data_1.csv')
     rates_file = str(here / 'data' / 'data_3.csv')
+    fba_file   = str(here / 'data' / 'data_4.csv')
     trajs, times, ics, meta = load_experimental_data(
         str(here / 'data' / 'data_2.csv'),
-        doe_file=doe_file, rates_file=rates_file)
+        doe_file=doe_file, rates_file=rates_file, fba_file=fba_file)
     reactors = list(meta['reactors'])
     phases   = meta['phases']
     doe_arr  = meta.get('doe_params')
     rate_arr = meta.get('specific_rates')
+    fba_arr  = meta.get('fba_efficiencies')
 
     parameters = {}
     if doe_arr  is not None:
@@ -483,18 +563,40 @@ def main():
     if rate_arr is not None:
         for k in range(rate_arr.shape[1]):
             parameters[f'rate_{k}'] = rate_arr[:, k]
+    if fba_arr  is not None:
+        for k in range(fba_arr.shape[1]):
+            parameters[f'fba_{k}'] = fba_arr[:, k]
 
     dataset = dFBADataset(trajs, times, ics, parameters=parameters,
                           normalize=True, phases=phases)
 
-    # Load model and calibration data
+    # Load real model
     model, ckpt = load_model(args.model, device)
     conformal_cal = ckpt.get('conformal_cal', [])
+    real_loo = {
+        'trans_mae':      ckpt.get('loo_mean_trans_mae'),
+        'mcc':            ckpt.get('loo_mean_mcc'),
+        'f1':             ckpt.get('loo_mean_f1'),
+        'titer_spearman': ckpt.get('loo_mean_titer_spearman'),
+        'titer_within10': ckpt.get('loo_titer_within10'),
+    }
 
-    # Inference
-    y_true, y_pred, phases_true, phases_pred = run_inference(model, dataset, device)
+    # Collect real-model metrics and inference outputs
+    real_m, y_true, y_pred, phases_true, phases_pred = collect_metrics(
+        model, dataset, device, times)
 
-    # Metrics
+    # Shuffled baseline (optional)
+    shuffled_m = None
+    shuffled_path = Path(args.shuffled_model)
+    if shuffled_path.exists():
+        print(f"\nLoading shuffled baseline from {shuffled_path}...")
+        shuffled_model, _ = load_model(str(shuffled_path), device)
+        shuffled_m, *_ = collect_metrics(shuffled_model, dataset, device, times)
+
+    # ── Summary table (primary output) ───────────────────────────────────────
+    print_summary_table(real_m, shuffled_m, real_loo)
+
+    # ── Detailed per-metric breakdowns ───────────────────────────────────────
     print_metrics(y_true, y_pred, phases_true, phases_pred, reactors)
     print_final_titer_metrics(y_true, y_pred, reactors)
     print_transition_metrics(phases_true, phases_pred, times, reactors)

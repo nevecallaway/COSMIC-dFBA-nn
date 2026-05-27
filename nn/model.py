@@ -17,6 +17,7 @@ def dfba_collate_fn(batch):
     ic = torch.stack([item['initial_conditions'] for item in batch])
     time = torch.stack([item['time'] for item in batch])
     traj = torch.stack([item['trajectory'] for item in batch])
+    time_scale = torch.stack([item['time_scale'] for item in batch])  # (B, 1)
 
     params_list = [item['parameters'] for item in batch]
     if params_list[0].shape[0] == 0:
@@ -27,6 +28,7 @@ def dfba_collate_fn(batch):
     result = {
         'initial_conditions': ic,
         'time': time,
+        'time_scale': time_scale,
         'parameters': params,
         'trajectory': traj
     }
@@ -88,7 +90,8 @@ class dFBADataset(Dataset):
     def __getitem__(self, idx):
         traj = torch.FloatTensor(self.trajectories[idx])
         ic = torch.FloatTensor(self.initial_conditions[idx])
-        time = torch.FloatTensor(self.time_points[idx] / np.max(self.time_points[idx]))
+        time_scale = float(np.max(self.time_points[idx]))
+        time = torch.FloatTensor(self.time_points[idx] / time_scale)
 
         param_list = []
         for key, val in self.parameters.items():
@@ -100,6 +103,7 @@ class dFBADataset(Dataset):
         item = {
             'initial_conditions': ic,
             'time': time,
+            'time_scale': torch.FloatTensor([time_scale]),  # max day for denorm
             'parameters': params,
             'trajectory': traj
         }
@@ -134,8 +138,12 @@ class StateWeightingLayer(nn.Module):
     def forward(self, latent_state, concentrations):
         trigger = torch.matmul(concentrations, self.trigger_weights) + self.bias
         modulation = self.mlp(latent_state).unsqueeze(1)
-        w = trigger + modulation
-        return torch.sigmoid(w)   # (batch, time, 1) — continuous phase in [0, 1]
+        w = trigger + modulation                                  # (batch, time, 1)
+        # Cumulative softmax: enforces p_m >= p_{m-1} (monotone) and p_M = 1
+        # Matches paper constraints Eq 4-6. The softmax weights are a learned
+        # probability density over time; the CDF is the phase fraction.
+        weights = torch.softmax(w.squeeze(-1), dim=1)             # (batch, time)
+        return torch.cumsum(weights, dim=1).unsqueeze(-1)         # (batch, time, 1)
 
 
 class RatePredictionHead(nn.Module):
@@ -175,15 +183,69 @@ class RatePredictionHead(nn.Module):
 
 
 class DifferentiableIntegrator(nn.Module):
-    def forward(self, initial_conditions, blended_rates, time_points):
-        batch_size, n_timepoints, n_components = blended_rates.shape
-        if n_timepoints > 1:
-            dt = torch.diff(time_points, dim=1).unsqueeze(-1)
-            dt = torch.cat([torch.zeros(batch_size, 1, 1, device=dt.device), dt], dim=1)
-        else:
-            dt = torch.zeros(batch_size, 1, 1, device=blended_rates.device)
-        integrand = blended_rates * dt
-        return initial_conditions.unsqueeze(1) + torch.cumsum(integrand, dim=1)
+    """
+    Implicit-Euler integrator implementing COSMIC-dFBA Supplementary Eq 2 in full:
+
+        cells (cols 0-1):   dC_i/dt = v_i * C_i
+        metabolites (≥ 2):  dC_i/dt = F*(C_i_in - C_i) + v_i * C_1
+
+    where F = 1 d⁻¹ (perfusion rate).  Time is normalised to [0, 1] over a
+    13-day run, so F_norm = 13 in normalised units.
+
+    C_i_in (perfusion feed concentrations) are derived from the DoE coded levels
+    (-1, 0, +1) via (level + 1) / 2  →  {0, 0.5, 1.0}:
+      • col 2  (Glucose)          ← DoE Glc  (doe_params[:, 2])
+      • cols 6-24 (amino acids)   ← DoE AAs  (doe_params[:, 1])
+      • all other metabolites     ← C_i_in = 0  (not in perfusion feed)
+      • cells                     ← ε = 0, no washout term
+
+    Implicit Euler is used for the washout so the scheme is unconditionally
+    stable regardless of F·dt:
+        c_next = (c_prev + (v·coupling + F·C_in·ε)·dt) / (1 + F·ε·dt)
+    For cells ε = 0, denominator = 1 → reduces to explicit Euler.
+    """
+    N_CELL_COLS   = 2   # Cell Density (0), Cell Volume (1)
+    IDX_GLUCOSE   = 2   # Glucose
+    IDX_AAS_START = 6   # Glutamine … Tryptophan (19 components)
+    F_NORM        = 13.0  # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
+
+    def forward(self, initial_conditions, blended_rates, time_points, doe_params=None):
+        B, T, C = blended_rates.shape
+        device  = blended_rates.device
+
+        # ε: removal fraction — 0 for cells, 1 for metabolites
+        eps = torch.ones(C, device=device)
+        eps[:self.N_CELL_COLS] = 0.0
+
+        # C_in: perfusion feed concentrations built from DoE coded levels
+        c_in = torch.zeros(B, C, device=device)
+        if doe_params is not None and doe_params.shape[1] >= 3:
+            glc = (doe_params[:, 2:3] + 1.0) / 2.0          # (B,1) → {0, 0.5, 1}
+            aas = (doe_params[:, 1:2] + 1.0) / 2.0          # (B,1)
+            c_in[:, self.IDX_GLUCOSE : self.IDX_GLUCOSE + 1]  = glc
+            n_aa = C - self.IDX_AAS_START
+            if n_aa > 0:
+                c_in[:, self.IDX_AAS_START:]                 = aas.expand(-1, n_aa)
+
+        concentrations = [initial_conditions]
+
+        for t in range(1, T):
+            c_prev = concentrations[t - 1]
+            v      = blended_rates[:, t - 1, :]
+            dt     = (time_points[:, t] - time_points[:, t - 1]).unsqueeze(-1)  # (B,1)
+
+            c1 = c_prev[:, 0:1]
+            coupling = torch.cat([
+                c_prev[:, :self.N_CELL_COLS],
+                c1.expand(-1, C - self.N_CELL_COLS),
+            ], dim=-1)
+
+            # Implicit Euler: stable for any F·dt
+            numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eps) * dt
+            denominator = 1.0 + self.F_NORM * eps * dt
+            concentrations.append(numerator / denominator)
+
+        return torch.stack(concentrations, dim=1)      # (B, T, C)
 
 
 class MultiHeadTemporalDecoder(nn.Module):
@@ -194,16 +256,23 @@ class MultiHeadTemporalDecoder(nn.Module):
         self.state_weighting = StateWeightingLayer(n_components, latent_dim)
         self.rate_predictor = RatePredictionHead(n_components, latent_dim, n_heads)
 
-    def forward(self, latent_state, time_points, initial_conditions):
-        growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
+    def forward(self, latent_state, time_points, initial_conditions,
+                doe_params=None, data3_growth=None, data3_prod=None):
+        T = time_points.shape[1]
+        if data3_growth is not None and data3_prod is not None:
+            # Use measured specific rates from data_3 directly (paper's vg / v_stat)
+            growth_rates = data3_growth.unsqueeze(1).expand(-1, T, -1)
+            prod_rates   = data3_prod.unsqueeze(1).expand(-1, T, -1)
+        else:
+            growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
 
-        f_initial = torch.zeros(latent_state.shape[0], time_points.shape[1], 1, device=latent_state.device)
+        f_initial = torch.zeros(latent_state.shape[0], T, 1, device=latent_state.device)
         blended_rates_initial = (1 - f_initial) * growth_rates + f_initial * prod_rates
-        concentrations = self.integrator(initial_conditions, blended_rates_initial, time_points)
+        concentrations = self.integrator(initial_conditions, blended_rates_initial, time_points, doe_params)
 
         phase_pred = self.state_weighting(latent_state, concentrations)
         final_blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
-        final_concentrations = self.integrator(initial_conditions, final_blended_rates, time_points)
+        final_concentrations = self.integrator(initial_conditions, final_blended_rates, time_points, doe_params)
 
         return {
             'concentrations': final_concentrations,
@@ -245,30 +314,34 @@ class LSTMTemporalDecoder(nn.Module):
         self.integrator      = DifferentiableIntegrator()
         self.n_layers = n_layers
 
-    def forward(self, latent_state, time_points, initial_conditions):
+    def forward(self, latent_state, time_points, initial_conditions,
+                doe_params=None, data3_growth=None, data3_prod=None):
         B, T = time_points.shape
-        time_embedded = self.time_embed(time_points.unsqueeze(-1))   # (B, T, latent_dim)
 
-        # Initialise LSTM hidden/cell from latent vector
-        h0 = self.h0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
-        c0 = self.c0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
-        lstm_out, _ = self.lstm(time_embedded, (h0, c0))             # (B, T, latent_dim)
+        if data3_growth is not None and data3_prod is not None:
+            # Use measured specific rates from data_3 directly (paper's vg / v_stat)
+            growth_rates = data3_growth.unsqueeze(1).expand(-1, T, -1)
+            prod_rates   = data3_prod.unsqueeze(1).expand(-1, T, -1)
+        else:
+            time_embedded   = self.time_embed(time_points.unsqueeze(-1))
+            h0 = self.h0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
+            c0 = self.c0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
+            lstm_out, _     = self.lstm(time_embedded, (h0, c0))
+            latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)
+            combined        = torch.cat([lstm_out, latent_expanded], dim=-1)
+            growth_rates    = self.growth_rates(combined)
+            prod_rates      = self.prod_rates(combined)
 
-        latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)         # (B, T, latent_dim)
-        combined = torch.cat([lstm_out, latent_expanded], dim=-1)             # (B, T, 2*latent_dim)
-        growth_rates = self.growth_rates(combined)   # (B, T, C)
-        prod_rates   = self.prod_rates(combined)     # (B, T, C)
-
-        # Two-pass phase blending (same as MultiHeadTemporalDecoder)
         f_init = torch.zeros(B, T, 1, device=latent_state.device)
         concentrations = self.integrator(
-            initial_conditions, (1 - f_init) * growth_rates + f_init * prod_rates, time_points)
+            initial_conditions, (1 - f_init) * growth_rates + f_init * prod_rates,
+            time_points, doe_params)
 
         phase_pred = self.state_weighting(latent_state, concentrations)
         final_concentrations = self.integrator(
             initial_conditions,
             (1 - phase_pred) * growth_rates + phase_pred * prod_rates,
-            time_points)
+            time_points, doe_params)
 
         return {
             'concentrations': final_concentrations,
@@ -332,6 +405,26 @@ class SimpleBaseline(nn.Module):
         }
 
 
+def _extract_doe_and_rates(parameters):
+    """
+    Extract DoE and data_3 specific rates from the parameters tensor.
+
+    Parameter layout (set by train.py load_data):
+      [0:3]   DoE coded levels  [O2, AAs, Glc]
+      [3:28]  growth-phase specific rates  (25 components)
+      [28:53] production-phase specific rates  (25 components)
+      [53:]   FBA objective efficiencies  (22 values, if present)
+
+    Returns (doe, growth_rates, prod_rates) — any may be None if the
+    parameters tensor is too short (e.g. NPZ-only runs without CSV data).
+    """
+    n = parameters.shape[1]
+    doe    = parameters[:, :3]       if n >= 3  else None
+    growth = parameters[:, 3:28]     if n >= 28 else None
+    prod   = parameters[:, 28:53]    if n >= 53 else None
+    return doe, growth, prod
+
+
 class CosmicNNSurrogateEnhanced(nn.Module):
     def __init__(self, n_components, n_params, latent_dim=64, n_heads=4):
         super().__init__()
@@ -342,7 +435,9 @@ class CosmicNNSurrogateEnhanced(nn.Module):
 
     def forward(self, initial_conditions, time_points, parameters):
         latent = self.encoder(initial_conditions, parameters)
-        return self.decoder(latent, time_points, initial_conditions)
+        doe, growth, prod = _extract_doe_and_rates(parameters)
+        return self.decoder(latent, time_points, initial_conditions,
+                            doe_params=doe, data3_growth=growth, data3_prod=prod)
 
 
 class CosmicNNSurrogateLSTM(nn.Module):
@@ -356,4 +451,6 @@ class CosmicNNSurrogateLSTM(nn.Module):
 
     def forward(self, initial_conditions, time_points, parameters):
         latent = self.encoder(initial_conditions, parameters)
-        return self.decoder(latent, time_points, initial_conditions)
+        doe, growth, prod = _extract_doe_and_rates(parameters)
+        return self.decoder(latent, time_points, initial_conditions,
+                            doe_params=doe, data3_growth=growth, data3_prod=prod)

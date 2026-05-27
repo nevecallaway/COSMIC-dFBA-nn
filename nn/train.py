@@ -151,7 +151,7 @@ class Trainer:
         self.model.eval()
         val_loss = 0.0
         all_targets, all_preds = [], []
-        all_phase_targets, all_phase_preds, all_times = [], [], []
+        all_phase_targets, all_phase_preds, all_times_days = [], [], []
 
         with torch.no_grad():
             for batch in val_loader:
@@ -169,7 +169,10 @@ class Trainer:
                 if 'phases' in batch:
                     all_phase_targets.append(batch['phases'].cpu().numpy())
                     all_phase_preds.append(predictions['phase_weights'].cpu().numpy() if isinstance(predictions, dict) else None)
-                    all_times.append(batch['time'].cpu().numpy())
+                    # Convert normalised [0,1] time back to actual days for metric
+                    t_norm  = batch['time'].cpu().numpy()           # (B, T) in [0,1]
+                    t_scale = batch['time_scale'].cpu().numpy()     # (B, 1) max day
+                    all_times_days.append(t_norm * t_scale)        # (B, T) in days
 
         val_loss /= len(val_loader)
         report = {"val_loss": val_loss}
@@ -183,9 +186,9 @@ class Trainer:
             if all_phase_targets:
                 p_true = np.concatenate(all_phase_targets, axis=0)
                 p_pred = np.concatenate(all_phase_preds, axis=0)
-                t_pts  = np.concatenate(all_times, axis=0)
+                t_days = np.concatenate(all_times_days, axis=0)   # (N, T) in days
                 report["phase_metrics"]   = ModelDiagnostics.calculate_phase_metrics(p_true, p_pred)
-                report["transition"]      = ModelDiagnostics.calculate_transition_metrics(p_true, p_pred, t_pts)
+                report["transition"]      = ModelDiagnostics.calculate_transition_metrics(p_true, p_pred, t_days)
 
         return report
 
@@ -269,17 +272,22 @@ def load_data(data_path):
         print(f"Loading real experimental data from {p}...")
         doe_file   = str(p.parent / 'data_1.csv')
         rates_file = str(p.parent / 'data_3.csv')
+        fba_file   = str(p.parent / 'data_4.csv')
         trajectories, time_points, ics, metadata = load_experimental_data(
-            str(p), doe_file=doe_file, rates_file=rates_file)
+            str(p), doe_file=doe_file, rates_file=rates_file, fba_file=fba_file)
         phases   = metadata.get('phases', None)
         doe_arr  = metadata.get('doe_params', None)        # (n_reactors, 3) or None
         rate_arr = metadata.get('specific_rates', None)    # (n_reactors, 50) or None
+        fba_arr  = metadata.get('fba_efficiencies', None)  # (n_reactors, 22) or None
         parameters = {}
         if doe_arr is not None:
             parameters.update({'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]})
         if rate_arr is not None:
             for k in range(rate_arr.shape[1]):
                 parameters[f'rate_{k}'] = rate_arr[:, k]
+        if fba_arr is not None:
+            for k in range(fba_arr.shape[1]):
+                parameters[f'fba_{k}'] = fba_arr[:, k]
         dataset = dFBADataset(trajectories, time_points, ics, parameters=parameters,
                               normalize=True, phases=phases)
         return dataset
@@ -402,8 +410,8 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     n_params = dataset.n_params if hasattr(dataset, 'n_params') else 0
+    N_LAYERS = 2  # used for both LSTM (actual layers) and transformer (stored for compat)
     if USE_LSTM:
-        N_LAYERS = 2
         print(f"Model: LSTM  n_components={dataset.n_components}, n_params={n_params}, n_layers={N_LAYERS}")
         model = CosmicNNSurrogateLSTM(
             n_components=dataset.n_components,
