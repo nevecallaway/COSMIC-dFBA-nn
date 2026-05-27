@@ -206,6 +206,7 @@ class DifferentiableIntegrator(nn.Module):
     """
     N_CELL_COLS   = 2   # Cell Density (0), Cell Volume (1)
     IDX_GLUCOSE   = 2   # Glucose
+    IDX_TITER     = 5   # Antibody titer — product accumulates, not washed out
     IDX_AAS_START = 6   # Glutamine … Tryptophan (19 components)
     F_NORM        = 13.0  # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
 
@@ -213,9 +214,12 @@ class DifferentiableIntegrator(nn.Module):
         B, T, C = blended_rates.shape
         device  = blended_rates.device
 
-        # ε: removal fraction — 0 for cells, 1 for metabolites
+        # ε: removal fraction — 0 for cells and titer, 1 for metabolites.
+        # Titer is produced and retained in the reactor (not washed out).
         eps = torch.ones(C, device=device)
         eps[:self.N_CELL_COLS] = 0.0
+        if C > self.IDX_TITER:
+            eps[self.IDX_TITER] = 0.0
 
         # C_in: perfusion feed concentrations built from DoE coded levels
         c_in = torch.zeros(B, C, device=device)
@@ -256,15 +260,9 @@ class MultiHeadTemporalDecoder(nn.Module):
         self.state_weighting = StateWeightingLayer(n_components, latent_dim)
         self.rate_predictor = RatePredictionHead(n_components, latent_dim, n_heads)
 
-    def forward(self, latent_state, time_points, initial_conditions,
-                doe_params=None, data3_growth=None, data3_prod=None):
+    def forward(self, latent_state, time_points, initial_conditions, doe_params=None):
         T = time_points.shape[1]
-        if data3_growth is not None and data3_prod is not None:
-            # Use measured specific rates from data_3 directly (paper's vg / v_stat)
-            growth_rates = data3_growth.unsqueeze(1).expand(-1, T, -1)
-            prod_rates   = data3_prod.unsqueeze(1).expand(-1, T, -1)
-        else:
-            growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
+        growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
 
         f_initial = torch.zeros(latent_state.shape[0], T, 1, device=latent_state.device)
         blended_rates_initial = (1 - f_initial) * growth_rates + f_initial * prod_rates
@@ -314,23 +312,17 @@ class LSTMTemporalDecoder(nn.Module):
         self.integrator      = DifferentiableIntegrator()
         self.n_layers = n_layers
 
-    def forward(self, latent_state, time_points, initial_conditions,
-                doe_params=None, data3_growth=None, data3_prod=None):
+    def forward(self, latent_state, time_points, initial_conditions, doe_params=None):
         B, T = time_points.shape
 
-        if data3_growth is not None and data3_prod is not None:
-            # Use measured specific rates from data_3 directly (paper's vg / v_stat)
-            growth_rates = data3_growth.unsqueeze(1).expand(-1, T, -1)
-            prod_rates   = data3_prod.unsqueeze(1).expand(-1, T, -1)
-        else:
-            time_embedded   = self.time_embed(time_points.unsqueeze(-1))
-            h0 = self.h0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
-            c0 = self.c0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
-            lstm_out, _     = self.lstm(time_embedded, (h0, c0))
-            latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)
-            combined        = torch.cat([lstm_out, latent_expanded], dim=-1)
-            growth_rates    = self.growth_rates(combined)
-            prod_rates      = self.prod_rates(combined)
+        time_embedded   = self.time_embed(time_points.unsqueeze(-1))
+        h0 = self.h0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
+        c0 = self.c0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
+        lstm_out, _     = self.lstm(time_embedded, (h0, c0))
+        latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)
+        combined        = torch.cat([lstm_out, latent_expanded], dim=-1)
+        growth_rates    = self.growth_rates(combined)
+        prod_rates      = self.prod_rates(combined)
 
         f_init = torch.zeros(B, T, 1, device=latent_state.device)
         concentrations = self.integrator(
@@ -405,24 +397,16 @@ class SimpleBaseline(nn.Module):
         }
 
 
-def _extract_doe_and_rates(parameters):
-    """
-    Extract DoE and data_3 specific rates from the parameters tensor.
+def _extract_doe(parameters):
+    """Extract DoE coded levels [O2, AAs, Glc] from the parameters tensor.
 
     Parameter layout (set by train.py load_data):
       [0:3]   DoE coded levels  [O2, AAs, Glc]
-      [3:28]  growth-phase specific rates  (25 components)
-      [28:53] production-phase specific rates  (25 components)
-      [53:]   FBA objective efficiencies  (22 values, if present)
-
-    Returns (doe, growth_rates, prod_rates) — any may be None if the
-    parameters tensor is too short (e.g. NPZ-only runs without CSV data).
+      [3:28]  growth-phase specific rates  (encoder features only)
+      [28:53] production-phase specific rates  (encoder features only)
+      [53:]   FBA objective efficiencies  (encoder features only)
     """
-    n = parameters.shape[1]
-    doe    = parameters[:, :3]       if n >= 3  else None
-    growth = parameters[:, 3:28]     if n >= 28 else None
-    prod   = parameters[:, 28:53]    if n >= 53 else None
-    return doe, growth, prod
+    return parameters[:, :3] if parameters.shape[1] >= 3 else None
 
 
 class CosmicNNSurrogateEnhanced(nn.Module):
@@ -435,9 +419,8 @@ class CosmicNNSurrogateEnhanced(nn.Module):
 
     def forward(self, initial_conditions, time_points, parameters):
         latent = self.encoder(initial_conditions, parameters)
-        doe, growth, prod = _extract_doe_and_rates(parameters)
         return self.decoder(latent, time_points, initial_conditions,
-                            doe_params=doe, data3_growth=growth, data3_prod=prod)
+                            doe_params=_extract_doe(parameters))
 
 
 class CosmicNNSurrogateLSTM(nn.Module):
@@ -451,6 +434,5 @@ class CosmicNNSurrogateLSTM(nn.Module):
 
     def forward(self, initial_conditions, time_points, parameters):
         latent = self.encoder(initial_conditions, parameters)
-        doe, growth, prod = _extract_doe_and_rates(parameters)
         return self.decoder(latent, time_points, initial_conditions,
-                            doe_params=doe, data3_growth=growth, data3_prod=prod)
+                            doe_params=_extract_doe(parameters))
