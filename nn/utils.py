@@ -403,7 +403,8 @@ class ModelDiagnostics:
                     rho, _ = spearmanr(t, p)
                     rho_matrix[r, c] = rho
 
-        mean_rho_per_comp = np.nanmean(rho_matrix, axis=0)  # (n_components,)
+        with np.errstate(all='ignore'):
+            mean_rho_per_comp = np.nanmean(rho_matrix, axis=0)  # (n_components,)
         comp_spearman = {f"comp_{i}": mean_rho_per_comp[i] for i in range(n_components)}
 
         return {
