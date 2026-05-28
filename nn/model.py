@@ -250,6 +250,12 @@ class DifferentiableIntegrator(nn.Module):
         if C > self.IDX_TITER:
             eps[self.IDX_TITER] = 0.0
 
+        # Titer is antibody product — it can only accumulate, never decrease.
+        # Clamp the titer rate to ≥ 0 to enforce this physical constraint.
+        if C > self.IDX_TITER:
+            blended_rates = blended_rates.clone()
+            blended_rates[:, :, self.IDX_TITER] = blended_rates[:, :, self.IDX_TITER].clamp(min=0)
+
         # C_in: perfusion feed concentrations built from DoE coded levels
         c_in = torch.zeros(B, C, device=device)
         if doe_params is not None and doe_params.shape[1] >= 3:
