@@ -195,13 +195,20 @@ class RatePredictionHead(nn.Module):
         self.prod_rates = nn.Sequential(
             nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
             nn.Linear(128, n_components), nn.Tanh())
+        # Per-reactor amplitude: Tanh captures shape/direction,
+        # amplitude scales magnitude from the latent state.
+        # Softplus ensures positive, per-component scaling.
+        self.amplitude = nn.Sequential(
+            nn.Linear(latent_dim, 32), nn.ReLU(),
+            nn.Linear(32, n_components), nn.Softplus())
 
     def forward(self, latent_state, time_points):
         B, T = time_points.shape
         time_emb = self.time_embed(time_points.unsqueeze(-1))              # (B, T, TIME_DIM)
         latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)     # (B, T, latent_dim)
         combined = torch.cat([latent_expanded, time_emb], dim=-1)         # (B, T, latent_dim+TIME_DIM)
-        return self.growth_rates(combined), self.prod_rates(combined)
+        amp = self.amplitude(latent_state).unsqueeze(1)                    # (B, 1, C)
+        return self.growth_rates(combined) * amp, self.prod_rates(combined) * amp
 
 
 class DifferentiableIntegrator(nn.Module):
@@ -331,6 +338,9 @@ class LSTMTemporalDecoder(nn.Module):
         self.prod_rates   = nn.Sequential(
             nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
             nn.Linear(128, n_components), nn.Tanh())
+        self.amplitude   = nn.Sequential(
+            nn.Linear(latent_dim, 32), nn.ReLU(),
+            nn.Linear(32, n_components), nn.Softplus())
         self.phase_head  = PhaseTransitionHead(n_components, latent_dim)
         self.integrator  = DifferentiableIntegrator()
         self.n_layers    = n_layers
@@ -344,8 +354,9 @@ class LSTMTemporalDecoder(nn.Module):
         lstm_out, _     = self.lstm(time_embedded, (h0, c0))
         latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)
         combined        = torch.cat([lstm_out, latent_expanded], dim=-1)
-        growth_rates    = self.growth_rates(combined)
-        prod_rates      = self.prod_rates(combined)
+        amp          = self.amplitude(latent_state).unsqueeze(1)           # (B, 1, C)
+        growth_rates = self.growth_rates(combined) * amp
+        prod_rates   = self.prod_rates(combined)   * amp
 
         # Pass 1: pure growth-phase concentrations to inform transition timing
         conc_pass1 = self.integrator(initial_conditions, growth_rates, time_points, doe_params)
