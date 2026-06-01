@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Subset
 from pathlib import Path
 import sys
 import time
@@ -117,7 +117,7 @@ class Trainer:
         growth_rates = predictions['growth_rates']
         prod_rates = predictions['prod_rates']
 
-        # 1. Weighted concentration MSE — titer gets 8× weight
+        # 1. Weighted concentration MSE — titer gets 5× weight
         comp_weights = torch.ones(targets.shape[-1], device=targets.device)
         comp_weights[IDX_TITER] = 5.0
         conc_loss = (((conc_pred - targets) ** 2) * comp_weights).mean()
@@ -575,14 +575,12 @@ def main():
     print(f"{'='*70}")
 
     n_reactors  = len(dataset)
-    loo_val_losses, loo_f1s = [], []
-    loo_trans_mae  = []   # transition time MAE per fold (days)
-    loo_mcc        = []
-    loo_spec       = []   # specificity per fold  (paper: 0.780)
-    loo_sens       = []   # sensitivity per fold  (paper: 0.681)
-    loo_within10   = []   # fraction of reactors with final titer within 10%
-    # Calibration data for conformal prediction: list of (y_true, y_pred, sigma) per fold
-    conformal_cal = []
+    loo_f1s       = []
+    loo_trans_mae = []   # transition time MAE per fold (days)
+    loo_mcc       = []
+    loo_spec      = []   # specificity per fold  (paper: 0.780)
+    loo_sens      = []   # sensitivity per fold  (paper: 0.681)
+    loo_within10  = []   # fraction of reactors with final titer within 10%
     pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
 
     start_time = time.time()
@@ -592,7 +590,6 @@ def main():
 
         val_indices   = [fold]
         train_indices = [i for i in range(n_reactors) if i != fold]
-        from torch.utils.data import Subset
         fold_train = Subset(dataset, train_indices)
         fold_val   = Subset(dataset, val_indices)
 
@@ -621,20 +618,12 @@ def main():
                 return x * (dataset.traj_max[IDX_TITER] - dataset.traj_min[IDX_TITER]) + dataset.traj_min[IDX_TITER]
             within10 = float(np.mean(np.abs(_denorm(y_p) - _denorm(y_t)) / (np.abs(_denorm(y_t)) + 1e-8) <= 0.10))
 
-        loo_val_losses.append(best_val)
         loo_f1s.append(f1)
         loo_mcc.append(mcc)
         loo_spec.append(spec)
         loo_sens.append(sens)
         loo_trans_mae.append(trans_mae)
         loo_within10.append(within10)
-        if 'y_true' in report and 'y_pred' in report:
-            conformal_cal.append({
-                'fold': fold,
-                'y_true': report['y_true'],
-                'y_pred': report['y_pred'],
-                'sigma':  report.get('sigma'),
-            })
         trans_str    = f"{trans_mae:.2f}d"        if not np.isnan(trans_mae) else "n/a"
         mcc_str      = f"{mcc:.3f}"               if not np.isnan(mcc)       else "n/a"
         spec_str     = f"{spec:.3f}"              if not np.isnan(spec)      else "n/a"
@@ -678,7 +667,6 @@ def main():
         'loo_mean_spec':       float(np.nanmean(loo_spec)),
         'loo_mean_sens':       float(np.nanmean(loo_sens)),
         'loo_titer_within10':  within10_count,
-        'conformal_cal': conformal_cal,
     }, OUTPUT_PATH)
     print(f"✓ Model saved: {OUTPUT_PATH}")
 
