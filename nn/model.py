@@ -237,25 +237,22 @@ class DifferentiableIntegrator(nn.Module):
     IDX_TITER     = 5         # Antibody titer
     IDX_AAS_START = 6         # Glutamine … Tryptophan (19 components)
     F_NORM        = 13.0      # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
-    DAY8_NORM     = 8.0/13.0  # Day 8 in normalised [0,1] time
-    # Before day 8: titer retained in reactor (ATF membrane, ε=0).
-    # After day 8: hypothermic shift + harvest begins, titer subject to washout (ε=1).
-    # Paper Supplementary Eq 2: "ε=0 for antibody before day 8, ε=1 otherwise."
+    # NOTE: the paper uses ε=0 for titer before day 8 and ε=1 after (Supplementary Eq 2).
+    # In physical units this washout is balanced by production rates. In our normalised
+    # [0,1] space F_NORM=13 makes the washout dominant and breaks titer prediction.
+    # We keep ε=0 for titer throughout and let the learned rates capture the dynamics.
 
     def forward(self, initial_conditions, blended_rates, time_points, doe_params=None):
         B, T, C = blended_rates.shape
         device  = blended_rates.device
 
-        # ε: removal fraction — 0 for cells, 1 for metabolites.
-        # Titer: ε=0 before day 8 (retained by ATF membrane), ε=1 after day 8
-        # (washout begins with hypothermic shift). Paper Supplementary Eq 2.
-        eps_base = torch.ones(C, device=device)
-        eps_base[:self.N_CELL_COLS] = 0.0
+        # ε: removal fraction — 0 for cells and titer, 1 for metabolites.
+        eps = torch.ones(C, device=device)
+        eps[:self.N_CELL_COLS] = 0.0
         if C > self.IDX_TITER:
-            eps_base[self.IDX_TITER] = 0.0   # start at 0; flipped per-step below
+            eps[self.IDX_TITER] = 0.0
 
         # Titer production rate is always ≥ 0 (cells can't un-produce antibody).
-        # Concentration may still decrease after day 8 due to the washout term.
         # Use torch.cat to avoid in-place ops: the pattern clone()[...] = x.clamp()
         # saves the LHS view for backward then immediately invalidates it in-place.
         if C > self.IDX_TITER:
@@ -275,19 +272,6 @@ class DifferentiableIntegrator(nn.Module):
             if n_aa > 0:
                 c_in[:, self.IDX_AAS_START:]                 = aas.expand(-1, n_aa)
 
-        # Pre-compute per-step titer epsilon as Python floats using .item().
-        # .item() extracts a Python scalar — completely outside the autograd graph
-        # with no tensor storage sharing. This avoids the version-counter corruption
-        # that occurs when any tensor derived from time_points is used near in-place ops.
-        # Assumes all samples in a batch share the same time axis (true for this dataset).
-        if C > self.IDX_TITER:
-            titer_eps_steps = [
-                1.0 if time_points[0, t].item() >= self.DAY8_NORM else 0.0
-                for t in range(T)
-            ]
-        else:
-            titer_eps_steps = None
-
         concentrations = [initial_conditions]
 
         for t in range(1, T):
@@ -300,18 +284,6 @@ class DifferentiableIntegrator(nn.Module):
                 c_prev[:, :self.N_CELL_COLS],
                 c1.expand(-1, C - self.N_CELL_COLS),
             ], dim=-1)
-
-            # Build eps for this timestep. Before day 8: titer col = 0 (retained).
-            # After day 8: titer col = 1 (washed out by perfusion).
-            if titer_eps_steps is not None:
-                te  = torch.full((B, 1), titer_eps_steps[t], device=device)           # (B, 1) constant
-                eps = torch.cat([
-                    eps_base[:self.IDX_TITER].unsqueeze(0).expand(B, -1),              # (B, IDX_TITER)
-                    te,                                                                  # (B, 1)
-                    eps_base[self.IDX_TITER + 1:].unsqueeze(0).expand(B, -1),          # (B, rest)
-                ], dim=1)                                                                # (B, C)
-            else:
-                eps = eps_base                                                           # (C,)
 
             # Implicit Euler: stable for any F·dt
             numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eps) * dt
