@@ -28,7 +28,7 @@ A PyTorch surrogate model for predicting bioreactor phase transitions and metabo
 | B | 4 (train) / 1 (val) | Batch size |
 | T | 40 | Time points per reactor |
 | C | 25 | Metabolite components |
-| n_params | 56 | DoE (3) + specific rates (50) + FBA efficiencies (3) |
+| n_params | 75 | DoE (3) + specific rates (50) + FBA efficiencies (22) |
 | latent_dim | 64 | Latent state dimension |
 
 **Component layout (C=25):**
@@ -43,14 +43,14 @@ A PyTorch surrogate model for predicting bioreactor phase transitions and metabo
 | 5 | Titer (antibody) |
 | 6-24 | Amino acids (Glutamine ... Tryptophan) |
 
-**Parameter layout (n_params=56):**
+**Parameter layout (n_params=75):**
 
 | Index | Content |
 |-------|---------|
 | 0-2 | DoE coded levels: O2, AAs, Glc (values: -1, 0, +1) |
-| 3-27 | Growth-phase specific rates |
-| 28-52 | Production-phase specific rates |
-| 53-55 | FBA objective efficiencies |
+| 3-27 | Growth-phase specific rates (25) |
+| 28-52 | Production-phase specific rates (25) |
+| 53-74 | FBA objective efficiencies (22): how well each of 11 biological objectives was satisfied in growth and production phase, from the paper's NLP optimization |
 
 ---
 
@@ -60,7 +60,7 @@ A PyTorch surrogate model for predicting bioreactor phase transitions and metabo
 INPUTS
   initial_conditions  (B, 25)   normalized concentrations at t=0
   time_points         (B, T)    normalized time in [0, 1]  (actual days / 13)
-  parameters          (B, 56)   DoE levels + rates + FBA efficiencies
+  parameters          (B, 75)   DoE levels + rates + FBA efficiencies
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -168,7 +168,7 @@ OUTPUTS (dict)
 TRAINING DATA: 9 reactors per fold, batch_size=4
   ic:      (4, 25)      initial conditions (normalized)
   time:    (4, 40)      normalized time [0, 1]
-  params:  (4, 56)      DoE levels + rates + FBA efficiencies
+  params:  (4, 75)      DoE levels + rates + FBA efficiencies
   target:  (4, 40, 25)  ground truth concentration trajectories
   phases:  (4, 40)      ground truth f(t) phase fraction
         │
