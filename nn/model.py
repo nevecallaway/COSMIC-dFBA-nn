@@ -270,6 +270,15 @@ class DifferentiableIntegrator(nn.Module):
             if n_aa > 0:
                 c_in[:, self.IDX_AAS_START:]                 = aas.expand(-1, n_aa)
 
+        # Pre-compute titer washout schedule outside the loop.
+        # Detached from the gradient graph — it's a binary mask, not a learned value.
+        # In-place assignment inside the loop would corrupt time_points' version counter
+        # and break backward(), so we build eps per-step using torch.cat instead.
+        if C > self.IDX_TITER:
+            titer_day8 = (time_points.detach() >= self.DAY8_NORM).float()  # (B, T)
+        else:
+            titer_day8 = None
+
         concentrations = [initial_conditions]
 
         for t in range(1, T):
@@ -283,13 +292,17 @@ class DifferentiableIntegrator(nn.Module):
                 c1.expand(-1, C - self.N_CELL_COLS),
             ], dim=-1)
 
-            # After day 8, titer ε switches from 0 → 1 (washout begins)
-            eps = eps_base.clone()
-            if C > self.IDX_TITER:
-                after_day8 = (time_points[:, t] >= self.DAY8_NORM).float()  # (B,)
-                # expand to (B, C) so titer eps is per-reactor
-                eps = eps_base.unsqueeze(0).expand(B, C).clone()
-                eps[:, self.IDX_TITER] = after_day8
+            # Build eps for this timestep using torch.cat (no in-place ops).
+            # Before day 8: titer col = 0 (retained). After day 8: titer col = 1 (washed out).
+            if titer_day8 is not None:
+                te  = titer_day8[:, t].unsqueeze(1)                                    # (B, 1)
+                eps = torch.cat([
+                    eps_base[:self.IDX_TITER].unsqueeze(0).expand(B, -1),              # (B, IDX_TITER)
+                    te,                                                                  # (B, 1)
+                    eps_base[self.IDX_TITER + 1:].unsqueeze(0).expand(B, -1),          # (B, rest)
+                ], dim=1)                                                                # (B, C)
+            else:
+                eps = eps_base                                                           # (C,)
 
             # Implicit Euler: stable for any F·dt
             numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eps) * dt
