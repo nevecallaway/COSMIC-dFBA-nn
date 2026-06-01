@@ -2,6 +2,11 @@
 """
 Unified Training Script for COSMIC-dFBA.
 Combines standard and PINN-enhanced training logic for real and simulated data.
+
+This file orchestrates the training workflow:
+- Trainer class: manages optimizer, loss computation, training/validation loops
+- Two-phase training: Pre-train on synthetic data → Fine-tune on real data (LOO CV)
+- PINN loss: 8-component fused loss that combines MSE, physics constraints, and regularization
 """
 
 import numpy as np
@@ -13,31 +18,92 @@ from pathlib import Path
 import sys
 import time
 
+# Import neural network architecture from model.py
 from model import CosmicNNSurrogateEnhanced, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
+# Import data utilities and evaluation metrics from utils.py
 from utils import load_experimental_data, ModelDiagnostics
 
-IDX_TITER = 5   # column index of Titer in the 25-component trajectory
+# Column index of Titer (antibody product) in the 25-component trajectory
+# Titer gets special attention in loss (5× weight) because it's the output of interest
+IDX_TITER = 5
+
 
 class Trainer:
     """
     Unified trainer for COSMIC-dFBA that handles both standard and
     Physics-Informed Neural Network (PINN) losses.
+    
+    Responsibilities:
+    - Initialize optimizer and learning rate scheduler
+    - Compute loss (fused PINN loss with 8 components)
+    - Run training epoch (forward → loss → backprop → update)
+    - Run validation (no gradient computation, collect metrics)
+    - Coordinate multi-epoch training with early stopping
     """
     def __init__(self, model, device, learning_rate=5e-4, model_type='enhanced',
                  scheduler_patience=5):
-        self.model = model.to(device)
+        """
+        Args:
+            model: neural network instance (e.g., CosmicNNSurrogateLSTM)
+            device: torch.device ('cuda' or 'cpu')
+            learning_rate: step size for AdamW (default 5e-4 = 0.0005)
+            model_type: 'standard' or 'enhanced' (determines loss function)
+            scheduler_patience: epochs to wait before reducing LR (default 5)
+        """
+        self.model = model.to(device)  # Move model to GPU/CPU
         self.device = device
         self.model_type = model_type
+        # AdamW: Adaptive Moment Estimation with decoupled Weight decay
+        # - Automatically adjusts step size per weight (adaptive learning rate)
+        # - Maintains momentum (remembers previous gradients) for smoother convergence
+        # - weight_decay (L2 regularization) prevents overfitting
+        # - lr: learning rate controls step size (default 5e-4 = 0.0005)
         self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+        # Learning rate scheduler: reduce LR by 50% if validation loss doesn't improve
+        # after 'scheduler_patience' epochs. Helps escape plateaus.
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='min', factor=0.5, patience=scheduler_patience
         )
-        self.losses = []
+        self.losses = []  # Track training loss per epoch for diagnostics
 
     def compute_loss(self, predictions, targets, ics, phases_batch=None):
         """
         Computes the loss based on the model type.
-        For 'enhanced' models, it uses the fused PINN loss.
+        For 'enhanced' models, it uses the fused PINN loss with 8 components:
+        
+        PINN = Physics-Informed Neural Network Loss
+        ================================================
+        Standard NN loss only minimizes prediction error (MSE).
+        PINN loss ALSO enforces physical constraints and domain knowledge:
+        
+        Physics constraints in this loss:
+        - Non-negativity (term 4): concentrations ≥ 0 (biology)
+        - Smoothness (terms 5, 7, 8): realistic smooth dynamics
+        - Initial conditions (term 2): preserve boundary conditions
+        - Non-flatness (term 3): avoid trivial constant solutions
+        
+        Why PINN? Fewer parameters, better generalization, physically plausible solutions.
+        
+        1. Weighted concentration MSE (titer 5× weight)
+        1a. Endpoint titer loss (final day error)
+        1b. Peak-time loss (align titer peak timing)
+        2. Initial condition constraint
+        3. Non-flatness penalty (prevents trivial solutions)
+        4. Non-negativity penalty (biology: concentrations ≥ 0)
+        5. Concentration smoothness (prevent jittery predictions)
+        6. Phase regression (match f(t) to ground truth)
+        7. Rate smoothness (smooth rate changes)
+        8. Phase smoothness (smooth transitions)
+        
+        Args:
+            predictions: dict from model with keys 'concentrations', 'phase_weights', 'growth_rates', 'prod_rates'
+            targets: (B, T, 25) true metabolite concentrations
+            ics: (B, 25) initial conditions
+            phases_batch: (B, T) ground truth phase fraction (optional)
+            
+        Returns:
+            total_loss: scalar, sum of all 8 components
+            components: dict with loss breakdown for logging
         """
         if self.model_type == 'standard':
             # Standard MSE + Smoothness
@@ -116,46 +182,89 @@ class Trainer:
         }
 
     def train_epoch(self, train_loader):
-        self.model.train()
+        """
+        Performs one full pass over the training data (one epoch).
+        
+        Steps per batch:
+        1. Unpack batch data (ICs, time, parameters, target trajectories)
+        2. Forward pass: model(ic, time, params) → predictions
+        3. Compute loss: L = 8-component PINN loss
+        4. Backward pass: compute gradients (∂L/∂w for all weights)
+        5. Gradient clipping: clip ||gradient|| to prevent exploding gradients
+        6. Optimizer step: update weights using AdamW (w ← w - lr×∇L)
+        7. Zero gradients: clear old gradients for next batch
+        
+        Args:
+            train_loader: PyTorch DataLoader with training batches
+            
+        Returns:
+            epoch_loss: average loss over all batches
+            components: dict with breakdown of loss components
+        """
+        self.model.train()  # Set model to training mode (enables dropout, etc.)
         epoch_loss = 0.0
         components = {'conc': 0, 'titer_endpoint': 0, 'titer_peak': 0,
                       'ic': 0, 'phase_mse': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
 
         for batch in train_loader:
+            # Extract batch data and move to GPU/CPU
             ic = batch['initial_conditions'].to(self.device)
             time = batch['time'].to(self.device)
             params = batch['parameters'].to(self.device)
             target = batch['trajectory'].to(self.device)
-            phases = batch.get('phases', None)
+            phases = batch.get('phases', None)  # Optional: ground truth phase
             if phases is not None:
                 phases = phases.to(self.device)
 
-            self.optimizer.zero_grad()
-            predictions = self.model(ic, time, params)
-            loss, comp = self.compute_loss(predictions, target, ic, phases)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            # GRADIENT DESCENT STEP
+            self.optimizer.zero_grad()  # Clear old gradients
+            predictions = self.model(ic, time, params)  # Forward pass
+            loss, comp = self.compute_loss(predictions, target, ic, phases)  # Compute loss
+            loss.backward()  # Backpropagation: compute ∂loss/∂w for all weights
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # Clip ||∇loss|| to 1.0
+            self.optimizer.step()  # Update weights: w ← w - lr×∇loss
 
             epoch_loss += loss.item()
             for k in components:
                 components[k] += comp.get(k, 0)
 
+        # Average over all batches
         epoch_loss /= len(train_loader)
         for k in components:
             components[k] /= len(train_loader)
 
-        self.losses.append(epoch_loss)
-        self.scheduler.step(epoch_loss)
+        self.losses.append(epoch_loss)  # Store for diagnostics
+        self.scheduler.step(epoch_loss)  # Adjust learning rate if needed
         return epoch_loss, components
 
     def validate(self, val_loader):
-        self.model.eval()
+        """
+        Performs one full pass over the validation data (no gradient computation).
+        
+        Purpose: Evaluate model on held-out data to detect overfitting.
+        
+        Steps:
+        1. Set model to eval mode (disables dropout, uses running batch norm stats)
+        2. Disable gradient computation (torch.no_grad()) to save memory
+        3. Accumulate predictions and targets
+        4. Compute validation loss and metrics:
+           - Regression metrics: R², MAPE per component
+           - Spearman correlation: trajectory shape accuracy
+           - Phase metrics: F1, MCC, specificity, sensitivity
+           - Transition metrics: transition time MAE (days)
+        
+        Args:
+            val_loader: PyTorch DataLoader with validation batches
+            
+        Returns:
+            report: dict with val_loss and computed metrics
+        """
+        self.model.eval()  # Set model to eval mode
         val_loss = 0.0
         all_targets, all_preds = [], []
         all_phase_targets, all_phase_preds, all_times_days = [], [], []
 
-        with torch.no_grad():
+        with torch.no_grad():  # Disable gradient computation
             for batch in val_loader:
                 ic = batch['initial_conditions'].to(self.device)
                 time = batch['time'].to(self.device)
@@ -166,6 +275,7 @@ class Trainer:
                 loss, _ = self.compute_loss(predictions, target, ic, None)
                 val_loss += loss.item()
 
+                # Accumulate predictions and targets for metrics
                 all_targets.append(target.cpu().numpy())
                 all_preds.append(predictions['concentrations'].cpu().numpy() if isinstance(predictions, dict) else predictions.cpu().numpy())
                 if 'phases' in batch:
@@ -178,6 +288,8 @@ class Trainer:
 
         val_loss /= len(val_loader)
         report = {"val_loss": val_loss}
+        
+        # Compute comprehensive metrics on accumulated predictions
         if all_targets:
             y_true = np.concatenate(all_targets, axis=0)
             y_pred = np.concatenate(all_preds, axis=0)

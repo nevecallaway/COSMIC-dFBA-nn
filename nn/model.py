@@ -232,25 +232,30 @@ class DifferentiableIntegrator(nn.Module):
         c_next = (c_prev + (v·coupling + F·C_in·ε)·dt) / (1 + F·ε·dt)
     For cells ε = 0, denominator = 1 → reduces to explicit Euler.
     """
-    N_CELL_COLS   = 2   # Cell Density (0), Cell Volume (1)
-    IDX_GLUCOSE   = 2   # Glucose
-    IDX_TITER     = 5   # Antibody titer — product accumulates, not washed out
-    IDX_AAS_START = 6   # Glutamine … Tryptophan (19 components)
-    F_NORM        = 13.0  # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
+    N_CELL_COLS   = 2         # Cell Density (0), Cell Volume (1)
+    IDX_GLUCOSE   = 2         # Glucose
+    IDX_TITER     = 5         # Antibody titer
+    IDX_AAS_START = 6         # Glutamine … Tryptophan (19 components)
+    F_NORM        = 13.0      # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
+    DAY8_NORM     = 8.0/13.0  # Day 8 in normalised [0,1] time
+    # Before day 8: titer retained in reactor (ATF membrane, ε=0).
+    # After day 8: hypothermic shift + harvest begins, titer subject to washout (ε=1).
+    # Paper Supplementary Eq 2: "ε=0 for antibody before day 8, ε=1 otherwise."
 
     def forward(self, initial_conditions, blended_rates, time_points, doe_params=None):
         B, T, C = blended_rates.shape
         device  = blended_rates.device
 
-        # ε: removal fraction — 0 for cells and titer, 1 for metabolites.
-        # Titer is produced and retained in the reactor (not washed out).
-        eps = torch.ones(C, device=device)
-        eps[:self.N_CELL_COLS] = 0.0
+        # ε: removal fraction — 0 for cells, 1 for metabolites.
+        # Titer: ε=0 before day 8 (retained by ATF membrane), ε=1 after day 8
+        # (washout begins with hypothermic shift). Paper Supplementary Eq 2.
+        eps_base = torch.ones(C, device=device)
+        eps_base[:self.N_CELL_COLS] = 0.0
         if C > self.IDX_TITER:
-            eps[self.IDX_TITER] = 0.0
+            eps_base[self.IDX_TITER] = 0.0   # start at 0; flipped per-step below
 
-        # Titer is antibody product — it can only accumulate, never decrease.
-        # Clamp the titer rate to ≥ 0 to enforce this physical constraint.
+        # Titer production rate is always ≥ 0 (cells can't un-produce antibody).
+        # Concentration may still decrease after day 8 due to the washout term.
         if C > self.IDX_TITER:
             blended_rates = blended_rates.clone()
             blended_rates[:, :, self.IDX_TITER] = blended_rates[:, :, self.IDX_TITER].clamp(min=0)
@@ -277,6 +282,14 @@ class DifferentiableIntegrator(nn.Module):
                 c_prev[:, :self.N_CELL_COLS],
                 c1.expand(-1, C - self.N_CELL_COLS),
             ], dim=-1)
+
+            # After day 8, titer ε switches from 0 → 1 (washout begins)
+            eps = eps_base.clone()
+            if C > self.IDX_TITER:
+                after_day8 = (time_points[:, t] >= self.DAY8_NORM).float()  # (B,)
+                # expand to (B, C) so titer eps is per-reactor
+                eps = eps_base.unsqueeze(0).expand(B, C).clone()
+                eps[:, self.IDX_TITER] = after_day8
 
             # Implicit Euler: stable for any F·dt
             numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eps) * dt
