@@ -270,14 +270,18 @@ class DifferentiableIntegrator(nn.Module):
             if n_aa > 0:
                 c_in[:, self.IDX_AAS_START:]                 = aas.expand(-1, n_aa)
 
-        # Pre-compute titer washout schedule outside the loop.
-        # Detached from the gradient graph — it's a binary mask, not a learned value.
-        # In-place assignment inside the loop would corrupt time_points' version counter
-        # and break backward(), so we build eps per-step using torch.cat instead.
+        # Pre-compute per-step titer epsilon as Python floats using .item().
+        # .item() extracts a Python scalar — completely outside the autograd graph
+        # with no tensor storage sharing. This avoids the version-counter corruption
+        # that occurs when any tensor derived from time_points is used near in-place ops.
+        # Assumes all samples in a batch share the same time axis (true for this dataset).
         if C > self.IDX_TITER:
-            titer_day8 = (time_points.detach() >= self.DAY8_NORM).float()  # (B, T)
+            titer_eps_steps = [
+                1.0 if time_points[0, t].item() >= self.DAY8_NORM else 0.0
+                for t in range(T)
+            ]
         else:
-            titer_day8 = None
+            titer_eps_steps = None
 
         concentrations = [initial_conditions]
 
@@ -292,10 +296,10 @@ class DifferentiableIntegrator(nn.Module):
                 c1.expand(-1, C - self.N_CELL_COLS),
             ], dim=-1)
 
-            # Build eps for this timestep using torch.cat (no in-place ops).
-            # Before day 8: titer col = 0 (retained). After day 8: titer col = 1 (washed out).
-            if titer_day8 is not None:
-                te  = titer_day8[:, t].unsqueeze(1)                                    # (B, 1)
+            # Build eps for this timestep. Before day 8: titer col = 0 (retained).
+            # After day 8: titer col = 1 (washed out by perfusion).
+            if titer_eps_steps is not None:
+                te  = torch.full((B, 1), titer_eps_steps[t], device=device)           # (B, 1) constant
                 eps = torch.cat([
                     eps_base[:self.IDX_TITER].unsqueeze(0).expand(B, -1),              # (B, IDX_TITER)
                     te,                                                                  # (B, 1)
