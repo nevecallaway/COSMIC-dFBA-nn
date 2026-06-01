@@ -256,9 +256,14 @@ class DifferentiableIntegrator(nn.Module):
 
         # Titer production rate is always ≥ 0 (cells can't un-produce antibody).
         # Concentration may still decrease after day 8 due to the washout term.
+        # Use torch.cat to avoid in-place ops: the pattern clone()[...] = x.clamp()
+        # saves the LHS view for backward then immediately invalidates it in-place.
         if C > self.IDX_TITER:
-            blended_rates = blended_rates.clone()
-            blended_rates[:, :, self.IDX_TITER] = blended_rates[:, :, self.IDX_TITER].clamp(min=0)
+            blended_rates = torch.cat([
+                blended_rates[:, :, :self.IDX_TITER],
+                blended_rates[:, :, self.IDX_TITER:self.IDX_TITER + 1].clamp(min=0),
+                blended_rates[:, :, self.IDX_TITER + 1:],
+            ], dim=-1)
 
         # C_in: perfusion feed concentrations built from DoE coded levels
         c_in = torch.zeros(B, C, device=device)
