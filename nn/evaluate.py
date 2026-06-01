@@ -147,12 +147,20 @@ def print_transition_metrics(phases_true, phases_pred, time_points, reactors):
     print(f"  Mean transition MAE    : {tm['transition_mae_days']:.2f} ± {tm['transition_std_days']:.2f} days")
     print(f"  f(t) accuracy  ±0.1   : {tm['f_accuracy_01']*100:.1f}%  (paper benchmark: 72%)")
     print(f"  f(t) accuracy  ±0.2   : {tm['f_accuracy_02']*100:.1f}%  (paper benchmark: 91%)")
-    print(f"\n  Per-reactor transition day (actual → predicted):")
+    auc = calculate_phase_auc(phases_true, phases_pred, time_points)
+    print(f"  Phase AUC MAE          : {auc['auc_mae']:.2f} ± {auc['auc_std']:.2f} days")
+    print(f"    (AUC = integral of f(t) dt — captures both timing and sharpness of transition)")
+
+    print(f"\n  Per-reactor transition day (actual → predicted) and AUC:")
     for r, name in enumerate(reactors):
-        t_true = tm['true_transition_days'][r]
-        t_pred = tm['pred_transition_days'][r]
-        err    = tm['transition_errors_per_reactor'][r]
-        print(f"    {name}: {t_true:.1f}d → {t_pred:.1f}d  (error={err:.1f}d)")
+        t_true   = tm['true_transition_days'][r]
+        t_pred   = tm['pred_transition_days'][r]
+        err      = tm['transition_errors_per_reactor'][r]
+        a_true   = auc['auc_true'][r]
+        a_pred   = auc['auc_pred'][r]
+        a_err    = auc['auc_errors'][r]
+        print(f"    {name}: day {t_true:.1f}→{t_pred:.1f} (err={err:.1f}d) | "
+              f"AUC {a_true:.2f}→{a_pred:.2f} (err={a_err:.2f}d)")
 
 
 def plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_dir):
@@ -246,6 +254,35 @@ def plot_transition_times(phases_true, phases_pred, time_points, reactors, out_d
     print('  saved eval_transition_times.png')
 
 
+def calculate_phase_auc(phases_true, phases_pred, times_days):
+    """
+    Compute AUC of f(t) per reactor using the trapezoidal rule.
+
+    AUC = integral of f(t) dt over the full run (units: days).
+    It captures both transition timing and sharpness in a single number:
+    a reactor that transitions earlier or more gradually has a larger AUC.
+    Two reactors with identical transition MAE can have very different AUCs
+    if one switches sharply and the other drifts slowly.
+
+    phases_true : (N, T)
+    phases_pred : (N, T, 1) or (N, T)
+    times_days  : (N, T)  actual day values per reactor
+    """
+    if phases_pred.ndim == 3:
+        phases_pred = phases_pred[:, :, 0]
+    N = phases_true.shape[0]
+    auc_true   = np.array([np.trapz(phases_true[r], times_days[r]) for r in range(N)])
+    auc_pred   = np.array([np.trapz(phases_pred[r], times_days[r]) for r in range(N)])
+    auc_errors = np.abs(auc_pred - auc_true)
+    return {
+        'auc_true':   auc_true,
+        'auc_pred':   auc_pred,
+        'auc_errors': auc_errors,
+        'auc_mae':    float(auc_errors.mean()),
+        'auc_std':    float(auc_errors.std()),
+    }
+
+
 def collect_metrics(model, dataset, device, times_days):
     """
     Run inference and return a flat dict of all summary-table metrics.
@@ -265,6 +302,11 @@ def collect_metrics(model, dataset, device, times_days):
         m['trans_mae'] = tm['transition_mae_days']
         m['f_acc_01']  = tm['f_accuracy_01']
         m['f_acc_02']  = tm['f_accuracy_02']
+    if phases_true is not None:
+        auc = calculate_phase_auc(phases_true, phases_pred, times_days)
+        m['auc_mae'] = auc['auc_mae']
+        m['auc_std'] = auc['auc_std']
+        m['_auc']    = auc   # full per-reactor data for printing
     actual_final    = y_true[:, -1, IDX_TITER]
     predicted_final = y_pred[:, -1, IDX_TITER]
     frac_err = np.abs(predicted_final - actual_final) / (np.abs(actual_final) + 1e-8)
@@ -300,6 +342,7 @@ def print_summary_table(real_m, shuffled_m=None, real_loo=None):
         ("Sensitivity",           fmt_f(real_m.get('sensitivity')),       fmt_f(shuf('sensitivity')),     "0.681"),
         ("f(t) ±0.1 accuracy",    fmt_pct(real_m.get('f_acc_01')),        fmt_pct(shuf('f_acc_01')),      "72.3%"),
         ("f(t) ±0.2 accuracy",    fmt_pct(real_m.get('f_acc_02')),        fmt_pct(shuf('f_acc_02')),      "90.8%"),
+        ("Phase AUC MAE (days)",   fmt_mae(real_m.get('auc_mae')),         fmt_mae(shuf('auc_mae')),       "—"),
         ("Final titer mean error",fmt_pct(real_m.get('titer_mean_err')),  fmt_pct(shuf('titer_mean_err')),"—"),
         ("Within 10% titer",      fmt_n10(real_m.get('within10'), N),     fmt_n10(shuf('within10'), N) if shuffled_m else "—", "—"),
     ]
