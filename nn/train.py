@@ -117,25 +117,26 @@ class Trainer:
         growth_rates = predictions['growth_rates']
         prod_rates = predictions['prod_rates']
 
-        # 1. Weighted concentration MSE — titer gets 5× weight
+        # 1. Weighted concentration MSE — titer gets 2x weight (reduced from 5x).
+        # Phase transition is the primary prediction target; titer is downstream.
+        # Over-weighting titer was pulling the model toward fitting titer on training
+        # reactors at the cost of generalising the transition dynamics.
         comp_weights = torch.ones(targets.shape[-1], device=targets.device)
-        comp_weights[IDX_TITER] = 5.0
+        comp_weights[IDX_TITER] = 2.0
         conc_loss = (((conc_pred - targets) ** 2) * comp_weights).mean()
 
-        # 1a. Endpoint titer loss — directly penalise final-timepoint titer error
-        endpoint_loss = 2.0 * nn.functional.mse_loss(
+        # 1a. Endpoint titer loss (reduced from 2.0 to 0.5)
+        endpoint_loss = 0.5 * nn.functional.mse_loss(
             conc_pred[:, -1, IDX_TITER], targets[:, -1, IDX_TITER])
 
-        # 1b. Peak-time loss — soft argmax to align predicted titer peak with actual.
-        # Replaces the monotonicity penalty, which was fighting the real rise-then-fall
-        # dynamics seen in the data.
+        # 1b. Peak-time loss (reduced from 3.0 to 1.0)
         T = conc_pred.shape[1]
         t_idx = torch.arange(T, dtype=torch.float32, device=targets.device) / max(T - 1, 1)
         pred_peak_w = torch.softmax(conc_pred[:, :, IDX_TITER] * 5.0, dim=1)
         true_peak_w = torch.softmax(targets[:, :, IDX_TITER] * 5.0, dim=1)
         pred_peak_t = (pred_peak_w * t_idx).sum(dim=1)   # (batch,)
         true_peak_t = (true_peak_w * t_idx).sum(dim=1)   # (batch,)
-        peak_time_loss = 3.0 * torch.mean((pred_peak_t - true_peak_t) ** 2)
+        peak_time_loss = 1.0 * torch.mean((pred_peak_t - true_peak_t) ** 2)
 
         # 2. IC constraint
         ic_loss = 0.1 * torch.mean((conc_pred[:, 0, :] - ics) ** 2)
@@ -151,12 +152,13 @@ class Trainer:
         conc_smoothness = 0.1 * torch.mean((conc_pred[:, 1:, :] - conc_pred[:, :-1, :]) ** 2)
 
         # 6. Phase regression — MSE against continuous 0-1 fraction, all timepoints.
-        # Weight raised to 3.0: f(t) trajectory accuracy is the primary metric and
-        # was under-penalised at 0.5 relative to the concentration losses.
+        # Weight raised to 5.0 (from 3.0): phase transition is the primary prediction
+        # target per RCA goals. Titer weights were simultaneously reduced so phase
+        # now dominates the loss as intended.
         phase_loss = torch.tensor(0.0, device=targets.device)
         if phases_batch is not None:
             phase_target = phases_batch.unsqueeze(-1)   # (batch, time, 1)
-            phase_loss = 3.0 * nn.functional.mse_loss(phase_pred, phase_target)
+            phase_loss = 5.0 * nn.functional.mse_loss(phase_pred, phase_target)
 
         # 7. PINN: Rate-based constraints
         blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
