@@ -182,9 +182,8 @@ class RatePredictionHead(nn.Module):
     """
     TIME_DIM = 32
 
-    def __init__(self, n_components, latent_dim=64, n_heads=4):
+    def __init__(self, n_components, latent_dim=64):
         super().__init__()
-        # n_heads retained in signature for API compat but no longer used
         in_dim = latent_dim + self.TIME_DIM
         self.time_embed = nn.Sequential(
             nn.Linear(1, self.TIME_DIM), nn.ReLU(),
@@ -292,13 +291,12 @@ class MultiHeadTemporalDecoder(nn.Module):
         super().__init__()
         self.integrator     = DifferentiableIntegrator()
         self.phase_head     = PhaseTransitionHead(n_components, latent_dim)
-        self.rate_predictor = RatePredictionHead(n_components, latent_dim, n_heads)
+        self.rate_predictor = RatePredictionHead(n_components, latent_dim)
 
     def forward(self, latent_state, time_points, initial_conditions, doe_params=None):
         growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
 
-        # Pass 1: integrate with f=0 to get growth-phase concentration trajectory
-        f_zero = torch.zeros(*time_points.shape, 1, device=latent_state.device)
+        # Pass 1: integrate with pure growth rates to get growth-phase concentration trajectory
         conc_pass1 = self.integrator(initial_conditions,
                                      growth_rates,   # f=0 → pure growth rates
                                      time_points, doe_params)
@@ -380,59 +378,6 @@ class LSTMTemporalDecoder(nn.Module):
         }
 
 
-class TemporalDecoder(nn.Module):
-    def __init__(self, n_components, latent_dim=64, n_heads=4):
-        super().__init__()
-        self.time_embed = nn.Sequential(nn.Linear(1, 32), nn.ReLU(), nn.Linear(32, latent_dim))
-        self.attention = nn.MultiheadAttention(latent_dim, n_heads, batch_first=True)
-        self.decoder = nn.Sequential(nn.Linear(latent_dim * 2, 256), nn.ReLU(), nn.Dropout(0.2), nn.Linear(256, 256), nn.ReLU(), nn.Dropout(0.2), nn.Linear(256, n_components), nn.Sigmoid())
-
-    def forward(self, latent_state, time_points):
-        time_expanded = time_points.unsqueeze(-1)
-        time_embedded = self.time_embed(time_expanded)
-        latent_expanded = latent_state.unsqueeze(1).expand(-1, time_points.shape[1], -1)
-        attn_out, _ = self.attention(time_embedded, latent_expanded, latent_expanded)
-        combined = torch.cat([latent_expanded, attn_out], dim=-1)
-        return self.decoder(combined)
-
-
-class CosmicNNSurrogate(nn.Module):
-    def __init__(self, n_components, n_params, latent_dim=64, n_heads=4):
-        super().__init__()
-        self.encoder = DynamicsEncoder(n_components, n_params, latent_dim)
-        self.decoder = TemporalDecoder(n_components, latent_dim, n_heads)
-        self.n_components = n_components
-        self.n_params = n_params
-
-    def forward(self, initial_conditions, time_points, parameters):
-        latent = self.encoder(initial_conditions, parameters)
-        return self.decoder(latent, time_points)
-
-
-class SimpleBaseline(nn.Module):
-    def __init__(self, n_components, n_params=0, latent_dim=64):
-        super().__init__()
-        self.n_components = n_components
-        self.n_params = n_params
-        input_size = n_components + n_params
-        self.encoder = nn.Sequential(nn.Linear(input_size, 128), nn.ReLU(), nn.Dropout(0.2), nn.Linear(128, 128), nn.ReLU(), nn.Dropout(0.2), nn.Linear(128, latent_dim))
-        self.time_embed = nn.Sequential(nn.Linear(1, 32), nn.ReLU(), nn.Linear(32, latent_dim))
-        self.attention = nn.MultiheadAttention(latent_dim, 2, batch_first=True)
-        self.decoder = nn.Sequential(nn.Linear(latent_dim * 2, 128), nn.ReLU(), nn.Dropout(0.2), nn.Linear(128, n_components), nn.Sigmoid())
-
-    def forward(self, initial_conditions, time_points, parameters=None):
-        encoder_input = torch.cat([initial_conditions, parameters], dim=-1) if parameters is not None and parameters.shape[1] > 0 else initial_conditions
-        latent_state = self.encoder(encoder_input)
-        time_embedded = self.time_embed(time_points.unsqueeze(-1))
-        latent_expanded = latent_state.unsqueeze(1).expand(-1, time_points.shape[1], -1)
-        attn_out, _ = self.attention(time_embedded, latent_expanded, latent_expanded)
-        combined = torch.cat([latent_expanded, attn_out], dim=-1)
-        concentrations = self.decoder(combined)
-        return {
-            'concentrations': concentrations,
-            'phase_weights': torch.ones(initial_conditions.shape[0], time_points.shape[1], 1, device=initial_conditions.device) * 0.5
-        }
-
 
 def _extract_doe(parameters):
     """Extract DoE coded levels [O2, AAs, Glc] from the parameters tensor.
@@ -461,15 +406,64 @@ class CosmicNNSurrogateEnhanced(nn.Module):
 
 
 class CosmicNNSurrogateLSTM(nn.Module):
-    """Same encoder as CosmicNNSurrogateEnhanced, LSTM decoder instead of attention."""
+    """
+    Top-level surrogate model combining a DynamicsEncoder (shared with attention version)
+    and an LSTMTemporalDecoder (instead of multi-head attention).
+    
+    This class is the entry point for LSTM-based training. The only difference from
+    CosmicNNSurrogateEnhanced is the decoder type; everything else (data handling,
+    loss computation, evaluation) is identical.
+    """
+    
     def __init__(self, n_components, n_params, latent_dim=64, n_layers=2):
-        super().__init__()
+        """
+        Args:
+            n_components (int): Number of metabolite components (25 in this dataset)
+            n_params (int): Number of encoder features (DoE + specific rates + FBA efficiencies)
+            latent_dim (int): Dimension of latent state (default 64)
+            n_layers (int): Number of LSTM layers (default 2; deeper = more capacity but more params)
+        """
+        super().__init__()  # Initialize nn.Module
+        
+        # ENCODER: Compresses initial conditions + parameters into a 64-dim latent vector
+        # This latent vector captures reactor identity and will be used to initialize LSTM hidden state
         self.encoder = DynamicsEncoder(n_components, n_params, latent_dim)
+        
+        # DECODER: LSTM-based temporal processor
+        # Takes latent state, time points, and initial conditions
+        # Returns concentrations, phase weights f(t), and intermediate rates
         self.decoder = LSTMTemporalDecoder(n_components, latent_dim, n_layers)
+        
+        # Store metadata for later use (e.g., in evaluation scripts)
         self.n_components = n_components
         self.n_params = n_params
 
     def forward(self, initial_conditions, time_points, parameters):
+        """
+        Forward pass: encodes then decodes.
+        
+        Args:
+            initial_conditions (Tensor): (B, 25) — metabolite concentrations at t=0
+            time_points (Tensor): (B, T) — normalized time [0, 1] for each reactor
+            parameters (Tensor): (B, n_params) — DoE levels + specific rates + FBA efficiencies
+        
+        Returns:
+            Dict with keys:
+                'concentrations': (B, T, 25) — predicted metabolite trajectories
+                'phase_weights': (B, T, 1) — f(t) phase interpolation
+                'growth_rates': (B, T, 25) — predicted growth-phase rates
+                'prod_rates': (B, T, 25) — predicted production-phase rates
+        """
+        
+        # Step 1: ENCODING
+        # Compress initial conditions + parameters into a single latent vector per reactor
+        # Output shape: (B, latent_dim=64)
         latent = self.encoder(initial_conditions, parameters)
+        
+        # Step 2: DECODING (two-pass ODE integration)
+        # Pass latent state to decoder along with:
+        #   - time_points: for generating time embeddings
+        #   - initial_conditions: needed for ODE integration (boundary conditions)
+        #   - doe_params: extracted DoE levels [O2, AAs, Glc] for perfusion feed setup
         return self.decoder(latent, time_points, initial_conditions,
                             doe_params=_extract_doe(parameters))
