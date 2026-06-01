@@ -3,6 +3,7 @@
 Utilities for COSMIC-dFBA: Data loading, experimental analysis, and model diagnostics.
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 import torch
@@ -400,12 +401,13 @@ class ModelDiagnostics:
                 p = y_pred[r, :, c]
                 # Need variance in both series to compute correlation
                 if t.std() > 1e-8 and p.std() > 1e-8:
-                    rho, _ = spearmanr(t, p)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        rho, _ = spearmanr(t, p)
                     rho_matrix[r, c] = rho
 
-        import warnings
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
+            warnings.simplefilter("ignore")
             mean_rho_per_comp = np.nanmean(rho_matrix, axis=0)  # (n_components,)
         comp_spearman = {f"comp_{i}": mean_rho_per_comp[i] for i in range(n_components)}
 

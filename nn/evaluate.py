@@ -292,8 +292,8 @@ def calculate_phase_auc(phases_true, phases_pred, times_days):
     if phases_pred.ndim == 3:
         phases_pred = phases_pred[:, :, 0]
     N = phases_true.shape[0]
-    auc_true   = np.array([np.trapz(phases_true[r], times_days[r]) for r in range(N)])
-    auc_pred   = np.array([np.trapz(phases_pred[r], times_days[r]) for r in range(N)])
+    auc_true   = np.array([np.trapezoid(phases_true[r], times_days[r]) for r in range(N)])
+    auc_pred   = np.array([np.trapezoid(phases_pred[r], times_days[r]) for r in range(N)])
     auc_errors = np.abs(auc_pred - auc_true)
     return {
         'auc_true':   auc_true,
