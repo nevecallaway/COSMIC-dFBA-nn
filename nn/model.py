@@ -165,7 +165,10 @@ class PhaseTransitionHead(nn.Module):
         mu    = torch.sigmoid(raw[:, 0])                               # (B,) in (0, 1)
         sigma = F.softplus(raw[:, 1]) + 0.01                          # (B,) > 0
         f = torch.sigmoid((time_points - mu.unsqueeze(1)) / sigma.unsqueeze(1))
-        return f.unsqueeze(-1)                                         # (B, T, 1)
+        # Return f, mu, sigma so callers can surface transition day and sharpness.
+        # mu * time_scale_days = predicted transition midpoint in days.
+        # sigma * time_scale_days = transition width in days (small = sharp switch).
+        return f.unsqueeze(-1), mu, sigma                              # (B, T, 1), (B,), (B,)
 
 
 class RatePredictionHead(nn.Module):
@@ -309,15 +312,17 @@ class MultiHeadTemporalDecoder(nn.Module):
                                      time_points, doe_params)
 
         # Pass 2: condition phase prediction on concentrations, then re-integrate
-        phase_pred    = self.phase_head(latent_state, time_points, conc_pass1)
+        phase_pred, mu, sigma = self.phase_head(latent_state, time_points, conc_pass1)
         blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
         concentrations = self.integrator(initial_conditions, blended_rates, time_points, doe_params)
 
         return {
-            'concentrations': concentrations,
-            'phase_weights':  phase_pred,
-            'growth_rates':   growth_rates,
-            'prod_rates':     prod_rates,
+            'concentrations':    concentrations,
+            'phase_weights':     phase_pred,
+            'growth_rates':      growth_rates,
+            'prod_rates':        prod_rates,
+            'transition_mu':     mu,     # (B,) normalised: mu * time_scale_days = transition day
+            'transition_sigma':  sigma,  # (B,) normalised: sigma * time_scale_days = transition width
         }
 
 
@@ -373,15 +378,17 @@ class LSTMTemporalDecoder(nn.Module):
         conc_pass1 = self.integrator(initial_conditions, growth_rates, time_points, doe_params)
 
         # Pass 2: condition phase prediction on concentrations, then re-integrate
-        phase_pred    = self.phase_head(latent_state, time_points, conc_pass1)
+        phase_pred, mu, sigma = self.phase_head(latent_state, time_points, conc_pass1)
         blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
         concentrations = self.integrator(initial_conditions, blended_rates, time_points, doe_params)
 
         return {
-            'concentrations': concentrations,
-            'phase_weights':  phase_pred,
-            'growth_rates':   growth_rates,
-            'prod_rates':     prod_rates,
+            'concentrations':    concentrations,
+            'phase_weights':     phase_pred,
+            'growth_rates':      growth_rates,
+            'prod_rates':        prod_rates,
+            'transition_mu':     mu,     # (B,) normalised: mu * time_scale_days = transition day
+            'transition_sigma':  sigma,  # (B,) normalised: sigma * time_scale_days = transition width
         }
 
 

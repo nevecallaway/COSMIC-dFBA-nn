@@ -87,12 +87,20 @@ def run_inference(model, dataset, device):
     with torch.no_grad():
         out = model(ic, time, params)
 
-    y_pred  = out['concentrations'].cpu().numpy()   # (N, T, C)
-    y_true  = target.cpu().numpy()
-    phases_pred = out['phase_weights'].cpu().numpy()  # (N, T, 1)
+    y_pred      = out['concentrations'].cpu().numpy()    # (N, T, C)
+    y_true      = target.cpu().numpy()
+    phases_pred = out['phase_weights'].cpu().numpy()     # (N, T, 1)
     phases_true = batch['phases'].cpu().numpy() if 'phases' in batch else None
 
-    return y_true, y_pred, phases_true, phases_pred
+    # mu and sigma are in normalised time [0, 1]; convert to days using per-reactor scale
+    time_scale = batch['time_scale'].cpu().numpy()       # (N, 1)
+    mu_days    = None
+    sigma_days = None
+    if 'transition_mu' in out:
+        mu_days    = (out['transition_mu'].cpu().numpy()    * time_scale.squeeze(-1))  # (N,)
+        sigma_days = (out['transition_sigma'].cpu().numpy() * time_scale.squeeze(-1))  # (N,)
+
+    return y_true, y_pred, phases_true, phases_pred, mu_days, sigma_days
 
 
 def print_metrics(y_true, y_pred, phases_true, phases_pred, reactors):
@@ -135,7 +143,8 @@ def print_metrics(y_true, y_pred, phases_true, phases_pred, reactors):
         print(f"  Confusion matrix:\n{pm['confusion_matrix']}")
 
 
-def print_transition_metrics(phases_true, phases_pred, time_points, reactors):
+def print_transition_metrics(phases_true, phases_pred, time_points, reactors,
+                             mu_days=None, sigma_days=None):
     """Print COSMIC-paper-aligned transition timing metrics."""
     if phases_true is None:
         return
@@ -151,7 +160,19 @@ def print_transition_metrics(phases_true, phases_pred, time_points, reactors):
     print(f"  Phase AUC MAE          : {auc['auc_mae']:.2f} ± {auc['auc_std']:.2f} days")
     print(f"    (AUC = integral of f(t) dt — captures both timing and sharpness of transition)")
 
-    print(f"\n  Per-reactor transition day (actual → predicted) and AUC:")
+    if mu_days is not None:
+        print(f"\n  Transition parameters (mu = midpoint, sigma = width):")
+        print(f"  {'Reactor':<8} {'Actual':>8} {'mu':>8} {'err':>7} {'sigma':>8}  interpretation")
+        print(f"  {'-'*65}")
+        for r, name in enumerate(reactors):
+            t_true = tm['true_transition_days'][r]
+            mu     = mu_days[r]
+            sig    = sigma_days[r]
+            err    = mu - t_true
+            sharp  = "sharp" if sig < 1.0 else ("gradual" if sig > 2.5 else "moderate")
+            print(f"  {name:<8} {t_true:>8.1f}d {mu:>7.1f}d {err:>+7.1f}d {sig:>7.1f}d  {sharp}")
+
+    print(f"\n  Per-reactor transition day (actual vs predicted) and AUC:")
     for r, name in enumerate(reactors):
         t_true   = tm['true_transition_days'][r]
         t_pred   = tm['pred_transition_days'][r]
@@ -289,7 +310,7 @@ def collect_metrics(model, dataset, device, times_days):
 
     times_days: (n_reactors, T) actual day values — used for transition MAE.
     """
-    y_true, y_pred, phases_true, phases_pred = run_inference(model, dataset, device)
+    y_true, y_pred, phases_true, phases_pred, mu_days, sigma_days = run_inference(model, dataset, device)
 
     m = {}
     if phases_true is not None:
@@ -313,7 +334,7 @@ def collect_metrics(model, dataset, device, times_days):
     m['titer_mean_err'] = float(frac_err.mean())
     m['within10']       = int((frac_err <= 0.10).sum())
     m['n_reactors']     = len(actual_final)
-    return m, y_true, y_pred, phases_true, phases_pred
+    return m, y_true, y_pred, phases_true, phases_pred, mu_days, sigma_days
 
 
 def print_summary_table(real_m, shuffled_m=None, real_loo=None):
@@ -666,6 +687,64 @@ def plot_problem_reactors(y_true, y_pred, phases_true, phases_pred,
             print(f'  saved eval_problem_{name}_phase.png')
 
 
+def plot_phase_params(mu_days, sigma_days, phases_true, phases_pred, times_days, reactors, out_dir):
+    """
+    Two-panel plot surfacing the PhaseTransitionHead's explicit parameters.
+
+    Left: scatter of mu (predicted transition midpoint) vs actual transition day.
+          Points on the diagonal = perfect timing. Offset = systematic bias.
+
+    Right: sigma per reactor (transition width in days).
+           Small sigma = sharp switch, large sigma = gradual drift.
+           Wide sigma on a reactor with good timing may signal biological uncertainty.
+    """
+    if mu_days is None:
+        return
+
+    tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, times_days)
+    actual_days = tm['true_transition_days']   # (N,)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Left: mu vs actual transition day
+    ax = axes[0]
+    ax.scatter(actual_days, mu_days, s=80, zorder=3, color='#E53935',
+               edgecolors='black', linewidths=0.6)
+    for i, name in enumerate(reactors):
+        ax.annotate(name, (actual_days[i], mu_days[i]),
+                    fontsize=7, textcoords='offset points', xytext=(5, 4))
+    lo = min(actual_days.min(), mu_days.min()) - 0.5
+    hi = max(actual_days.max(), mu_days.max()) + 0.5
+    ax.plot([lo, hi], [lo, hi], 'k--', linewidth=1, label='y = x  (perfect)')
+    ax.set_xlabel('Actual transition day')
+    ax.set_ylabel('mu (predicted transition midpoint, days)')
+    ax.set_title('PhaseTransitionHead: mu vs actual transition day\n'
+                 'mu is the explicit parameter the model learned; not derived from f(t) > 0.5')
+    ax.legend(fontsize=8)
+
+    # Right: sigma per reactor
+    ax = axes[1]
+    x = np.arange(len(reactors))
+    bars = ax.bar(x, sigma_days, color='#1565C0', alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax.axhline(1.0, color='gray', linewidth=0.8, linestyle='--', label='1 day (sharp threshold)')
+    ax.axhline(2.5, color='orange', linewidth=0.8, linestyle='--', label='2.5 days (gradual)')
+    for bar, val in zip(bars, sigma_days):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
+                f'{val:.1f}d', ha='center', va='bottom', fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(reactors, rotation=45, ha='right', fontsize=8)
+    ax.set_ylabel('sigma (transition width, days)')
+    ax.set_title('PhaseTransitionHead: sigma per reactor\n'
+                 'small = sharp switch, large = gradual transition')
+    ax.legend(fontsize=8)
+
+    fig.suptitle('Explicit transition parameters from PhaseTransitionHead', fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_dir / 'eval_phase_params.png', dpi=150)
+    plt.close(fig)
+    print('  saved eval_phase_params.png')
+
+
 def main():
     here = Path(__file__).parent
     parser = argparse.ArgumentParser()
@@ -715,7 +794,7 @@ def main():
     }
 
     # Collect real-model metrics and inference outputs
-    real_m, y_true, y_pred, phases_true, phases_pred = collect_metrics(
+    real_m, y_true, y_pred, phases_true, phases_pred, mu_days, sigma_days = collect_metrics(
         model, dataset, device, times)
 
     # Shuffled baseline (optional)
@@ -726,22 +805,23 @@ def main():
         shuffled_model, _ = load_model(str(shuffled_path), device)
         shuffled_m, *_ = collect_metrics(shuffled_model, dataset, device, times)
 
-    # ── Summary table (primary output) ───────────────────────────────────────
+    # Summary table (primary output)
     print_summary_table(real_m, shuffled_m, real_loo)
 
-    # ── Detailed per-metric breakdowns ───────────────────────────────────────
+    # Detailed per-metric breakdowns
     print_metrics(y_true, y_pred, phases_true, phases_pred, reactors)
     print_final_titer_metrics(y_true, y_pred, reactors)
-    print_transition_metrics(phases_true, phases_pred, times, reactors)
+    print_transition_metrics(phases_true, phases_pred, times, reactors,
+                             mu_days=mu_days, sigma_days=sigma_days)
 
     # Conformal intervals from LOO calibration residuals
     intervals = build_conformal_intervals(conformal_cal, y_pred, alpha=0.1)
     if intervals:
         print(f"\nConformal prediction (90% coverage):")
         q = intervals['split']['q'][:, IDX_TITER]
-        print(f"  Split interval half-width (titer, mean over time)   : ±{q.mean():.4f}")
+        print(f"  Split interval half-width (titer, mean over time)   : +-{q.mean():.4f}")
         q_adj = intervals['adjusted']['q'][:, IDX_TITER]
-        print(f"  Adjusted interval scale   (titer, mean over time)   : ×{q_adj.mean():.4f} × σ_cal")
+        print(f"  Adjusted interval scale   (titer, mean over time)   : x{q_adj.mean():.4f} x sigma_cal")
 
     # Plots
     out_dir = here / 'figures'
@@ -752,6 +832,7 @@ def main():
     plot_titer_summary(y_true, y_pred, reactors, out_dir)
     plot_conformal_titer(y_true, y_pred, intervals, reactors, out_dir)
     plot_problem_reactors(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)
+    plot_phase_params(mu_days, sigma_days, phases_true, phases_pred, times, reactors, out_dir)
 
 
 if __name__ == '__main__':
