@@ -119,7 +119,7 @@ INPUTS
 │    metabolites:      c_next = (c_prev + (v*c1 + F*c_in)*dt)│
 │                               / (1 + F*dt)                  │
 │    F_NORM = 13.0  (perfusion rate in normalised time)       │
-│    titer (idx 5):  epsilon=0, no washout                    │
+│    titer (idx 5):  eta=0, no washout                    │
 │                                                             │
 │  OUT: conc_pass1           (B, T, 25)                       │
 └─────────────────────────────────────────────────────────────┘

@@ -228,32 +228,32 @@ class DifferentiableIntegrator(nn.Module):
       • col 2  (Glucose)          ← DoE Glc  (doe_params[:, 2])
       • cols 6-24 (amino acids)   ← DoE AAs  (doe_params[:, 1])
       • all other metabolites     ← C_i_in = 0  (not in perfusion feed)
-      • cells                     ← ε = 0, no washout term
+      • cells                     ← η = 0, no washout term
 
     Implicit Euler is used for the washout so the scheme is unconditionally
     stable regardless of F·dt:
-        c_next = (c_prev + (v·coupling + F·C_in·ε)·dt) / (1 + F·ε·dt)
-    For cells ε = 0, denominator = 1 → reduces to explicit Euler.
+        c_next = (c_prev + (v·coupling + F·C_in·η)·dt) / (1 + F·η·dt)
+    For cells η = 0, denominator = 1 → reduces to explicit Euler.
     """
     N_CELL_COLS   = 2         # Cell Density (0), Cell Volume (1)
     IDX_GLUCOSE   = 2         # Glucose
     IDX_TITER     = 5         # Antibody titer
     IDX_AAS_START = 6         # Glutamine … Tryptophan (19 components)
     F_NORM        = 13.0      # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
-    # NOTE: the paper uses ε=0 for titer before day 8 and ε=1 after (Supplementary Eq 2).
+    # NOTE: the paper uses η=0 for titer before day 8 and η=1 after (Supplementary Eq 2).
     # In physical units this washout is balanced by production rates. In our normalised
     # [0,1] space F_NORM=13 makes the washout dominant and breaks titer prediction.
-    # We keep ε=0 for titer throughout and let the learned rates capture the dynamics.
+    # We keep η=0 for titer throughout and let the learned rates capture the dynamics.
 
     def forward(self, initial_conditions, blended_rates, time_points, doe_params=None):
         B, T, C = blended_rates.shape
         device  = blended_rates.device
 
-        # ε: removal fraction — 0 for cells and titer, 1 for metabolites.
-        eps = torch.ones(C, device=device)
-        eps[:self.N_CELL_COLS] = 0.0
+        # eta: removal fraction — 0 for cells and titer, 1 for metabolites.
+        eta = torch.ones(C, device=device)
+        eta[:self.N_CELL_COLS] = 0.0
         if C > self.IDX_TITER:
-            eps[self.IDX_TITER] = 0.0
+            eta[self.IDX_TITER] = 0.0
 
         # Titer production rate is always ≥ 0 (cells can't un-produce antibody).
         # Use torch.cat to avoid in-place ops: the pattern clone()[...] = x.clamp()
@@ -289,8 +289,8 @@ class DifferentiableIntegrator(nn.Module):
             ], dim=-1)
 
             # Implicit Euler: stable for any F·dt
-            numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eps) * dt
-            denominator = 1.0 + self.F_NORM * eps * dt
+            numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eta) * dt
+            denominator = 1.0 + self.F_NORM * eta * dt
             concentrations.append(numerator / denominator)
 
         return torch.stack(concentrations, dim=1)      # (B, T, C)
@@ -329,7 +329,7 @@ class MultiHeadTemporalDecoder(nn.Module):
 class LSTMTemporalDecoder(nn.Module):
     """
     LSTM-based temporal decoder. Replaces transformer attention with an LSTM
-    that steps through time sequentially, which suits rise-then-fall trajectories
+    that steta through time sequentially, which suits rise-then-fall trajectories
     better than attention (which treats all timepoints equally).
 
     The latent vector initialises the LSTM hidden and cell states.

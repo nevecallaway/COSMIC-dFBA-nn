@@ -380,8 +380,14 @@ def load_synthetic_data(npz_path, real_dataset):
                        normalize=False, phases=phases)
 
 
-def load_data(data_path):
-    """Flexible loader for CSV or NPZ data."""
+def load_data(data_path, include_rates=True):
+    """Flexible loader for CSV or NPZ data.
+
+    Args:
+        include_rates: if False, omit data_3 specific rates from the encoder
+            parameter vector. Use --no-rates to test whether rates add signal
+            beyond what the trajectory targets already encode.
+    """
     p = Path(data_path)
     if p.is_file() and p.suffix == '.csv':
         print(f"Loading real experimental data from {p}...")
@@ -397,9 +403,11 @@ def load_data(data_path):
         parameters = {}
         if doe_arr is not None:
             parameters.update({'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]})
-        if rate_arr is not None:
+        if rate_arr is not None and include_rates:
             for k in range(rate_arr.shape[1]):
                 parameters[f'rate_{k}'] = rate_arr[:, k]
+        elif not include_rates:
+            print("  Specific rates (data_3) excluded from encoder inputs.")
         if fba_arr is not None:
             for k in range(fba_arr.shape[1]):
                 parameters[f'fba_{k}'] = fba_arr[:, k]
@@ -480,6 +488,9 @@ def main():
     parser.add_argument('--shuffle', action='store_true',
                         help='Permutation baseline: shuffle inputs vs outputs before '
                              'training to establish chance-level performance')
+    parser.add_argument('--no-rates', action='store_true',
+                        help='Exclude data_3 specific rates from encoder inputs. '
+                             'Tests whether rates add signal beyond trajectory targets.')
     args = parser.parse_args()
 
     print(f"\n{'='*70}")
@@ -489,6 +500,7 @@ def main():
     USE_SYNTHETIC = not args.no_synthetic
     USE_LSTM      = args.lstm
     USE_SHUFFLE   = args.shuffle
+    USE_RATES     = not args.no_rates
 
     script_dir = Path(__file__).parent
     DATA_PATH  = script_dir / "data" / "data_2.csv"
@@ -510,7 +522,7 @@ def main():
     FINETUNE_LR = 1e-4
 
     try:
-        dataset = load_data(str(DATA_PATH))
+        dataset = load_data(str(DATA_PATH), include_rates=USE_RATES)
     except Exception as e:
         print(f"Error loading data: {e}")
         return
