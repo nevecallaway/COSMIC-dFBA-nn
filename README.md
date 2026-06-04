@@ -33,7 +33,7 @@ The primary prediction goal is transition timing for root cause analysis (RCA): 
 | T | 13 | Time points per reactor (one per day, day 0-12) |
 | C | 25 | Metabolite components |
 | n_params | 3 | DoE coded levels: O2, AAs, Glc |
-| latent_dim | 64 | Latent state dimension |
+| latent_dim | 32 | Latent state dimension |
 
 **Component layout (C=25):**
 
@@ -61,6 +61,10 @@ FBA-derived features (data_3 specific rates, data_4 efficiencies) were tested an
 
 ## Model Architecture
 
+The architecture was deliberately kept minimal. With 10 reactors and 3 DoE inputs the problem is low-dimensional, so simpler generalizes better.
+
+Earlier iterations used an LSTM or transformer to predict time-varying rate tensors `(B, T, 25)` and ran the ODE twice (once growth-only to inform the phase head, once blended). Ablations showed this added complexity without improving LOO performance. The current design predicts constant rates per phase -- biologically appropriate since dFBA rates are phase-constant -- and runs a single ODE pass.
+
 ```
 INPUTS
   initial_conditions  (B, 25)   normalized concentrations at t=0
@@ -72,73 +76,32 @@ INPUTS
 │  DynamicsEncoder                          (model.py)        │
 │                                                             │
 │  IN:  cat([initial_conditions, parameters])  →  (B, 28)    │
-│  FC1: Linear(28, 128) + ReLU + Dropout(0.2)                 │
-│  FC2: Linear(128, 128) + ReLU + Dropout(0.2)                │
-│  FC3: Linear(128, 64)                                       │
-│  OUT: latent_state                           →  (B, 64)     │
+│  FC1: Linear(28, 64) + ReLU                                 │
+│  FC2: Linear(64, 32)                                        │
+│  OUT: latent_state                           →  (B, 32)     │
 └─────────────────────────────────────────────────────────────┘
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  LSTMTemporalDecoder                      (model.py)        │
+│  Rate heads                               (model.py)        │
 │                                                             │
-│  Time embedding:                                            │
-│    IN:  time_points.unsqueeze(-1)            →  (B, T, 1)  │
-│    OUT: time_embedded                        →  (B, T, 64) │
+│  amp          = Softplus(Linear(32, 25))     →  (B, 25)    │
+│  growth_rates = Tanh(Linear(32, 25)) * amp   →  (B, 25)    │
+│  prod_rates   = Tanh(Linear(32, 25)) * amp   →  (B, 25)    │
 │                                                             │
-│  LSTM init from latent:                                     │
-│    h0 = Linear(64, 64) × n_layers           →  (2, B, 64) │
-│    c0 = Linear(64, 64) × n_layers           →  (2, B, 64) │
-│                                                             │
-│  LSTM:                                                      │
-│    IN:  time_embedded, (h0, c0)              →  (B, T, 64) │
-│    OUT: lstm_out                             →  (B, T, 64) │
-│                                                             │
-│  Skip connection:                                           │
-│    combined = cat([lstm_out, latent_expanded]) → (B, T, 128)│
-│                                                             │
-│  Amplitude scalar (per-reactor, per-component):             │
-│    IN:  latent_state                         →  (B, 64)    │
-│    OUT: amp = Softplus(Linear)               →  (B, 1, 25) │
-│                                                             │
-│  Rate heads (Tanh output × amplitude):                      │
-│    growth_rates = Tanh(FC(combined)) * amp  →  (B, T, 25) │
-│    prod_rates   = Tanh(FC(combined)) * amp  →  (B, T, 25) │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  DifferentiableIntegrator — Pass 1        (model.py)        │
-│                                                             │
-│  IN:  initial_conditions   (B, 25)                          │
-│       growth_rates         (B, T, 25)   (f=0, growth only) │
-│       time_points          (B, T)                           │
-│       doe_params           (B, 3)       for perfusion feed  │
-│                                                             │
-│  Implicit Euler ODE per timestep:                           │
-│    cells (idx 0-1):  c_next = c_prev + v * c_prev * dt     │
-│    metabolites:      c_next = (c_prev + (v*c1 + F*c_in)*dt)│
-│                               / (1 + F*dt)                  │
-│    F_NORM = 13.0  (perfusion rate in normalised time)       │
-│    titer (idx 5):  eta=0, no washout                    │
-│                                                             │
-│  OUT: conc_pass1           (B, T, 25)                       │
+│  Rates are constant per reactor per phase (no LSTM/time     │
+│  embedding). Expanded to (B, T, 25) for the integrator.    │
+│  Amplitude separates magnitude from direction.              │
 └─────────────────────────────────────────────────────────────┘
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  PhaseTransitionHead                      (model.py)        │
 │                                                             │
-│  IN:  latent_state         (B, 64)                          │
-│       conc_pass1           (B, T, 25)                       │
-│       time_points          (B, T)                           │
-│                                                             │
-│  conc_summary = MeanPool(conc_pass1) over T  →  (B, 25)    │
-│  conc_encoded = FC(conc_summary)             →  (B, 16)    │
-│  combined     = cat([latent, conc_encoded])  →  (B, 80)    │
-│  raw          = FC(combined)                 →  (B, 2)     │
-│    mu    = sigmoid(raw[:,0])     in (0,1)  (transition midpoint)│
-│    sigma = softplus(raw[:,1])    > 0       (transition width)│
+│  IN:  latent_state  (B, 32)                                 │
+│  raw   = Linear(32, 2)                       →  (B, 2)     │
+│    mu    = sigmoid(raw[:,0])  in (0,1)   transition midpoint│
+│    sigma = softplus(raw[:,1]) > 0        transition width   │
 │                                                             │
 │  f(t) = sigmoid((time - mu) / sigma)        →  (B, T, 1)  │
 │  OUT: phase_weights  in [0,1]               →  (B, T, 1)  │
@@ -147,22 +110,30 @@ INPUTS
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  DifferentiableIntegrator — Pass 2        (model.py)        │
+│  DifferentiableIntegrator                 (model.py)        │
 │                                                             │
 │  blended_rates = (1 - f(t)) * growth_rates                  │
 │                +       f(t)  * prod_rates    →  (B, T, 25) │
-│  titer production clamped >= 0 (torch.cat, no in-place)     │
 │                                                             │
-│  Same ODE as Pass 1, with blended rates                     │
+│  Implicit Euler ODE per timestep:                           │
+│    cells (idx 0-1):  c_next = c_prev + v * c_prev * dt     │
+│    metabolites:      c_next = (c_prev + (v*c1 + F*c_in)*dt)│
+│                               / (1 + F*dt)                  │
+│    F_NORM = 13.0  (perfusion rate in normalised time)       │
+│    titer (idx 5):  eta=0, no washout                        │
+│    c_in built from DoE coded levels (feed concentrations)   │
+│                                                             │
 │  OUT: concentrations        (B, T, 25)                      │
 └─────────────────────────────────────────────────────────────┘
         │
         ▼
 OUTPUTS (dict)
-  concentrations  (B, T, 25)   predicted metabolite trajectories
+  concentrations  (B, T, 25)   predicted state variable trajectories
   phase_weights   (B, T, 1)    f(t): phase fraction at each timepoint
-  growth_rates    (B, T, 25)   growth-phase rates (before blending)
-  prod_rates      (B, T, 25)   production-phase rates (before blending)
+  growth_rates    (B, T, 25)   growth-phase rates (constant, expanded)
+  prod_rates      (B, T, 25)   production-phase rates (constant, expanded)
+  transition_mu   (B,)         normalised transition midpoint (x13 = days)
+  transition_sigma (B,)        normalised transition width (x13 = days)
 ```
 
 ---
