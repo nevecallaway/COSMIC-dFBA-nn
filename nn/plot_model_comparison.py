@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone comparison figure: shuffled vs simplified (DoE-only) vs complex (all inputs).
+Standalone comparison figure: shuffled vs FC (DoE-only) vs LSTM (DoE-only).
 Run from any directory -- outputs to nn/figures/model_comparison.png.
 """
 
@@ -15,21 +15,20 @@ REACTORS = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
             'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
 
 # Per-reactor absolute transition errors (days)
-# Complex model, all inputs (FBA + rates + DoE), LOO MAE = 1.28d
-complex_errors = [0.8, 1.4, 0.2, 1.6, 0.2, 0.2, 1.5, 0.6, 0.1, 0.2]
+# FC model, DoE only, LOO MAE = 1.37d
+fc_errors   = [0.9, 1.1, 0.1, 1.7, 0.4, 0.1, 1.4, 0.5, 0.2, 0.0]
 
-# Simplified model, DoE only, LOO MAE = 1.38d (most recent run)
-simple_errors  = [1.1, 1.3, 0.1, 1.8, 0.2, 0.2, 1.7, 0.2, 0.0, 0.1]
+# LSTM model, DoE only, LOO MAE = 1.46d
+lstm_errors = [0.7, 1.3, 0.1, 1.6, 0.2, 0.0, 2.0, 0.5, 0.1, 0.2]
 
-# Shuffled baseline (full-dataset eval, not LOO per-reactor breakdown available)
-# LOO MAE = 2.20d -- shown as a horizontal line only
+# Shuffled baseline -- LOO MAE = 2.20d, shown as a horizontal line only
 
 # Summary metrics
-models     = ['Shuffled\n(chance)', 'Simplified\n(DoE only)', 'Complex\n(all inputs)']
-loo_mae    = [2.20,  1.38,  1.28]
-loo_mcc    = [0.845, 0.913, 0.933]
-ft_acc     = [60.0,  81.5,  90.0]
-auc_mae    = [1.71,  0.46,  0.45]
+models     = ['Shuffled\n(chance)', 'FC\n(DoE only)', 'LSTM\n(DoE only)']
+loo_mae    = [2.20,  1.37,  1.46]
+loo_mcc    = [0.845, 0.878, 0.896]
+ft_acc     = [60.0,  85.4,  80.0]
+auc_mae    = [1.71,  0.35,  0.44]
 
 COLORS = {
     'shuffled': '#bdbdbd',
@@ -39,7 +38,7 @@ COLORS = {
 }
 
 fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-fig.suptitle('Model Comparison: Shuffled vs Simplified vs Complex', fontsize=13, y=1.01)
+fig.suptitle('Model Comparison: Shuffled vs FC vs LSTM (DoE-only inputs)', fontsize=13, y=1.01)
 
 # ── Panel 1: Summary bar chart ────────────────────────────────────────────────
 ax = axes[0]
@@ -62,7 +61,7 @@ metric_labels = ['LOO Trans MAE\n(inverted, higher=better)',
 offsets = [-1.5*w, -0.5*w, 0.5*w, 1.5*w]
 
 for i, (met, label) in enumerate(zip(metrics, metric_labels)):
-    bars = ax.bar(x + offsets[i], met, w, label=label, alpha=0.85)
+    ax.bar(x + offsets[i], met, w, label=label, alpha=0.85)
 
 ax.set_xticks(x)
 ax.set_xticklabels(models, fontsize=9)
@@ -85,15 +84,15 @@ ax = axes[1]
 x  = np.arange(len(REACTORS))
 w  = 0.3
 
-ax.bar(x - w/2, complex_errors, w, label='Complex (all inputs)',
+ax.bar(x - w/2, fc_errors,   w, label='FC (DoE only, 1.37d)',
        color=COLORS['complex'], alpha=0.85)
-ax.bar(x + w/2, simple_errors,  w, label='Simplified (DoE only)',
+ax.bar(x + w/2, lstm_errors, w, label='LSTM (DoE only, 1.46d)',
        color=COLORS['simple'],  alpha=0.85)
 ax.axhline(2.20, color=COLORS['shuffled'], linewidth=1.5,
            linestyle='--', label='Shuffled LOO MAE (2.20d)')
-ax.axhline(np.mean(complex_errors), color=COLORS['complex'],
+ax.axhline(np.mean(fc_errors),   color=COLORS['complex'],
            linewidth=1, linestyle=':', alpha=0.7)
-ax.axhline(np.mean(simple_errors),  color=COLORS['simple'],
+ax.axhline(np.mean(lstm_errors), color=COLORS['simple'],
            linewidth=1, linestyle=':', alpha=0.7)
 
 ax.set_xticks(x)
@@ -107,10 +106,10 @@ ax.set_ylim(0, 3.0)
 ax = axes[2]
 
 scatter_data = [
-    ('Shuffled',           2.20, 60.0,  COLORS['shuffled'], 's', 80),
-    ('Simplified (DoE)',   1.38, 81.5,  COLORS['simple'],   'o', 100),
-    ('Complex (all)',      1.28, 90.0,  COLORS['complex'],  'o', 100),
-    ('Paper benchmark',    None, 72.3,  COLORS['paper'],    '^', 80),
+    ('Shuffled',         2.20, 60.0,  COLORS['shuffled'], 's', 80),
+    ('FC (DoE only)',    1.37, 85.4,  COLORS['complex'],  'o', 100),
+    ('LSTM (DoE only)',  1.46, 80.0,  COLORS['simple'],   'o', 100),
+    ('Paper benchmark',  None, 72.3,  COLORS['paper'],    '^', 80),
 ]
 
 for label, mae, ft, color, marker, size in scatter_data:
@@ -127,7 +126,7 @@ ax.set_xlabel('LOO Transition MAE (days, lower is better)')
 ax.set_ylabel('f(t) ±0.1 accuracy % (higher is better)')
 ax.set_title('Accuracy vs Generalization')
 ax.legend(fontsize=8)
-ax.set_xlim(1.0, 2.5)
+ax.set_xlim(1.2, 2.5)
 ax.set_ylim(50, 95)
 ax.invert_xaxis()  # lower MAE = better = right side
 

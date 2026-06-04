@@ -5,7 +5,7 @@ Training script for COSMIC-dFBA neural network surrogate.
 This file orchestrates the training workflow:
 - Trainer class: manages optimizer, loss computation, training/validation loops
 - Leave-one-out cross-validation on 10 real perfusion reactors
-- 8-component fused loss combining MSE, physics constraints, and regularization
+- 11-component fused loss combining MSE, physics constraints, and regularization
 """
 
 import numpy as np
@@ -33,7 +33,7 @@ class Trainer:
     
     Responsibilities:
     - Initialize optimizer and learning rate scheduler
-    - Compute loss (fused PINN loss with 8 components)
+    - Compute loss (fused PINN loss with 11 components)
     - Run training epoch (forward → loss → backprop → update)
     - Run validation (no gradient computation, collect metrics)
     - Coordinate multi-epoch training with early stopping
@@ -59,7 +59,7 @@ class Trainer:
     def compute_loss(self, predictions, targets, ics, phases_batch=None):
         """
         Computes the loss based on the model type.
-        For 'enhanced' models, it uses the fused PINN loss with 8 components:
+        For 'enhanced' models, it uses the fused PINN loss with 11 components:
         
         PINN = Physics-Informed Neural Network Loss
         ================================================
@@ -92,7 +92,7 @@ class Trainer:
             phases_batch: (B, T) ground truth phase fraction (optional)
             
         Returns:
-            total_loss: scalar, sum of all 8 components
+            total_loss: scalar, sum of all 11 components
             components: dict with loss breakdown for logging
         """
         # PINN Fused Loss
@@ -174,7 +174,7 @@ class Trainer:
         Steps per batch:
         1. Unpack batch data (ICs, time, parameters, target trajectories)
         2. Forward pass: model(ic, time, params) → predictions
-        3. Compute loss: L = 8-component PINN loss
+        3. Compute loss: L = 11-component PINN loss
         4. Backward pass: compute gradients (∂L/∂w for all weights)
         5. Gradient clipping: clip ||gradient|| to prevent exploding gradients
         6. Optimizer step: update weights using AdamW (w ← w - lr×∇L)
