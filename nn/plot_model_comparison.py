@@ -73,9 +73,7 @@ ax.legend(fontsize=7, loc='upper left')
 ax.axhline(0, color='black', linewidth=0.5)
 
 # annotate actual values
-raw_vals = list(zip(loo_mae, loo_mcc, ft_acc, auc_mae))
-labels   = [f'{v:.2f}d', f'{v:.3f}', f'{v:.1f}%', f'{v:.2f}d']
-for mi, (met, fmt) in enumerate(zip(metrics, ['d', '', '%', 'd'])):
+for mi, met in enumerate(metrics):
     for xi, (val, color) in enumerate(zip(met, cols)):
         ax.text(xi + offsets[mi], val + 0.01,
                 [f'{loo_mae[xi]:.2f}d', f'{loo_mcc[xi]:.3f}',
