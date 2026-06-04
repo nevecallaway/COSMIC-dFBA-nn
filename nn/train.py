@@ -18,7 +18,7 @@ import sys
 import time
 
 # Import neural network architecture from model.py
-from model import CosmicNNSurrogate, dFBADataset, dfba_collate_fn
+from model import CosmicNNSurrogate, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
 # Import data utilities and evaluation metrics from utils.py
 from utils import load_experimental_data, ModelDiagnostics
 
@@ -458,6 +458,8 @@ def main():
     parser.add_argument('--shuffle', action='store_true',
                         help='Permutation baseline: shuffle inputs vs outputs before '
                              'training to establish chance-level performance')
+    parser.add_argument('--lstm', action='store_true',
+                        help='Use LSTM rate heads instead of constant rate heads')
     args = parser.parse_args()
 
     print(f"\n{'='*70}")
@@ -466,6 +468,7 @@ def main():
 
     # USE_SYNTHETIC = not args.no_synthetic  # synthetic pre-training not currently in use
     USE_SHUFFLE = args.shuffle
+    USE_LSTM    = args.lstm
 
     script_dir  = Path(__file__).parent
     DATA_PATH   = script_dir / "data" / "data_2.csv"
@@ -485,16 +488,29 @@ def main():
         print("*** Train on this to establish chance-level performance             ***\n")
         dataset = shuffle_dataset(dataset)
 
-    OUTPUT_PATH = 'shuffled_model.pt' if USE_SHUFFLE else 'improved_model.pt'
+    if USE_SHUFFLE:
+        OUTPUT_PATH = 'shuffled_model.pt'
+    elif USE_LSTM:
+        OUTPUT_PATH = 'improved_model_lstm.pt'
+    else:
+        OUTPUT_PATH = 'improved_model.pt'
 
     device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     n_params = dataset.n_params if hasattr(dataset, 'n_params') else 0
-    print(f"Model: CosmicNNSurrogate  n_components={dataset.n_components}, n_params={n_params}, latent_dim={LATENT_DIM}")
-    model = CosmicNNSurrogate(
-        n_components=dataset.n_components,
-        n_params=n_params,
-        latent_dim=LATENT_DIM,
-    )
+    if USE_LSTM:
+        print(f"Model: CosmicNNSurrogateLSTM  n_components={dataset.n_components}, n_params={n_params}, latent_dim={LATENT_DIM}")
+        model = CosmicNNSurrogateLSTM(
+            n_components=dataset.n_components,
+            n_params=n_params,
+            latent_dim=LATENT_DIM,
+        )
+    else:
+        print(f"Model: CosmicNNSurrogate  n_components={dataset.n_components}, n_params={n_params}, latent_dim={LATENT_DIM}")
+        model = CosmicNNSurrogate(
+            n_components=dataset.n_components,
+            n_params=n_params,
+            latent_dim=LATENT_DIM,
+        )
 
     # --- Leave-one-out fine-tuning ---
     # With only 10 reactors a random 70/30 split gives 3 val samples whose
@@ -584,6 +600,7 @@ def main():
     torch.save({
         'model_state': model.state_dict(),
         'hyperparams': {
+            'arch': 'lstm' if USE_LSTM else 'fc',
             'latent_dim': LATENT_DIM,
             'n_components': dataset.n_components,
             'n_params': dataset.n_params,

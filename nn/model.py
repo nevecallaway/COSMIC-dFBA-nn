@@ -278,3 +278,57 @@ class CosmicNNSurrogate(nn.Module):
             'transition_mu':    mu,                # (B,) normalised: mu * 13 = transition day
             'transition_sigma': sigma,             # (B,) normalised: sigma * 13 = transition width
         }
+
+
+class CosmicNNSurrogateLSTM(nn.Module):
+    """
+    LSTM variant of CosmicNNSurrogate for comparison.
+
+    Identical encoder, phase head, and integrator. The only difference:
+    rate heads use a single-layer LSTM initialized from the latent state,
+    producing time-varying rates (B, T, C) instead of constant rates.
+
+    The LSTM processes the normalized time sequence as input, so it can
+    learn non-constant within-phase dynamics if they exist in the data.
+    """
+    def __init__(self, n_components, n_params, latent_dim=32):
+        super().__init__()
+        self.encoder     = DynamicsEncoder(n_components, n_params, latent_dim)
+        self.h0_proj     = nn.Linear(latent_dim, latent_dim)
+        self.c0_proj     = nn.Linear(latent_dim, latent_dim)
+        self.lstm        = nn.LSTM(input_size=1, hidden_size=latent_dim,
+                                   num_layers=1, batch_first=True)
+        self.amplitude   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Softplus())
+        self.growth_head = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
+        self.prod_head   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
+        self.phase_head  = PhaseTransitionHead(latent_dim)
+        self.integrator  = DifferentiableIntegrator()
+        self.n_components = n_components
+        self.n_params     = n_params
+
+    def forward(self, initial_conditions, time_points, parameters):
+        B, T = time_points.shape
+        latent = self.encoder(initial_conditions, parameters)
+
+        h0 = self.h0_proj(latent).unsqueeze(0)   # (1, B, latent_dim)
+        c0 = self.c0_proj(latent).unsqueeze(0)
+        lstm_out, _ = self.lstm(time_points.unsqueeze(-1), (h0, c0))  # (B, T, latent_dim)
+
+        amp          = self.amplitude(latent).unsqueeze(1)   # (B, 1, C)
+        growth_rates = self.growth_head(lstm_out) * amp      # (B, T, C)
+        prod_rates   = self.prod_head(lstm_out) * amp        # (B, T, C)
+
+        phase_pred, mu, sigma = self.phase_head(latent, time_points)
+
+        blended_rates  = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
+        concentrations = self.integrator(initial_conditions, blended_rates,
+                                         time_points, doe_params=parameters)
+
+        return {
+            'concentrations':   concentrations,
+            'phase_weights':    phase_pred,
+            'growth_rates':     growth_rates,
+            'prod_rates':       prod_rates,
+            'transition_mu':    mu,
+            'transition_sigma': sigma,
+        }

@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from model import CosmicNNSurrogate, dFBADataset, dfba_collate_fn
+from model import CosmicNNSurrogate, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
 from utils import load_experimental_data, ModelDiagnostics
 from torch.utils.data import DataLoader
 
@@ -42,7 +42,8 @@ IDX_TITER = 5
 def load_model(checkpoint_path, device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     hp = ckpt['hyperparams']
-    model = CosmicNNSurrogate(
+    cls = CosmicNNSurrogateLSTM if hp.get('arch') == 'lstm' else CosmicNNSurrogate
+    model = cls(
         n_components=hp['n_components'],
         n_params=hp['n_params'],
         latent_dim=hp.get('latent_dim', 32),
