@@ -4,7 +4,7 @@ A PyTorch surrogate model for predicting bioreactor phase transitions and metabo
 
 The primary prediction goal is transition timing for root cause analysis (RCA): predicting when and how a cell line switches from growth phase to production phase, not just final titer. The loss is weighted accordingly, favoring phase transition accuracy over titer. The phase prediction head explicitly outputs two interpretable parameters per reactor: mu (transition midpoint in days) and sigma (transition sharpness in days). Evaluation includes phase AUC, which captures both timing and sharpness of the transition in a single number, alongside transition MAE and standard classification metrics.
 
-**Latest LOO results:** f(t) accuracy +/-0.1: 90.0% (paper: 72.3%) | MCC: 0.933 (paper: 0.454) | Transition MAE: 1.28 days
+**Latest LOO results (simplified model, DoE-only inputs):** f(t) accuracy +/-0.1: 81.5% (paper: 72.3%) | MCC: 0.913 (paper: 0.454) | Transition MAE: 1.38 days
 
 ---
 
@@ -12,14 +12,14 @@ The primary prediction goal is transition timing for root cause analysis (RCA): 
 
 | File | Purpose |
 |------|---------|
-| `nn/model.py` | All neural network classes: dataset, encoder, decoder, ODE integrator, phase head |
-| `nn/train.py` | Two-phase training: synthetic pre-training + leave-one-out fine-tuning |
+| `nn/model.py` | Model classes: dataset, encoder, rate heads, phase head, ODE integrator |
+| `nn/train.py` | Leave-one-out training on real reactor data |
 | `nn/evaluate.py` | Evaluation metrics and comparison plots vs. paper benchmarks |
 | `nn/utils.py` | Data loading, normalization, and diagnostic utilities |
-| `nn/data/data_1.csv` | DoE coded levels per reactor (O2, AAs, Glc: -1 / 0 / +1) |
-| `nn/data/data_2.csv` | Metabolite trajectories over time (25 components, 10 reactors) |
-| `nn/data/data_3.csv` | Phase-specific metabolic rates (growth and production phase) |
-| `nn/data/data_4.csv` | FBA objective efficiencies per reactor |
+| `nn/data/data_1.csv` | DoE coded levels per reactor (O2, AAs, Glc: -1 / 0 / +1) -- model input |
+| `nn/data/data_2.csv` | State variable trajectories over time (25 components, 10 reactors) -- model target |
+| `nn/data/data_3.csv` | Phase-specific metabolic rates -- not used as model input (requires dFBA) |
+| `nn/data/data_4.csv` | FBA objective efficiencies -- not used as model input (requires dFBA) |
 
 ---
 
@@ -144,44 +144,46 @@ OUTPUTS (dict)
 TRAINING DATA: 9 reactors per fold, batch_size=4
   ic:      (4, 25)      initial conditions (normalized)
   time:    (4, 13)      normalized time [0, 1]
-  params:  (4, 75)      DoE levels + rates + FBA efficiencies
-  target:  (4, 40, 25)  ground truth concentration trajectories
+  params:  (4, 3)       DoE coded levels: O2, AAs, Glc
+  target:  (4, 13, 25)  ground truth state variable trajectories
   phases:  (4, 13)      ground truth f(t) phase fraction
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  FORWARD PASS                                               │
 │  predictions = model(ic, time, params)                      │
-│  OUT: concentrations  (4, 40, 25)                           │
-│       phase_weights   (4, 40, 1)                            │
-│       growth_rates    (4, 40, 25)                           │
-│       prod_rates      (4, 40, 25)                           │
+│  OUT: concentrations  (4, 13, 25)                           │
+│       phase_weights   (4, 13, 1)                            │
+│       growth_rates    (4, 13, 25)                           │
+│       prod_rates      (4, 13, 25)                           │
 └─────────────────────────────────────────────────────────────┘
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  LOSS COMPUTATION  (Trainer.compute_loss)                   │
 │                                                             │
-│  1. Concentration MSE (titer col gets 5x weight)            │
+│  1. Concentration MSE                                       │
+│       cell density 3x weight (primary RCA target)          │
+│       titer 2x weight                                       │
 │     IN:  concentrations (4,13,25) vs target (4,13,25)       │
 │                                                             │
-│  2. Endpoint titer loss (weight 2.0)                        │
+│  2. Endpoint titer loss (weight 0.5)                        │
 │     IN:  concentrations[:,−1,5] vs target[:,−1,5]           │
 │                                                             │
-│  3. Peak-time alignment (weight 3.0)                        │
+│  3. Peak-time alignment (weight 1.0)                        │
 │     soft-argmax on titer trajectory to align peak day       │
 │                                                             │
 │  4. Initial condition constraint (weight 0.1)               │
 │     IN:  concentrations[:,0,:] vs ic (4,25)                 │
 │                                                             │
 │  5. Non-flatness penalty (weight 0.2)                       │
-│     penalizes low variance trajectories (avoids trivial flat predictions)│
+│     penalizes low variance trajectories                     │
 │                                                             │
 │  6. Non-negativity penalty (weight 0.5)                     │
 │     penalizes concentrations < 0                            │
 │                                                             │
-│  7. Phase regression MSE (weight 3.0)                       │
-│     IN:  phase_weights (4,13,1) vs phases (4,40)            │
+│  7. Phase regression MSE (weight 5.0)                       │
+│     IN:  phase_weights (4,13,1) vs phases (4,13)            │
 │                                                             │
 │  8. Rate + phase smoothness (weights 0.1 / 0.05)            │
 │     penalizes large step-to-step changes in rates and f(t)  │
@@ -194,7 +196,7 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
 │  BACKWARD PASS                                              │
 │  loss.backward()                                            │
 │  Computes gradients for all parameters:                     │
-│    encoder FC weights, LSTM weights, rate head weights,     │
+│    encoder FC weights, rate head weights,                   │
 │    amplitude head, phase head, ODE is differentiable        │
 └─────────────────────────────────────────────────────────────┘
         │
@@ -203,14 +205,14 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
         │
         ▼
   AdamW step: w = w - lr * (gradient + momentum)
-  lr = 1e-4 (fine-tuning), weight_decay = 1e-5
+  lr = 1e-4, weight_decay = 1e-5
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  AFTER EACH EPOCH                                           │
 │  Validate on held-out reactor (1 reactor, batch_size=1)     │
 │  Metrics computed: F1, MCC, transition MAE, titer within 10%│
-│  ReduceLROnPlateau: halve lr if val_loss stagnates (patience=15)│
+│  ReduceLROnPlateau: halve lr if val_loss stagnates          │
 │  Early stopping if no improvement for 80 epochs             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -233,7 +235,6 @@ python nn/train.py
 
 # Train permutation baseline (shuffle inputs vs outputs to establish chance performance)
 python nn/train.py --shuffle
-
 
 # Evaluate saved model
 python nn/evaluate.py
