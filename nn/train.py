@@ -18,13 +18,12 @@ import sys
 import time
 
 # Import neural network architecture from model.py
-from model import CosmicNNSurrogateEnhanced, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
+from model import CosmicNNSurrogate, dFBADataset, dfba_collate_fn
 # Import data utilities and evaluation metrics from utils.py
 from utils import load_experimental_data, ModelDiagnostics
 
-# Column index of Titer (antibody product) in the 25-component trajectory
-# Titer gets special attention in loss (5× weight) because it's the output of interest
-IDX_TITER = 5
+IDX_CELL_DENSITY = 0   # Cell Density -- primary RCA target (predicting decline)
+IDX_TITER        = 5   # Antibody titer
 
 
 class Trainer:
@@ -41,15 +40,7 @@ class Trainer:
     """
     def __init__(self, model, device, learning_rate=5e-4, model_type='enhanced',
                  scheduler_patience=5):
-        """
-        Args:
-            model: neural network instance (e.g., CosmicNNSurrogateLSTM)
-            device: torch.device ('cuda' or 'cpu')
-            learning_rate: step size for AdamW (default 5e-4 = 0.0005)
-            model_type: 'standard' or 'enhanced' (determines loss function)
-            scheduler_patience: epochs to wait before reducing LR (default 5)
-        """
-        self.model = model.to(device)  # Move model to GPU/CPU
+        self.model = model.to(device)
         self.device = device
         self.model_type = model_type
         # AdamW: Adaptive Moment Estimation with decoupled Weight decay
@@ -104,13 +95,7 @@ class Trainer:
             total_loss: scalar, sum of all 8 components
             components: dict with loss breakdown for logging
         """
-        if self.model_type == 'standard':
-            # Standard MSE + Smoothness
-            conc_loss = nn.functional.mse_loss(predictions, targets)
-            smoothness = 0.1 * torch.mean((predictions[:, 1:, :] - predictions[:, :-1, :]) ** 2)
-            return conc_loss + smoothness, {'conc': conc_loss.item()}
-
-        # Enhanced / PINN Fused Loss
+        # PINN Fused Loss
         conc_pred = predictions['concentrations']
         phase_pred = predictions['phase_weights']   # (batch, time, 1) regression in [0,1]
         growth_rates = predictions['growth_rates']
@@ -121,7 +106,8 @@ class Trainer:
         # Validated: reduced titer weight improved f(t) accuracy from 82.3% to 90.0%
         # without meaningfully hurting transition MAE (1.285d to 1.283d).
         comp_weights = torch.ones(targets.shape[-1], device=targets.device)
-        comp_weights[IDX_TITER] = 2.0
+        comp_weights[IDX_CELL_DENSITY] = 3.0  # primary RCA target: predict cell density decline
+        comp_weights[IDX_TITER]        = 2.0
         conc_loss = (((conc_pred - targets) ** 2) * comp_weights).mean()
 
         # 1a. Endpoint titer loss (reduced from 2.0 to 0.5)
@@ -469,8 +455,6 @@ def main():
     parser = argparse.ArgumentParser()
     # parser.add_argument('--no-synthetic', action='store_true',
     #                     help='Skip pre-training on synthetic data, train on real data only')
-    parser.add_argument('--lstm', action='store_true',
-                        help='Use LSTM decoder instead of transformer attention')
     parser.add_argument('--shuffle', action='store_true',
                         help='Permutation baseline: shuffle inputs vs outputs before '
                              'training to establish chance-level performance')
@@ -481,19 +465,13 @@ def main():
     print(f"{'='*70}")
 
     # USE_SYNTHETIC = not args.no_synthetic  # synthetic pre-training not currently in use
-    USE_LSTM    = args.lstm
     USE_SHUFFLE = args.shuffle
 
-    script_dir = Path(__file__).parent
-    DATA_PATH  = script_dir / "data" / "data_2.csv"
-    LATENT_DIM = 64
-    N_HEADS    = 4
-    EPOCHS     = 400
-    PATIENCE   = 80
-
-    # Fine-tuning: low LR to avoid catastrophic forgetting, but high enough
-    # for the scheduler not to kill learning in the first 30 epochs.
-    # scheduler_patience=15 delays LR halving vs the pre-training default of 5.
+    script_dir  = Path(__file__).parent
+    DATA_PATH   = script_dir / "data" / "data_2.csv"
+    LATENT_DIM  = 32
+    EPOCHS      = 400
+    PATIENCE    = 80
     FINETUNE_LR = 1e-4
 
     try:
@@ -509,26 +487,14 @@ def main():
 
     OUTPUT_PATH = 'shuffled_model.pt' if USE_SHUFFLE else 'improved_model.pt'
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+    device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     n_params = dataset.n_params if hasattr(dataset, 'n_params') else 0
-    N_LAYERS = 2  # used for both LSTM (actual layers) and transformer (stored for compat)
-    if USE_LSTM:
-        print(f"Model: LSTM  n_components={dataset.n_components}, n_params={n_params}, n_layers={N_LAYERS}")
-        model = CosmicNNSurrogateLSTM(
-            n_components=dataset.n_components,
-            n_params=n_params,
-            latent_dim=LATENT_DIM,
-            n_layers=N_LAYERS,
-        )
-    else:
-        print(f"Model: Transformer  n_components={dataset.n_components}, n_params={n_params}, n_heads={N_HEADS}")
-        model = CosmicNNSurrogateEnhanced(
-            n_components=dataset.n_components,
-            n_params=n_params,
-            latent_dim=LATENT_DIM,
-            n_heads=N_HEADS,
-        )
+    print(f"Model: CosmicNNSurrogate  n_components={dataset.n_components}, n_params={n_params}, latent_dim={LATENT_DIM}")
+    model = CosmicNNSurrogate(
+        n_components=dataset.n_components,
+        n_params=n_params,
+        latent_dim=LATENT_DIM,
+    )
 
     # --- Leave-one-out fine-tuning ---
     # With only 10 reactors a random 70/30 split gives 3 val samples whose
@@ -617,12 +583,8 @@ def main():
     final_trainer.train(all_loader, all_loader, epochs=EPOCHS, patience=PATIENCE)
     torch.save({
         'model_state': model.state_dict(),
-        'model_type': 'enhanced',
         'hyperparams': {
-            'arch': 'lstm' if USE_LSTM else 'transformer',
             'latent_dim': LATENT_DIM,
-            'n_heads': N_HEADS,
-            'n_layers': N_LAYERS if USE_LSTM else 2,
             'n_components': dataset.n_components,
             'n_params': dataset.n_params,
         },

@@ -114,13 +114,12 @@ class dFBADataset(Dataset):
 
 
 class DynamicsEncoder(nn.Module):
-    def __init__(self, n_components, n_params, latent_dim=64):
+    def __init__(self, n_components, n_params, latent_dim=32):
         super().__init__()
         input_size = n_components + n_params
         self.fc = nn.Sequential(
-            nn.Linear(input_size, 128), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(128, 128), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(128, latent_dim),
+            nn.Linear(input_size, 64), nn.ReLU(),
+            nn.Linear(64, latent_dim),
         )
         self.latent_dim = latent_dim
 
@@ -131,86 +130,25 @@ class DynamicsEncoder(nn.Module):
 
 class PhaseTransitionHead(nn.Module):
     """
-    Predicts f(t) = sigmoid((t - mu) / sigma) conditioned on the
-    concentration trajectory and the latent state.
-
-    The concentration trajectory (from a first-pass ODE integration with
-    f=0) encodes the metabolic state that triggers the phase switch —
-    e.g. glucose depletion drives cells from growth to production.
-    A mean-pool over time summarises which nutrients depleted and how fast.
-    This is combined with the latent state to predict:
+    Predicts f(t) = sigmoid((t - mu) / sigma) from the latent state alone.
 
       mu   in (0,1): normalised transition midpoint (mu * 13 = transition day)
-      sigma > 0:     transition width — small = sharp, large = gradual
+      sigma > 0:     transition width -- small = sharp, large = gradual
 
-    f(t) = sigmoid((t - mu) / sigma) is monotone by construction and
-    directly parameterises what transition MAE measures.
+    f(t) is monotone by construction and directly parameterises transition MAE.
     """
-    def __init__(self, n_components, latent_dim=64):
+    def __init__(self, latent_dim=32):
         super().__init__()
-        self.conc_encoder = nn.Sequential(
-            nn.Linear(n_components, 32), nn.ReLU(),
-            nn.Linear(32, 16)
-        )
-        self.head = nn.Sequential(
-            nn.Linear(latent_dim + 16, 64), nn.ReLU(),
-            nn.Linear(64, 2)
-        )
+        self.head = nn.Linear(latent_dim, 2)
 
-    def forward(self, latent_state, time_points, concentrations):
-        # concentrations: (B, T, C) — mean-pool over time → (B, C)
-        conc_summary = self.conc_encoder(concentrations.mean(dim=1))   # (B, 16)
-        combined = torch.cat([latent_state, conc_summary], dim=-1)     # (B, latent+16)
-        raw   = self.head(combined)                                     # (B, 2)
+    def forward(self, latent_state, time_points):
+        raw   = self.head(latent_state)                                # (B, 2)
         mu    = torch.sigmoid(raw[:, 0])                               # (B,) in (0, 1)
         sigma = F.softplus(raw[:, 1]) + 0.01                          # (B,) > 0
         f = torch.sigmoid((time_points - mu.unsqueeze(1)) / sigma.unsqueeze(1))
-        # Return f, mu, sigma so callers can surface transition day and sharpness.
-        # mu * time_scale_days = predicted transition midpoint in days.
-        # sigma * time_scale_days = transition width in days (small = sharp switch).
         return f.unsqueeze(-1), mu, sigma                              # (B, T, 1), (B,), (B,)
 
 
-class RatePredictionHead(nn.Module):
-    """
-    Predicts growth and production rates at each time step.
-
-    Previous implementation used attention(Q=time_embed, K=V=latent_expanded).
-    Since all rows of latent_expanded are identical, the attention output was
-    constant across time — making rates constant per reactor and giving the
-    decoder a bypass route that ignored the latent code.
-
-    Fixed: directly concatenate per-step time embedding with the latent so rates
-    are genuinely time-varying AND reactor-specific.
-    """
-    TIME_DIM = 32
-
-    def __init__(self, n_components, latent_dim=64):
-        super().__init__()
-        in_dim = latent_dim + self.TIME_DIM
-        self.time_embed = nn.Sequential(
-            nn.Linear(1, self.TIME_DIM), nn.ReLU(),
-            nn.Linear(self.TIME_DIM, self.TIME_DIM))
-        self.growth_rates = nn.Sequential(
-            nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(128, n_components), nn.Tanh())
-        self.prod_rates = nn.Sequential(
-            nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(128, n_components), nn.Tanh())
-        # Per-reactor amplitude: Tanh captures shape/direction,
-        # amplitude scales magnitude from the latent state.
-        # Softplus ensures positive, per-component scaling.
-        self.amplitude = nn.Sequential(
-            nn.Linear(latent_dim, 32), nn.ReLU(),
-            nn.Linear(32, n_components), nn.Softplus())
-
-    def forward(self, latent_state, time_points):
-        B, T = time_points.shape
-        time_emb = self.time_embed(time_points.unsqueeze(-1))              # (B, T, TIME_DIM)
-        latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)     # (B, T, latent_dim)
-        combined = torch.cat([latent_expanded, time_emb], dim=-1)         # (B, T, latent_dim+TIME_DIM)
-        amp = self.amplitude(latent_state).unsqueeze(1)                    # (B, 1, C)
-        return self.growth_rates(combined) * amp, self.prod_rates(combined) * amp
 
 
 class DifferentiableIntegrator(nn.Module):
@@ -296,188 +234,47 @@ class DifferentiableIntegrator(nn.Module):
         return torch.stack(concentrations, dim=1)      # (B, T, C)
 
 
-class MultiHeadTemporalDecoder(nn.Module):
-    def __init__(self, n_components, latent_dim=64, n_heads=4):
-        super().__init__()
-        self.integrator     = DifferentiableIntegrator()
-        self.phase_head     = PhaseTransitionHead(n_components, latent_dim)
-        self.rate_predictor = RatePredictionHead(n_components, latent_dim)
-
-    def forward(self, latent_state, time_points, initial_conditions, doe_params=None):
-        growth_rates, prod_rates = self.rate_predictor(latent_state, time_points)
-
-        # Pass 1: integrate with pure growth rates to get growth-phase concentration trajectory
-        conc_pass1 = self.integrator(initial_conditions,
-                                     growth_rates,   # f=0 → pure growth rates
-                                     time_points, doe_params)
-
-        # Pass 2: condition phase prediction on concentrations, then re-integrate
-        phase_pred, mu, sigma = self.phase_head(latent_state, time_points, conc_pass1)
-        blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
-        concentrations = self.integrator(initial_conditions, blended_rates, time_points, doe_params)
-
-        return {
-            'concentrations':    concentrations,
-            'phase_weights':     phase_pred,
-            'growth_rates':      growth_rates,
-            'prod_rates':        prod_rates,
-            'transition_mu':     mu,     # (B,) normalised: mu * time_scale_days = transition day
-            'transition_sigma':  sigma,  # (B,) normalised: sigma * time_scale_days = transition width
-        }
-
-
-class LSTMTemporalDecoder(nn.Module):
+class CosmicNNSurrogate(nn.Module):
     """
-    LSTM-based temporal decoder. Replaces transformer attention with an LSTM
-    that steta through time sequentially, which suits rise-then-fall trajectories
-    better than attention (which treats all timepoints equally).
+    Minimal surrogate for COSMIC-dFBA.
 
-    The latent vector initialises the LSTM hidden and cell states.
-    Time embeddings are the per-step inputs.
-    Rate prediction heads and the differentiable integrator are kept identical
-    to MultiHeadTemporalDecoder so the physics-informed structure is preserved.
+    Encoder compresses (IC + DoE) into a reactor-specific latent vector.
+    Two constant rate heads predict per-reactor growth and production rates
+    (biologically appropriate -- rates are phase-constant, not time-varying).
+    A phase head predicts the transition sigmoid f(t) directly from the latent.
+    A single ODE integration blends the rates via f(t) to produce trajectories.
     """
-    def __init__(self, n_components, latent_dim=64, n_layers=2):
+    def __init__(self, n_components, n_params, latent_dim=32):
         super().__init__()
-        self.time_embed  = nn.Sequential(nn.Linear(1, 32), nn.ReLU(), nn.Linear(32, latent_dim))
-        self.h0_proj     = nn.Linear(latent_dim, latent_dim)
-        self.c0_proj     = nn.Linear(latent_dim, latent_dim)
-        self.lstm        = nn.LSTM(input_size=latent_dim, hidden_size=latent_dim,
-                                   num_layers=n_layers, batch_first=True,
-                                   dropout=0.2 if n_layers > 1 else 0.0)
-        # Skip-connect the original latent so reactor identity is always
-        # explicitly available at every timestep, not just via LSTM hidden state.
-        in_dim = latent_dim * 2
-        self.growth_rates = nn.Sequential(
-            nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(128, n_components), nn.Tanh())
-        self.prod_rates   = nn.Sequential(
-            nn.Linear(in_dim, 128), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(128, n_components), nn.Tanh())
-        self.amplitude   = nn.Sequential(
-            nn.Linear(latent_dim, 32), nn.ReLU(),
-            nn.Linear(32, n_components), nn.Softplus())
-        self.phase_head  = PhaseTransitionHead(n_components, latent_dim)
+        self.encoder     = DynamicsEncoder(n_components, n_params, latent_dim)
+        # Amplitude scales Tanh output per component -- separates magnitude from direction.
+        self.amplitude   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Softplus())
+        self.growth_head = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
+        self.prod_head   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
+        self.phase_head  = PhaseTransitionHead(latent_dim)
         self.integrator  = DifferentiableIntegrator()
-        self.n_layers    = n_layers
+        self.n_components = n_components
+        self.n_params     = n_params
 
-    def forward(self, latent_state, time_points, initial_conditions, doe_params=None):
+    def forward(self, initial_conditions, time_points, parameters):
         B, T = time_points.shape
+        latent = self.encoder(initial_conditions, parameters)
 
-        time_embedded   = self.time_embed(time_points.unsqueeze(-1))
-        h0 = self.h0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
-        c0 = self.c0_proj(latent_state).unsqueeze(0).repeat(self.n_layers, 1, 1)
-        lstm_out, _     = self.lstm(time_embedded, (h0, c0))
-        latent_expanded = latent_state.unsqueeze(1).expand(-1, T, -1)
-        combined        = torch.cat([lstm_out, latent_expanded], dim=-1)
-        amp          = self.amplitude(latent_state).unsqueeze(1)           # (B, 1, C)
-        growth_rates = self.growth_rates(combined) * amp
-        prod_rates   = self.prod_rates(combined)   * amp
+        amp          = self.amplitude(latent).unsqueeze(1)                        # (B, 1, C)
+        growth_rates = self.growth_head(latent).unsqueeze(1).expand(-1, T, -1) * amp  # (B, T, C)
+        prod_rates   = self.prod_head(latent).unsqueeze(1).expand(-1, T, -1) * amp    # (B, T, C)
 
-        # Pass 1: pure growth-phase concentrations to inform transition timing
-        conc_pass1 = self.integrator(initial_conditions, growth_rates, time_points, doe_params)
+        phase_pred, mu, sigma = self.phase_head(latent, time_points)              # (B,T,1), (B,), (B,)
 
-        # Pass 2: condition phase prediction on concentrations, then re-integrate
-        phase_pred, mu, sigma = self.phase_head(latent_state, time_points, conc_pass1)
-        blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
-        concentrations = self.integrator(initial_conditions, blended_rates, time_points, doe_params)
+        blended_rates  = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
+        concentrations = self.integrator(initial_conditions, blended_rates,
+                                         time_points, doe_params=parameters)
 
         return {
-            'concentrations':    concentrations,
-            'phase_weights':     phase_pred,
-            'growth_rates':      growth_rates,
-            'prod_rates':        prod_rates,
-            'transition_mu':     mu,     # (B,) normalised: mu * time_scale_days = transition day
-            'transition_sigma':  sigma,  # (B,) normalised: sigma * time_scale_days = transition width
+            'concentrations':   concentrations,   # (B, T, C)
+            'phase_weights':    phase_pred,        # (B, T, 1)
+            'growth_rates':     growth_rates,      # (B, T, C)
+            'prod_rates':       prod_rates,        # (B, T, C)
+            'transition_mu':    mu,                # (B,) normalised: mu * 13 = transition day
+            'transition_sigma': sigma,             # (B,) normalised: sigma * 13 = transition width
         }
-
-
-
-def _extract_doe(parameters):
-    """Extract DoE coded levels [O2, AAs, Glc] from the parameters tensor.
-
-    Parameter layout (set by train.py load_data):
-      [0:3]   DoE coded levels  [O2, AAs, Glc]
-      [3:28]  growth-phase specific rates  (encoder features only)
-      [28:53] production-phase specific rates  (encoder features only)
-      [53:]   FBA objective efficiencies  (encoder features only)
-    """
-    return parameters[:, :3] if parameters.shape[1] >= 3 else None
-
-
-class CosmicNNSurrogateEnhanced(nn.Module):
-    def __init__(self, n_components, n_params, latent_dim=64, n_heads=4):
-        super().__init__()
-        self.encoder = DynamicsEncoder(n_components, n_params, latent_dim)
-        self.decoder = MultiHeadTemporalDecoder(n_components, latent_dim, n_heads)
-        self.n_components = n_components
-        self.n_params = n_params
-
-    def forward(self, initial_conditions, time_points, parameters):
-        latent = self.encoder(initial_conditions, parameters)
-        return self.decoder(latent, time_points, initial_conditions,
-                            doe_params=_extract_doe(parameters))
-
-
-class CosmicNNSurrogateLSTM(nn.Module):
-    """
-    Top-level surrogate model combining a DynamicsEncoder (shared with attention version)
-    and an LSTMTemporalDecoder (instead of multi-head attention).
-    
-    This class is the entry point for LSTM-based training. The only difference from
-    CosmicNNSurrogateEnhanced is the decoder type; everything else (data handling,
-    loss computation, evaluation) is identical.
-    """
-    
-    def __init__(self, n_components, n_params, latent_dim=64, n_layers=2):
-        """
-        Args:
-            n_components (int): Number of metabolite components (25 in this dataset)
-            n_params (int): Number of encoder features (DoE + specific rates + FBA efficiencies)
-            latent_dim (int): Dimension of latent state (default 64)
-            n_layers (int): Number of LSTM layers (default 2; deeper = more capacity but more params)
-        """
-        super().__init__()  # Initialize nn.Module
-        
-        # ENCODER: Compresses initial conditions + parameters into a 64-dim latent vector
-        # This latent vector captures reactor identity and will be used to initialize LSTM hidden state
-        self.encoder = DynamicsEncoder(n_components, n_params, latent_dim)
-        
-        # DECODER: LSTM-based temporal processor
-        # Takes latent state, time points, and initial conditions
-        # Returns concentrations, phase weights f(t), and intermediate rates
-        self.decoder = LSTMTemporalDecoder(n_components, latent_dim, n_layers)
-        
-        # Store metadata for later use (e.g., in evaluation scripts)
-        self.n_components = n_components
-        self.n_params = n_params
-
-    def forward(self, initial_conditions, time_points, parameters):
-        """
-        Forward pass: encodes then decodes.
-        
-        Args:
-            initial_conditions (Tensor): (B, 25) — metabolite concentrations at t=0
-            time_points (Tensor): (B, T) — normalized time [0, 1] for each reactor
-            parameters (Tensor): (B, n_params) — DoE levels + specific rates + FBA efficiencies
-        
-        Returns:
-            Dict with keys:
-                'concentrations': (B, T, 25) — predicted metabolite trajectories
-                'phase_weights': (B, T, 1) — f(t) phase interpolation
-                'growth_rates': (B, T, 25) — predicted growth-phase rates
-                'prod_rates': (B, T, 25) — predicted production-phase rates
-        """
-        
-        # Step 1: ENCODING
-        # Compress initial conditions + parameters into a single latent vector per reactor
-        # Output shape: (B, latent_dim=64)
-        latent = self.encoder(initial_conditions, parameters)
-        
-        # Step 2: DECODING (two-pass ODE integration)
-        # Pass latent state to decoder along with:
-        #   - time_points: for generating time embeddings
-        #   - initial_conditions: needed for ODE integration (boundary conditions)
-        #   - doe_params: extracted DoE levels [O2, AAs, Glc] for perfusion feed setup
-        return self.decoder(latent, time_points, initial_conditions,
-                            doe_params=_extract_doe(parameters))
