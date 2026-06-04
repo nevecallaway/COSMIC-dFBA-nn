@@ -153,45 +153,51 @@ class PhaseTransitionHead(nn.Module):
 
 class DifferentiableIntegrator(nn.Module):
     """
-    Implicit-Euler integrator implementing COSMIC-dFBA Supplementary Eq 2 in full:
+    Implicit-Euler integrator implementing COSMIC-dFBA Supplementary Eq 2:
 
-        cells (cols 0-1):   dC_i/dt = v_i * C_i
-        metabolites (≥ 2):  dC_i/dt = F*(C_i_in - C_i) + v_i * C_1
+        dC_i/dt = F * (C_i_in - eta * C_i) + v_{i,m} * C_1
 
-    where F = 1 d⁻¹ (perfusion rate).  Time is normalised to [0, 1] over a
-    13-day run, so F_norm = 13 in normalised units.
+    where F = 1 d⁻¹ (perfusion rate), C_1 is cell density, and eta is the
+    removal fraction per the paper:
+      - eta = 0 for cell density and cell volume at all times
+      - eta = 0 for titer before day 8, eta = 1 for titer from day 8 onward
+      - eta = 1 for all other metabolites at all times
+
+    Time is normalised to [0, 1] over a 13-day run, so F_NORM = 13.
+    DAY8_NORM = 8/13: normalised time at which titer washout activates.
 
     C_i_in (perfusion feed concentrations) are derived from the DoE coded levels
     (-1, 0, +1) via (level + 1) / 2  →  {0, 0.5, 1.0}:
       • col 2  (Glucose)          ← DoE Glc  (doe_params[:, 2])
       • cols 6-24 (amino acids)   ← DoE AAs  (doe_params[:, 1])
       • all other metabolites     ← C_i_in = 0  (not in perfusion feed)
-      • cells                     ← η = 0, no washout term
 
     Implicit Euler is used for the washout so the scheme is unconditionally
     stable regardless of F·dt:
-        c_next = (c_prev + (v·coupling + F·C_in·η)·dt) / (1 + F·η·dt)
-    For cells η = 0, denominator = 1 → reduces to explicit Euler.
+        c_next = (c_prev + (v·coupling + F·C_in·eta)·dt) / (1 + F·eta·dt)
+    For cells and titer-before-day8 eta = 0, denominator = 1 → explicit Euler.
     """
-    N_CELL_COLS   = 2         # Cell Density (0), Cell Volume (1)
-    IDX_GLUCOSE   = 2         # Glucose
-    IDX_TITER     = 5         # Antibody titer
-    IDX_AAS_START = 6         # Glutamine … Tryptophan (19 components)
-    F_NORM        = 13.0      # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
-    # NOTE: the paper uses η=0 for titer before day 8 and η=1 after (Supplementary Eq 2).
-    # In physical units this washout is balanced by production rates. In our normalised
-    # [0,1] space F_NORM=13 makes the washout dominant and breaks titer prediction.
-    # We keep η=0 for titer throughout and let the learned rates capture the dynamics.
+    N_CELL_COLS   = 2              # Cell Density (0), Cell Volume (1)
+    IDX_GLUCOSE   = 2              # Glucose
+    IDX_TITER     = 5              # Antibody titer
+    IDX_AAS_START = 6              # Glutamine ... Tryptophan (19 components)
+    F_NORM        = 13.0           # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
+    DAY8_NORM     = 8.0 / 13.0    # titer washout activates at day 8
 
     def forward(self, initial_conditions, blended_rates, time_points, doe_params=None):
         B, T, C = blended_rates.shape
         device  = blended_rates.device
 
-        # eta: removal fraction — 0 for cells and titer, 1 for metabolites.
-        eta = torch.ones(C, device=device)
-        eta[:self.N_CELL_COLS] = 0.0
+        # eta_base: (C,) -- 0 for cells, 0 for titer (activated after day 8), 1 elsewhere.
+        eta_base = torch.ones(C, device=device)
+        eta_base[:self.N_CELL_COLS] = 0.0
         if C > self.IDX_TITER:
-            eta[self.IDX_TITER] = 0.0
+            eta_base[self.IDX_TITER] = 0.0
+
+        # One-hot for titer column: used to add washout contribution after day 8.
+        titer_onehot = torch.zeros(C, device=device)
+        if C > self.IDX_TITER:
+            titer_onehot[self.IDX_TITER] = 1.0
 
         # Titer production rate is always ≥ 0 (cells can't un-produce antibody).
         # Use torch.cat to avoid in-place ops: the pattern clone()[...] = x.clamp()
@@ -220,6 +226,12 @@ class DifferentiableIntegrator(nn.Module):
             v      = blended_rates[:, t - 1, :]
             dt     = (time_points[:, t] - time_points[:, t - 1]).unsqueeze(-1)  # (B,1)
 
+            # eta: activate titer washout once t >= day 8 (normalised).
+            # titer_on: (B, 1) -- 1.0 after day 8, 0.0 before.
+            # eta_t: (B, C) via broadcasting -- adds 1 to titer column post day 8.
+            titer_on = (time_points[:, t] >= self.DAY8_NORM).float().unsqueeze(-1)  # (B, 1)
+            eta_t = eta_base + titer_on * titer_onehot  # (B, C)
+
             c1 = c_prev[:, 0:1]
             coupling = torch.cat([
                 c_prev[:, :self.N_CELL_COLS],
@@ -227,8 +239,8 @@ class DifferentiableIntegrator(nn.Module):
             ], dim=-1)
 
             # Implicit Euler: stable for any F·dt
-            numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eta) * dt
-            denominator = 1.0 + self.F_NORM * eta * dt
+            numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eta_t) * dt
+            denominator = 1.0 + self.F_NORM * eta_t * dt
             concentrations.append(numerator / denominator)
 
         return torch.stack(concentrations, dim=1)      # (B, T, C)

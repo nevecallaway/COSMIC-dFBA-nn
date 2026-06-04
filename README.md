@@ -122,7 +122,8 @@ INPUTS
 │    metabolites:      c_next = (c_prev + (v*c1 + F*c_in)*dt)│
 │                               / (1 + F*dt)                  │
 │    F_NORM = 13.0  (perfusion rate in normalised time)       │
-│    titer (idx 5):  eta=0, no washout                        │
+│    eta: 0 for cells always; 0 for titer before day 8,       │
+│         1 for titer from day 8 onward; 1 for all others     │
 │    c_in built from DoE coded levels (feed concentrations)   │
 │                                                             │
 │  OUT: concentrations        (B, T, 25)                      │
