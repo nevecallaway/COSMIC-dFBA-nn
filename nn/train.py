@@ -107,6 +107,7 @@ class Trainer:
         # without meaningfully hurting transition MAE (1.285d to 1.283d).
         comp_weights = torch.ones(targets.shape[-1], device=targets.device)
         comp_weights[IDX_CELL_DENSITY] = 3.0  # primary RCA target: predict cell density decline
+        comp_weights[IDX_TITER]        = 2.0
         conc_loss = (((conc_pred - targets) ** 2) * comp_weights).mean()
 
         # 1a. Endpoint titer loss (reduced from 2.0 to 0.5)

@@ -344,21 +344,39 @@ def print_summary_table(real_m, shuffled_m=None, real_loo=None):
     def fmt_n10(v, n): return f"{v}/{n}"      if v is not None else "—"
     def shuf(key):     return real_m.get(key) if shuffled_m is None else shuffled_m.get(key)
 
-    loo_trans = real_loo.get('trans_mae') if real_loo else None
+    def loo(key):
+        """Return LOO value from checkpoint if available, else None."""
+        return real_loo.get(key) if real_loo else None
+
+    loo_trans = loo('trans_mae')
+    loo_mcc   = loo('mcc')
+    loo_f1    = loo('f1')
+    loo_spec  = loo('spec')
+    loo_sens  = loo('sens')
+
+    # For each binary metric use LOO from checkpoint when available,
+    # fall back to full-dataset (annotated) only if not saved.
+    def _m(loo_val, full_key):
+        return loo_val if loo_val is not None else real_m.get(full_key)
+
+    def _lbl(loo_val, label):
+        """Append (LOO) or (full) suffix so the source is always clear."""
+        suffix = ' (LOO)' if loo_val is not None else ' (full)'
+        return label + suffix
 
     rows = [
         # (label, ours, shuffled, paper)
-        ("Transition MAE (LOO)",  fmt_mae(loo_trans),                    "—",                           "—"),
-        ("Transition MAE (full)", fmt_mae(real_m.get('trans_mae')),       fmt_mae(shuf('trans_mae')),     "—"),
-        ("MCC",                   fmt_f(real_m.get('mcc')),               fmt_f(shuf('mcc')),             "0.454"),
-        ("F1",                    fmt_f(real_m.get('f1')),                fmt_f(shuf('f1')),              "0.731"),
-        ("Specificity",           fmt_f(real_m.get('specificity')),       fmt_f(shuf('specificity')),     "0.780"),
-        ("Sensitivity",           fmt_f(real_m.get('sensitivity')),       fmt_f(shuf('sensitivity')),     "0.681"),
-        ("f(t) ±0.1 accuracy",    fmt_pct(real_m.get('f_acc_01')),        fmt_pct(shuf('f_acc_01')),      "72.3%"),
-        ("f(t) ±0.2 accuracy",    fmt_pct(real_m.get('f_acc_02')),        fmt_pct(shuf('f_acc_02')),      "90.8%"),
-        ("Phase AUC MAE (days)",   fmt_mae(real_m.get('auc_mae')),         fmt_mae(shuf('auc_mae')),       "—"),
-        ("Final titer mean error",fmt_pct(real_m.get('titer_mean_err')),  fmt_pct(shuf('titer_mean_err')),"—"),
-        ("Within 10% titer",      fmt_n10(real_m.get('within10'), N),     fmt_n10(shuf('within10'), N) if shuffled_m else "—", "—"),
+        ("Transition MAE (LOO)",      fmt_mae(loo_trans),                         "—",                           "—"),
+        ("Transition MAE (full)",     fmt_mae(real_m.get('trans_mae')),            fmt_mae(shuf('trans_mae')),     "—"),
+        (_lbl(loo_mcc,  "MCC"),       fmt_f(_m(loo_mcc,  'mcc')),                 fmt_f(shuf('mcc')),             "0.454"),
+        (_lbl(loo_f1,   "F1"),        fmt_f(_m(loo_f1,   'f1')),                  fmt_f(shuf('f1')),              "0.731"),
+        (_lbl(loo_spec, "Specificity"),fmt_f(_m(loo_spec, 'specificity')),         fmt_f(shuf('specificity')),     "0.780"),
+        (_lbl(loo_sens, "Sensitivity"),fmt_f(_m(loo_sens, 'sensitivity')),         fmt_f(shuf('sensitivity')),     "0.681"),
+        ("f(t) ±0.1 accuracy",        fmt_pct(real_m.get('f_acc_01')),            fmt_pct(shuf('f_acc_01')),      "72.3%"),
+        ("f(t) ±0.2 accuracy",        fmt_pct(real_m.get('f_acc_02')),            fmt_pct(shuf('f_acc_02')),      "90.8%"),
+        ("Phase AUC MAE (days)",      fmt_mae(real_m.get('auc_mae')),             fmt_mae(shuf('auc_mae')),       "—"),
+        ("Final titer mean error",    fmt_pct(real_m.get('titer_mean_err')),      fmt_pct(shuf('titer_mean_err')),"—"),
+        ("Within 10% titer",          fmt_n10(real_m.get('within10'), N),         fmt_n10(shuf('within10'), N) if shuffled_m else "—", "—"),
     ]
 
     c0 = max(len(r[0]) for r in rows)
