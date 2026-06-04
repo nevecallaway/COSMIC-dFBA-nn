@@ -460,6 +460,9 @@ def main():
                              'training to establish chance-level performance')
     parser.add_argument('--lstm', action='store_true',
                         help='Use LSTM rate heads instead of constant rate heads')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility (default: 42). '
+                             '--shuffle always uses seed 0 so the baseline is stable.')
     args = parser.parse_args()
 
     print(f"\n{'='*70}")
@@ -469,6 +472,16 @@ def main():
     # USE_SYNTHETIC = not args.no_synthetic  # synthetic pre-training not currently in use
     USE_SHUFFLE = args.shuffle
     USE_LSTM    = args.lstm
+
+    # Shuffled baseline always uses seed 0 so it is stable across main-model reruns.
+    seed = 0 if USE_SHUFFLE else args.seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark     = False
+    print(f"Random seed: {seed}")
 
     script_dir  = Path(__file__).parent
     DATA_PATH   = script_dir / "data" / "data_2.csv"
