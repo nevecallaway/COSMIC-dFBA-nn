@@ -4,7 +4,9 @@ A PyTorch surrogate model for predicting bioreactor phase transitions and metabo
 
 The primary prediction goal is transition timing for root cause analysis (RCA): predicting when and how a cell line switches from growth phase to production phase, not just final titer. The loss is weighted accordingly, favoring phase transition accuracy over titer. The phase prediction head explicitly outputs two interpretable parameters per reactor: mu (transition midpoint in days) and sigma (transition sharpness in days). Evaluation includes phase AUC, which captures both timing and sharpness of the transition in a single number, alongside transition MAE and standard classification metrics.
 
-**Latest LOO results (simplified model, DoE-only inputs):** f(t) accuracy +/-0.1: 81.5% (paper: 72.3%) | MCC: 0.913 (paper: 0.454) | Transition MAE: 1.38 days
+**Latest LOO results (FC model, DoE-only inputs):** f(t) accuracy +/-0.1: 85.4% (paper: 72.3%) | MCC: 0.878 (paper: 0.454) | Transition MAE: 1.37 days | Phase AUC MAE: 0.35 days
+
+LSTM variant (same inputs, time-varying rates): LOO MAE 1.46d, f(t) 80.0% -- worse on all metrics. Constant-rate FC is the final model.
 
 ---
 
@@ -162,31 +164,40 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
 ┌─────────────────────────────────────────────────────────────┐
 │  LOSS COMPUTATION  (Trainer.compute_loss)                   │
 │                                                             │
-│  1. Concentration MSE                                       │
-│       cell density 3x weight (primary RCA target)          │
-│       titer 2x weight                                       │
-│     IN:  concentrations (4,13,25) vs target (4,13,25)       │
+│   1. Concentration MSE (weight 1.0)                         │
+│        cell density (idx 0): 3x weight -- primary RCA target│
+│        titer (idx 5): 2x weight                             │
+│      IN:  concentrations (4,13,25) vs target (4,13,25)      │
 │                                                             │
-│  2. Endpoint titer loss (weight 0.5)                        │
-│     IN:  concentrations[:,−1,5] vs target[:,−1,5]           │
+│   2. Endpoint titer loss (weight 0.5)                       │
+│      IN:  concentrations[:,−1,5] vs target[:,−1,5]          │
 │                                                             │
-│  3. Peak-time alignment (weight 1.0)                        │
-│     soft-argmax on titer trajectory to align peak day       │
+│   3. Peak-time alignment (weight 1.0)                       │
+│      soft-argmax on titer trajectory to align peak day      │
 │                                                             │
-│  4. Initial condition constraint (weight 0.1)               │
-│     IN:  concentrations[:,0,:] vs ic (4,25)                 │
+│   4. Initial condition constraint (weight 0.1)              │
+│      IN:  concentrations[:,0,:] vs ic (4,25)                │
 │                                                             │
-│  5. Non-flatness penalty (weight 0.2)                       │
-│     penalizes low variance trajectories                     │
+│   5. Non-flatness penalty (weight 0.2)                      │
+│      penalizes low variance trajectories                    │
 │                                                             │
-│  6. Non-negativity penalty (weight 0.5)                     │
-│     penalizes concentrations < 0                            │
+│   6. Non-negativity penalty (weight 0.5)                    │
+│      penalizes concentrations < 0                           │
 │                                                             │
-│  7. Phase regression MSE (weight 5.0)                       │
-│     IN:  phase_weights (4,13,1) vs phases (4,13)            │
+│   7. Concentration smoothness (weight 0.1)                  │
+│      penalizes step-to-step jumps in predicted trajectories │
 │                                                             │
-│  8. Rate + phase smoothness (weights 0.1 / 0.05)            │
-│     penalizes large step-to-step changes in rates and f(t)  │
+│   8. Phase regression MSE (weight 5.0)                      │
+│      IN:  phase_weights (4,13,1) vs phases (4,13)           │
+│                                                             │
+│   9. Rate smoothness (weight 0.1)                           │
+│      penalizes step-to-step changes in blended_rates        │
+│                                                             │
+│  10. Phase smoothness (weight 0.05)                         │
+│      penalizes step-to-step changes in f(t)                 │
+│                                                             │
+│  11. Rate magnitude (weight 0.01)                           │
+│      L1 regularization on growth and production rates       │
 │                                                             │
 │  OUT: total_loss (scalar)                                   │
 └─────────────────────────────────────────────────────────────┘
