@@ -35,128 +35,22 @@ def load_doe_parameters(doe_file: str) -> Dict[str, np.ndarray]:
     return result
 
 
-def load_specific_rates(rates_file: str, reactors: list) -> np.ndarray:
-    """
-    Load per-reactor phase-specific metabolic rates from data_3.csv.
-
-    Returns array of shape (n_reactors, 50) — 25 growth-phase rates
-    followed by 25 production-phase rates — standardised to N(0,1)
-    per rate column across reactors so all features are comparable.
-
-    Reactor order matches the `reactors` list passed in (must be sorted).
-    """
-    df = pd.read_csv(rates_file)
-    # Row 0 contains reactor names; rows 1+ are the 25 component rates.
-    # Columns 2-11  → growth phase (R0001..R0012 order)
-    # Columns 12-21 → production phase (R0001..R0012 order)
-    data = df.iloc[1:].reset_index(drop=True)
-    # The column order in data_3 is the same sorted reactor order
-    data3_reactors = ['R0001','R0002','R0003','R0004','R0005',
-                      'R0006','R0008','R0010','R0011','R0012']
-    n_r  = len(reactors)
-    n_c  = 25   # components
-    growth = np.zeros((n_r, n_c))
-    prod   = np.zeros((n_r, n_c))
-    for i, reactor in enumerate(reactors):
-        if reactor in data3_reactors:
-            j = data3_reactors.index(reactor)
-            growth[i] = data.iloc[:, 2 + j].values.astype(float)
-            prod[i]   = data.iloc[:, 12 + j].values.astype(float)
-
-    # Standardise each column to N(0,1) across reactors
-    rates = np.concatenate([growth, prod], axis=1)   # (n_r, 50)
-    mean  = rates.mean(axis=0, keepdims=True)
-    std   = np.clip(rates.std(axis=0, keepdims=True), 1e-6, None)
-    return (rates - mean) / std
-
-
-def load_fba_efficiencies(fba_file: str, reactors: list) -> np.ndarray:
-    """
-    Load per-reactor FBA objective efficiencies from data_4.csv.
-
-    Each reactor has growth-phase and production-phase priorities.  The file
-    lists up to 10 reactions per phase with their efficiency scalars (the
-    `objs` values used in the MATLAB simulate_model call — fraction of optimal
-    objective the solver must achieve before moving to the next priority).
-
-    Returns (n_reactors, 22) — 11 reactions × 2 phases — standardised to
-    N(0,1).  Reactions absent for a given reactor/phase get efficiency 0.
-
-    Fixed reaction vocabulary (ordered by biological relevance):
-      biomass_cho, BM_acc, PSP_S05_FinalDemand_[e], EX_lac_D_e_,
-      EX_nh4_e_, EX_ala_L_e_, EX_asp_L_e_, EX_glu_L_e_, EX_gly_e_,
-      EX_tyr_L_e_, EX_asn_L_e_
-    """
-    REACTIONS = [
-        'biomass_cho', 'BM_acc', 'PSP_S05_FinalDemand_[e]',
-        'EX_lac_D_e_', 'EX_nh4_e_', 'EX_ala_L_e_', 'EX_asp_L_e_',
-        'EX_glu_L_e_', 'EX_gly_e_', 'EX_tyr_L_e_', 'EX_asn_L_e_',
-    ]
-    N_RXN = len(REACTIONS)
-    rxn_idx = {r: i for i, r in enumerate(REACTIONS)}
-
-    raw = pd.read_csv(fba_file, header=None)
-
-    # Row 0: reactor names in columns 1, 5, 9, ... (every 4 columns)
-    # Col layout per reactor: growth_rxn, growth_eff, prod_rxn, prod_eff
-    file_reactors = []
-    reactor_col_starts = []
-    for col in range(1, raw.shape[1], 4):
-        name = str(raw.iloc[0, col]).strip()
-        if name.startswith('R'):
-            file_reactors.append(name)
-            reactor_col_starts.append(col)
-
-    # Data starts at row 3 (after header rows 0-2)
-    data_rows = raw.iloc[3:].reset_index(drop=True)
-
-    result = np.zeros((len(reactors), N_RXN * 2))  # growth cols then prod cols
-
-    for i, reactor in enumerate(reactors):
-        if reactor not in file_reactors:
-            continue
-        c = reactor_col_starts[file_reactors.index(reactor)]
-
-        # Growth phase: cols c (reaction name), c+1 (efficiency)
-        for _, row in data_rows.iterrows():
-            rxn  = str(row.iloc[c]).strip()
-            eff  = row.iloc[c + 1]
-            if rxn in rxn_idx and pd.notna(eff):
-                result[i, rxn_idx[rxn]] = float(eff)
-
-        # Production phase: cols c+2 (reaction name), c+3 (efficiency)
-        for _, row in data_rows.iterrows():
-            rxn  = str(row.iloc[c + 2]).strip()
-            eff  = row.iloc[c + 3]
-            if rxn in rxn_idx and pd.notna(eff):
-                result[i, N_RXN + rxn_idx[rxn]] = float(eff)
-
-    # Standardise per column across reactors
-    mean = result.mean(axis=0, keepdims=True)
-    std  = np.clip(result.std(axis=0, keepdims=True), 1e-6, None)
-    return (result - mean) / std
 
 
 def load_experimental_data(data_file: str = "data/data_2.csv",
-                           doe_file: str = "data/data_1.csv",
-                           rates_file: str = "data/data_3.csv",
-                           fba_file: str = "data/data_4.csv") -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
+                           doe_file: str = "data/data_1.csv") -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
     Load real bioprocess data from CSV.
 
     Args:
-        data_file:   Path to data_2.csv with experimental measurements
-        doe_file:    Path to data_1.csv with DoE variable levels (O2, AAs, Glc).
-        rates_file:  Path to data_3.csv with per-reactor phase-specific rates.
-        fba_file:    Path to data_4.csv with per-reactor FBA objective efficiencies.
-                     Missing files are handled gracefully (params omitted).
+        data_file:  Path to data_2.csv with experimental measurements
+        doe_file:   Path to data_1.csv with DoE variable levels (O2, AAs, Glc).
 
     Returns:
         trajectories: (n_reactors, n_timepoints, n_components)
         time_points: (n_reactors, n_timepoints)
         initial_conditions: (n_reactors, n_components)
-        metadata: Dict with column info, 'doe_params' (n_reactors, 3),
-                  and 'specific_rates' (n_reactors, 50)
+        metadata: dict with 'doe_params' (n_reactors, 3), 'phases' (n_reactors, T), etc.
     """
     # Read CSV
     df = pd.read_csv(data_file)
@@ -256,31 +150,13 @@ def load_experimental_data(data_file: str = "data/data_2.csv",
     except FileNotFoundError:
         print(f"  (DoE file {doe_file} not found — running without process parameters)")
 
-    # Load phase-specific metabolic rates (25 growth + 25 production) if file exists
-    specific_rates_array = None
-    try:
-        specific_rates_array = load_specific_rates(rates_file, reactors)  # (n_reactors, 50)
-    except FileNotFoundError:
-        print(f"  (Rates file {rates_file} not found — running without specific rates)")
-
-    # Load FBA objective efficiencies (11 reactions × 2 phases = 22 features) if file exists
-    fba_efficiencies_array = None
-    try:
-        fba_efficiencies_array = load_fba_efficiencies(fba_file, list(reactors))  # (n_reactors, 22)
-        print(f"  FBA efficiencies loaded: {fba_efficiencies_array.shape} "
-              f"[11 reactions × 2 phases] from {fba_file}")
-    except FileNotFoundError:
-        print(f"  (FBA file {fba_file} not found — running without FBA efficiencies)")
-
     metadata = {
         'components': key_components,
         'n_components': n_components,
         'n_reactors': n_reactors,
         'reactors': reactors,
-        'phases': phases_padded,                    # Ground truth phase information
-        'doe_params': doe_params_array,              # (n_reactors, 3) or None
-        'specific_rates': specific_rates_array,      # (n_reactors, 50) or None
-        'fba_efficiencies': fba_efficiencies_array,  # (n_reactors, 22) or None
+        'phases': phases_padded,      # Ground truth phase information
+        'doe_params': doe_params_array,  # (n_reactors, 3) or None
     }
 
     print(f"\n✓ Loaded real data:")

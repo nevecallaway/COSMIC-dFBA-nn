@@ -32,7 +32,7 @@ The primary prediction goal is transition timing for root cause analysis (RCA): 
 | B | 4 (train) / 1 (val) | Batch size |
 | T | 13 | Time points per reactor (one per day, day 0-12) |
 | C | 25 | Metabolite components |
-| n_params | 75 | DoE (3) + specific rates (50) + FBA efficiencies (22) |
+| n_params | 3 | DoE coded levels: O2, AAs, Glc |
 | latent_dim | 64 | Latent state dimension |
 
 **Component layout (C=25):**
@@ -47,14 +47,15 @@ The primary prediction goal is transition timing for root cause analysis (RCA): 
 | 5 | Titer (antibody) |
 | 6-24 | Amino acids (Glutamine ... Tryptophan) |
 
-**Parameter layout (n_params=75):**
+**Parameter layout (n_params=3):**
 
 | Index | Content |
 |-------|---------|
-| 0-2 | DoE coded levels: O2, AAs, Glc (values: -1, 0, +1) |
-| 3-27 | Growth-phase specific rates (25) |
-| 28-52 | Production-phase specific rates (25) |
-| 53-74 | FBA objective efficiencies (22): how well each of 11 biological objectives was satisfied in growth and production phase, from the paper's NLP optimization |
+| 0 | O2 coded level (-1, 0, +1) |
+| 1 | AAs coded level (-1, 0, +1) |
+| 2 | Glc coded level (-1, 0, +1) |
+
+FBA-derived features (data_3 specific rates, data_4 efficiencies) were tested and dropped. They require running dFBA first, which defeats the purpose of a surrogate model. Ablation: removing them costs ~0.3d on LOO transition MAE (1.28d -> 1.60d).
 
 ---
 
@@ -64,14 +65,14 @@ The primary prediction goal is transition timing for root cause analysis (RCA): 
 INPUTS
   initial_conditions  (B, 25)   normalized concentrations at t=0
   time_points         (B, T)    normalized time in [0, 1]  (actual days / 13)
-  parameters          (B, 75)   DoE levels + rates + FBA efficiencies
+  parameters          (B, 3)    DoE coded levels: O2, AAs, Glc
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  DynamicsEncoder                          (model.py)        │
 │                                                             │
-│  IN:  cat([initial_conditions, parameters])  →  (B, 81)    │
-│  FC1: Linear(81, 128) + ReLU + Dropout(0.2)                 │
+│  IN:  cat([initial_conditions, parameters])  →  (B, 28)    │
+│  FC1: Linear(28, 128) + ReLU + Dropout(0.2)                 │
 │  FC2: Linear(128, 128) + ReLU + Dropout(0.2)                │
 │  FC3: Linear(128, 64)                                       │
 │  OUT: latent_state                           →  (B, 64)     │
@@ -262,14 +263,6 @@ python nn/train.py
 # Train permutation baseline (shuffle inputs vs outputs to establish chance performance)
 python nn/train.py --shuffle
 
-# Train without data_3 specific rates (ablation)
-python nn/train.py --no-rates
-
-# Train without data_4 FBA efficiencies (ablation)
-python nn/train.py --no-fba
-
-# Train with only DoE coded levels as inputs (n_params=3)
-python nn/train.py --no-rates --no-fba
 
 # Evaluate saved model
 python nn/evaluate.py

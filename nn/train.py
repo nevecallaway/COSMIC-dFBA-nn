@@ -379,43 +379,24 @@ class Trainer:
 #                        normalize=False, phases=phases)
 
 
-def load_data(data_path, include_rates=True, include_fba=True):
-    """Flexible loader for CSV or NPZ data.
-
-    Args:
-        include_rates: if False, omit data_3 specific rates from the encoder
-            parameter vector. Use --no-rates to test whether rates add signal
-            beyond what the trajectory targets already encode.
-        include_fba: if False, omit data_4 FBA efficiencies from the encoder
-            parameter vector. Use --no-fba to test without FBA-derived inputs.
+def load_data(data_path):
+    """Load experimental data from CSV. Inputs to the encoder are DoE coded
+    levels only (O2, AAs, Glc) -- n_params=3. FBA-derived features (data_3
+    specific rates, data_4 efficiencies) were tested and dropped: they require
+    running dFBA first, which defeats the purpose of a surrogate model.
     """
     p = Path(data_path)
     if p.is_file() and p.suffix == '.csv':
         print(f"Loading real experimental data from {p}...")
-        doe_file   = str(p.parent / 'data_1.csv')
-        rates_file = str(p.parent / 'data_3.csv')
-        fba_file   = str(p.parent / 'data_4.csv')
+        doe_file = str(p.parent / 'data_1.csv')
         trajectories, time_points, ics, metadata = load_experimental_data(
-            str(p), doe_file=doe_file, rates_file=rates_file, fba_file=fba_file)
-        phases   = metadata.get('phases', None)
-        doe_arr  = metadata.get('doe_params', None)        # (n_reactors, 3) or None
-        rate_arr = metadata.get('specific_rates', None)    # (n_reactors, 50) or None
-        fba_arr  = metadata.get('fba_efficiencies', None)  # (n_reactors, 22) or None
+            str(p), doe_file=doe_file)
+        phases  = metadata.get('phases', None)
+        doe_arr = metadata.get('doe_params', None)  # (n_reactors, 3)
         parameters = {}
         if doe_arr is not None:
             parameters.update({'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]})
-        if rate_arr is not None and include_rates:
-            for k in range(rate_arr.shape[1]):
-                parameters[f'rate_{k}'] = rate_arr[:, k]
-            print(f"  Specific rates included: {rate_arr.shape} [25 growth + 25 prod rates]")
-        else:
-            print("  Specific rates (data_3) excluded from encoder inputs (--no-rates).")
-        if fba_arr is not None and include_fba:
-            for k in range(fba_arr.shape[1]):
-                parameters[f'fba_{k}'] = fba_arr[:, k]
-            print(f"  FBA efficiencies included: {fba_arr.shape} [11 reactions x 2 phases]")
-        else:
-            print("  FBA efficiencies (data_4) excluded from encoder inputs (--no-fba).")
+            print(f"  Encoder inputs: DoE coded levels only (n_params=3) [O2, AAs, Glc]")
         dataset = dFBADataset(trajectories, time_points, ics, parameters=parameters,
                               normalize=True, phases=phases)
         return dataset
@@ -493,12 +474,6 @@ def main():
     parser.add_argument('--shuffle', action='store_true',
                         help='Permutation baseline: shuffle inputs vs outputs before '
                              'training to establish chance-level performance')
-    parser.add_argument('--no-rates', action='store_true',
-                        help='Exclude data_3 specific rates from encoder inputs. '
-                             'Tests whether rates add signal beyond trajectory targets.')
-    parser.add_argument('--no-fba', action='store_true',
-                        help='Exclude data_4 FBA efficiencies from encoder inputs. '
-                             'Tests whether FBA-derived features add signal.')
     args = parser.parse_args()
 
     print(f"\n{'='*70}")
@@ -506,10 +481,8 @@ def main():
     print(f"{'='*70}")
 
     # USE_SYNTHETIC = not args.no_synthetic  # synthetic pre-training not currently in use
-    USE_LSTM      = args.lstm
-    USE_SHUFFLE   = args.shuffle
-    USE_RATES     = not args.no_rates
-    USE_FBA       = not args.no_fba
+    USE_LSTM    = args.lstm
+    USE_SHUFFLE = args.shuffle
 
     script_dir = Path(__file__).parent
     DATA_PATH  = script_dir / "data" / "data_2.csv"
@@ -524,7 +497,7 @@ def main():
     FINETUNE_LR = 1e-4
 
     try:
-        dataset = load_data(str(DATA_PATH), include_rates=USE_RATES, include_fba=USE_FBA)
+        dataset = load_data(str(DATA_PATH))
     except Exception as e:
         print(f"Error loading data: {e}")
         return

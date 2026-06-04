@@ -820,28 +820,17 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    # Load data — include all feature files so n_params matches the trained model
-    doe_file   = str(here / 'data' / 'data_1.csv')
-    rates_file = str(here / 'data' / 'data_3.csv')
-    fba_file   = str(here / 'data' / 'data_4.csv')
+    # Load data — DoE coded levels only (n_params=3)
+    doe_file = str(here / 'data' / 'data_1.csv')
     trajs, times, ics, meta = load_experimental_data(
-        str(here / 'data' / 'data_2.csv'),
-        doe_file=doe_file, rates_file=rates_file, fba_file=fba_file)
+        str(here / 'data' / 'data_2.csv'), doe_file=doe_file)
     reactors = list(meta['reactors'])
     phases   = meta['phases']
     doe_arr  = meta.get('doe_params')
-    rate_arr = meta.get('specific_rates')
-    fba_arr  = meta.get('fba_efficiencies')
 
     parameters = {}
-    if doe_arr  is not None:
+    if doe_arr is not None:
         parameters.update({'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]})
-    if rate_arr is not None:
-        for k in range(rate_arr.shape[1]):
-            parameters[f'rate_{k}'] = rate_arr[:, k]
-    if fba_arr  is not None:
-        for k in range(fba_arr.shape[1]):
-            parameters[f'fba_{k}'] = fba_arr[:, k]
 
     dataset = dFBADataset(trajs, times, ics, parameters=parameters,
                           normalize=True, phases=phases)
