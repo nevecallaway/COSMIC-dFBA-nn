@@ -247,9 +247,7 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
 
 ## Training Strategy
 
-**Phase 1 — Synthetic pre-training** (if `synthetic_training.npz` exists): 500 epochs on simulated data normalized to match the real dataset. Runs without early stopping.
-
-**Phase 2 — Leave-one-out fine-tuning**: with 10 reactors, each is held out once as the test set. The model resets to pre-trained weights for each fold and fine-tunes on the remaining 9. LOO metrics are averaged across all 10 folds and reported as the main generalization estimate.
+**Leave-one-out cross-validation**: with 10 reactors, each is held out once as the test set. The model trains from scratch for each fold on the remaining 9 reactors. LOO metrics are averaged across all 10 folds and reported as the main generalization estimate.
 
 **Final model**: after LOO, the model is re-trained on all 10 reactors and saved to `improved_model.pt`.
 
@@ -258,14 +256,14 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
 ## Running
 
 ```bash
-# Train (with synthetic pre-training if available)
+# Train
 python nn/train.py
-
-# Train without synthetic pre-training
-python nn/train.py --no-synthetic
 
 # Train permutation baseline (shuffle inputs vs outputs to establish chance performance)
 python nn/train.py --shuffle
+
+# Train without data_3 specific rates (ablation)
+python nn/train.py --no-rates
 
 # Evaluate saved model
 python nn/evaluate.py

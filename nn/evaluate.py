@@ -687,6 +687,69 @@ def plot_problem_reactors(y_true, y_pred, phases_true, phases_pred,
             print(f'  saved eval_problem_{name}_phase.png')
 
 
+def print_cell_density_metrics(y_true, y_pred, reactors, times_days, mu_days=None):
+    """
+    Report cell density (component 0) trajectory accuracy and post-transition slope.
+
+    Post-transition slope: linear fit to predicted cell density after the transition
+    midpoint (mu if available, else after f crosses 0.5). A negative slope means the
+    model predicts declining cell density, which is the proxy signal for cell death risk.
+    """
+    from scipy.stats import spearmanr, linregress
+
+    IDX_CD = 0
+    N = y_true.shape[0]
+    T = y_true.shape[1]
+
+    print(f"\n{'='*65}")
+    print("Cell Density Metrics  (component 0 — primary RCA target)")
+    print(f"{'='*65}")
+
+    cd_true = y_true[:, :, IDX_CD]   # (N, T)
+    cd_pred = y_pred[:, :, IDX_CD]
+
+    # Overall R2
+    from sklearn.metrics import r2_score
+    r2 = r2_score(cd_true.flatten(), cd_pred.flatten())
+    print(f"  Global cell density R²  : {r2:.4f}")
+
+    print(f"\n  Per-reactor cell density (Spearman, post-transition slope):")
+    print(f"  {'Reactor':<8} {'Spearman':>10} {'Slope (pred)':>14} {'Slope (actual)':>16}  {'Health signal'}")
+    print(f"  {'-'*70}")
+
+    for r in range(N):
+        name = reactors[r] if r < len(reactors) else f"R{r}"
+        t = cd_true[r]
+        p = cd_pred[r]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rho = spearmanr(t, p).statistic if t.std() > 1e-8 and p.std() > 1e-8 else float('nan')
+
+        # Post-transition window: from mu onward (in normalised time indices)
+        if mu_days is not None and times_days is not None:
+            t_days = times_days[r]
+            t_max  = t_days.max()
+            mu_norm = mu_days[r] / t_max if t_max > 0 else 0.5
+            post_idx = np.where(np.linspace(0, 1, T) >= mu_norm)[0]
+        else:
+            post_idx = np.arange(T // 2, T)
+
+        if len(post_idx) >= 3:
+            x = np.linspace(0, 1, len(post_idx))
+            slope_pred   = linregress(x, p[post_idx]).slope
+            slope_actual = linregress(x, t[post_idx]).slope
+            health = "declining" if slope_pred < -0.05 else ("stable" if abs(slope_pred) <= 0.05 else "rising")
+        else:
+            slope_pred = slope_actual = float('nan')
+            health = "n/a"
+
+        rho_str   = f"{rho:.3f}"   if not np.isnan(rho)         else "nan"
+        sp_str    = f"{slope_pred:+.3f}"  if not np.isnan(slope_pred)  else "nan"
+        sa_str    = f"{slope_actual:+.3f}" if not np.isnan(slope_actual) else "nan"
+        print(f"  {name:<8} {rho_str:>10} {sp_str:>14} {sa_str:>16}  {health}")
+
+
 def plot_phase_params(mu_days, sigma_days, phases_true, phases_pred, times_days, reactors, out_dir):
     """
     Two-panel plot surfacing the PhaseTransitionHead's explicit parameters.
@@ -810,6 +873,7 @@ def main():
 
     # Detailed per-metric breakdowns
     print_metrics(y_true, y_pred, phases_true, phases_pred, reactors)
+    print_cell_density_metrics(y_true, y_pred, reactors, times, mu_days=mu_days)
     print_final_titer_metrics(y_true, y_pred, reactors)
     print_transition_metrics(phases_true, phases_pred, times, reactors,
                              mu_days=mu_days, sigma_days=sigma_days)

@@ -260,8 +260,6 @@ def load_experimental_data(data_file: str = "data/data_2.csv",
     specific_rates_array = None
     try:
         specific_rates_array = load_specific_rates(rates_file, reactors)  # (n_reactors, 50)
-        print(f"  Specific rates loaded: {specific_rates_array.shape} "
-              f"[25 growth + 25 prod rates] from {rates_file}")
     except FileNotFoundError:
         print(f"  (Rates file {rates_file} not found — running without specific rates)")
 

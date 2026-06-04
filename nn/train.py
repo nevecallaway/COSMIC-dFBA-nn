@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Unified Training Script for COSMIC-dFBA.
-Combines standard and PINN-enhanced training logic for real and simulated data.
+Training script for COSMIC-dFBA neural network surrogate.
 
 This file orchestrates the training workflow:
 - Trainer class: manages optimizer, loss computation, training/validation loops
-- Two-phase training: Pre-train on synthetic data → Fine-tune on real data (LOO CV)
-- PINN loss: 8-component fused loss that combines MSE, physics constraints, and regularization
+- Leave-one-out cross-validation on 10 real perfusion reactors
+- 8-component fused loss combining MSE, physics constraints, and regularization
 """
 
 import numpy as np
@@ -344,40 +343,40 @@ class Trainer:
         return best_val_loss
 
 
-def load_synthetic_data(npz_path, real_dataset):
-    """
-    Load synthetic .npz and apply real dataset's normalization stats.
-    Both datasets must be in the same normalized space so pre-trained
-    weights transfer directly to fine-tuning without a scale mismatch.
-    If the .npz contains 'doe_params' (N, 3) these are passed through as
-    process parameters so the pre-trained model learns to use them.
-    """
-    data = np.load(npz_path, allow_pickle=True)
-    trajectories = data['trajectories'].copy()        # (N, T, C)
-    times        = data['times']                      # (N, T)
-    ics          = data['ics'].copy()                 # (N, C)
-    phases       = data['phases']                     # (N, T)
-
-    # Apply real data's two-step normalization to synthetic data so both
-    # datasets share the same scale.
-    traj_norm = (trajectories - real_dataset.traj_min) / (real_dataset.traj_max - real_dataset.traj_min)
-    trajectories = (traj_norm - real_dataset.traj_scale_min) / (real_dataset.traj_scale_max - real_dataset.traj_scale_min)
-
-    ic_norm = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
-    ics = (ic_norm - real_dataset.ic_scale_min) / (real_dataset.ic_scale_max - real_dataset.ic_scale_min)
-
-    # Build parameters dict from stored DoE params + specific rates
-    parameters = {}
-    if 'doe_params' in data:
-        dp = data['doe_params']       # (N, 3)
-        parameters.update({'O2': dp[:, 0], 'AAs': dp[:, 1], 'Glc': dp[:, 2]})
-    if 'specific_rates' in data:
-        sr = data['specific_rates']   # (N, 50)
-        for k in range(sr.shape[1]):
-            parameters[f'rate_{k}'] = sr[:, k]
-
-    return dFBADataset(trajectories, times, ics, parameters=parameters,
-                       normalize=False, phases=phases)
+# def load_synthetic_data(npz_path, real_dataset):
+#     """
+#     Load synthetic .npz and apply real dataset's normalization stats.
+#     Both datasets must be in the same normalized space so pre-trained
+#     weights transfer directly to fine-tuning without a scale mismatch.
+#     If the .npz contains 'doe_params' (N, 3) these are passed through as
+#     process parameters so the pre-trained model learns to use them.
+#     """
+#     data = np.load(npz_path, allow_pickle=True)
+#     trajectories = data['trajectories'].copy()        # (N, T, C)
+#     times        = data['times']                      # (N, T)
+#     ics          = data['ics'].copy()                 # (N, C)
+#     phases       = data['phases']                     # (N, T)
+#
+#     # Apply real data's two-step normalization to synthetic data so both
+#     # datasets share the same scale.
+#     traj_norm = (trajectories - real_dataset.traj_min) / (real_dataset.traj_max - real_dataset.traj_min)
+#     trajectories = (traj_norm - real_dataset.traj_scale_min) / (real_dataset.traj_scale_max - real_dataset.traj_scale_min)
+#
+#     ic_norm = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
+#     ics = (ic_norm - real_dataset.ic_scale_min) / (real_dataset.ic_scale_max - real_dataset.ic_scale_min)
+#
+#     # Build parameters dict from stored DoE params + specific rates
+#     parameters = {}
+#     if 'doe_params' in data:
+#         dp = data['doe_params']       # (N, 3)
+#         parameters.update({'O2': dp[:, 0], 'AAs': dp[:, 1], 'Glc': dp[:, 2]})
+#     if 'specific_rates' in data:
+#         sr = data['specific_rates']   # (N, 50)
+# #         for k in range(sr.shape[1]):
+#             parameters[f'rate_{k}'] = sr[:, k]
+#
+#     return dFBADataset(trajectories, times, ics, parameters=parameters,
+#                        normalize=False, phases=phases)
 
 
 def load_data(data_path, include_rates=True):
@@ -406,8 +405,9 @@ def load_data(data_path, include_rates=True):
         if rate_arr is not None and include_rates:
             for k in range(rate_arr.shape[1]):
                 parameters[f'rate_{k}'] = rate_arr[:, k]
-        elif not include_rates:
-            print("  Specific rates (data_3) excluded from encoder inputs.")
+            print(f"  Specific rates included: {rate_arr.shape} [25 growth + 25 prod rates]")
+        else:
+            print("  Specific rates (data_3) excluded from encoder inputs (--no-rates).")
         if fba_arr is not None:
             for k in range(fba_arr.shape[1]):
                 parameters[f'fba_{k}'] = fba_arr[:, k]
@@ -481,8 +481,8 @@ def shuffle_dataset(dataset):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--no-synthetic', action='store_true',
-                        help='Skip pre-training on synthetic data, train on real data only')
+    # parser.add_argument('--no-synthetic', action='store_true',
+    #                     help='Skip pre-training on synthetic data, train on real data only')
     parser.add_argument('--lstm', action='store_true',
                         help='Use LSTM decoder instead of transformer attention')
     parser.add_argument('--shuffle', action='store_true',
@@ -497,24 +497,17 @@ def main():
     print("COSMIC-dFBA Unified Training")
     print(f"{'='*70}")
 
-    USE_SYNTHETIC = not args.no_synthetic
+    # USE_SYNTHETIC = not args.no_synthetic  # synthetic pre-training not currently in use
     USE_LSTM      = args.lstm
     USE_SHUFFLE   = args.shuffle
     USE_RATES     = not args.no_rates
 
     script_dir = Path(__file__).parent
     DATA_PATH  = script_dir / "data" / "data_2.csv"
-    SYNTH_PATH = script_dir / "synthetic_training.npz"
-
     LATENT_DIM = 64
     N_HEADS    = 4
     EPOCHS     = 400
     PATIENCE   = 80
-
-    # Pre-training: 500 epochs on GPU — more synthetic data and compute budget
-    # means pre-training can converge more fully before fine-tuning begins.
-    PRETRAIN_EPOCHS = 500
-    PRETRAIN_LR     = 5e-4
 
     # Fine-tuning: low LR to avoid catastrophic forgetting, but high enough
     # for the scheduler not to kill learning in the first 30 epochs.
@@ -555,30 +548,7 @@ def main():
             n_heads=N_HEADS,
         )
 
-    # --- Phase 1: Pre-train on synthetic data (if available and enabled) ---
-    if USE_SYNTHETIC and SYNTH_PATH.exists():
-        print(f"\n{'='*70}")
-        print("Phase 1: Pre-training on synthetic data")
-        print(f"{'='*70}")
-        # Apply real data normalization so both datasets share the same scale.
-        synth_dataset    = load_synthetic_data(str(SYNTH_PATH), real_dataset=dataset)
-        synth_train_size = int(0.9 * len(synth_dataset))
-        synth_val_size   = len(synth_dataset) - synth_train_size
-        synth_train, synth_val = random_split(synth_dataset, [synth_train_size, synth_val_size])
-        synth_train_loader = DataLoader(synth_train, batch_size=256, shuffle=True,  collate_fn=dfba_collate_fn)
-        synth_val_loader   = DataLoader(synth_val,   batch_size=256, shuffle=False, collate_fn=dfba_collate_fn)
-
-        print(f"Device: {device} | Synthetic: Train={synth_train_size}, Val={synth_val_size}")
-        pretrain_trainer = Trainer(model, device, learning_rate=PRETRAIN_LR, model_type='enhanced')
-        # patience=None disables early stopping — run all PRETRAIN_EPOCHS
-        pretrain_trainer.train(synth_train_loader, synth_val_loader,
-                               epochs=PRETRAIN_EPOCHS, patience=None)
-        print("Pre-training complete. Switching to real-data fine-tuning.")
-    else:
-        print(f"\nNo synthetic data at {SYNTH_PATH} — skipping pre-training.")
-        print("Run: python generate_synthetic_training.py data_2.csv")
-
-    # --- Phase 2: Leave-one-out fine-tuning ---
+    # --- Leave-one-out fine-tuning ---
     # With only 10 reactors a random 70/30 split gives 3 val samples whose
     # R2 is dominated by which reactors happen to land there. LOO uses every
     # reactor as the held-out test once, averaging results across all 10 folds
