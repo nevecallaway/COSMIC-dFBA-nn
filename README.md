@@ -30,7 +30,7 @@ The primary prediction goal is transition timing for root cause analysis (RCA): 
 | Symbol | Value | Meaning |
 |--------|-------|---------|
 | B | 4 (train) / 1 (val) | Batch size |
-| T | 40 | Time points per reactor |
+| T | 13 | Time points per reactor (one per day, day 0-12) |
 | C | 25 | Metabolite components |
 | n_params | 75 | DoE (3) + specific rates (50) + FBA efficiencies (22) |
 | latent_dim | 64 | Latent state dimension |
@@ -171,10 +171,10 @@ OUTPUTS (dict)
 ```
 TRAINING DATA: 9 reactors per fold, batch_size=4
   ic:      (4, 25)      initial conditions (normalized)
-  time:    (4, 40)      normalized time [0, 1]
+  time:    (4, 13)      normalized time [0, 1]
   params:  (4, 75)      DoE levels + rates + FBA efficiencies
   target:  (4, 40, 25)  ground truth concentration trajectories
-  phases:  (4, 40)      ground truth f(t) phase fraction
+  phases:  (4, 13)      ground truth f(t) phase fraction
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -191,7 +191,7 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
 │  LOSS COMPUTATION  (Trainer.compute_loss)                   │
 │                                                             │
 │  1. Concentration MSE (titer col gets 5x weight)            │
-│     IN:  concentrations (4,40,25) vs target (4,40,25)       │
+│     IN:  concentrations (4,13,25) vs target (4,13,25)       │
 │                                                             │
 │  2. Endpoint titer loss (weight 2.0)                        │
 │     IN:  concentrations[:,−1,5] vs target[:,−1,5]           │
@@ -209,7 +209,7 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
 │     penalizes concentrations < 0                            │
 │                                                             │
 │  7. Phase regression MSE (weight 3.0)                       │
-│     IN:  phase_weights (4,40,1) vs phases (4,40)            │
+│     IN:  phase_weights (4,13,1) vs phases (4,40)            │
 │                                                             │
 │  8. Rate + phase smoothness (weights 0.1 / 0.05)            │
 │     penalizes large step-to-step changes in rates and f(t)  │
@@ -264,6 +264,12 @@ python nn/train.py --shuffle
 
 # Train without data_3 specific rates (ablation)
 python nn/train.py --no-rates
+
+# Train without data_4 FBA efficiencies (ablation)
+python nn/train.py --no-fba
+
+# Train with only DoE coded levels as inputs (n_params=3)
+python nn/train.py --no-rates --no-fba
 
 # Evaluate saved model
 python nn/evaluate.py
