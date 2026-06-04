@@ -182,6 +182,9 @@ class DifferentiableIntegrator(nn.Module):
     IDX_TITER     = 5              # Antibody titer
     IDX_AAS_START = 6              # Glutamine ... Tryptophan (19 components)
     F_NORM        = 13.0           # F=1 d⁻¹ × 13 days (normalised-time perfusion rate)
+    F_TITER       = 1.0            # Effective washout rate for titer (physical units, not
+                                   # normalised): keeps denominator ~1.08/step so learned
+                                   # production rates can compensate the washout.
     DAY8_NORM     = 8.0 / 13.0    # titer washout activates at day 8
 
     def forward(self, initial_conditions, blended_rates, time_points, doe_params=None):
@@ -198,6 +201,12 @@ class DifferentiableIntegrator(nn.Module):
         titer_onehot = torch.zeros(C, device=device)
         if C > self.IDX_TITER:
             titer_onehot[self.IDX_TITER] = 1.0
+
+        # Per-column F: F_NORM for all metabolites, F_TITER for titer.
+        # c_in for titer is 0 (not in feed), so f_vec only affects the denominator.
+        f_vec = torch.full((C,), self.F_NORM, device=device)
+        if C > self.IDX_TITER:
+            f_vec[self.IDX_TITER] = self.F_TITER
 
         # Titer production rate is always ≥ 0 (cells can't un-produce antibody).
         # Use torch.cat to avoid in-place ops: the pattern clone()[...] = x.clamp()
@@ -239,8 +248,8 @@ class DifferentiableIntegrator(nn.Module):
             ], dim=-1)
 
             # Implicit Euler: stable for any F·dt
-            numerator   = c_prev + (v * coupling + self.F_NORM * c_in * eta_t) * dt
-            denominator = 1.0 + self.F_NORM * eta_t * dt
+            numerator   = c_prev + (v * coupling + f_vec * c_in * eta_t) * dt
+            denominator = 1.0 + f_vec * eta_t * dt
             concentrations.append(numerator / denominator)
 
         return torch.stack(concentrations, dim=1)      # (B, T, C)
