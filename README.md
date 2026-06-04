@@ -4,7 +4,7 @@ A PyTorch surrogate model for predicting bioreactor phase transitions and metabo
 
 The primary prediction goal is transition timing for root cause analysis (RCA): predicting when and how a cell line switches from growth phase to production phase, not just final titer. The loss is weighted accordingly, favoring phase transition accuracy over titer. The phase prediction head explicitly outputs two interpretable parameters per reactor: mu (transition midpoint in days) and sigma (transition sharpness in days). Evaluation includes phase AUC, which captures both timing and sharpness of the transition in a single number, alongside transition MAE and standard classification metrics.
 
-**Latest LOO results (FC model, DoE-only inputs):** f(t) accuracy +/-0.1: 85.4% (paper: 72.3%) | MCC: 0.878 (paper: 0.454) | Transition MAE: 1.37 days | Phase AUC MAE: 0.35 days
+**Latest LOO results (FC model, DoE-only inputs, seed=42):** f(t) accuracy +/-0.1: 83.8% (paper: 72.3%) | MCC: 0.906 (paper: 0.454) | Transition MAE: 1.40d | Phase AUC MAE: 0.33d | Shuffled baseline: 2.32d
 
 LSTM variant (same inputs, time-varying rates): LOO MAE 1.46d, f(t) 80.0% -- worse on all metrics. Constant-rate FC is the final model.
 
