@@ -172,10 +172,10 @@ class DifferentiableIntegrator(nn.Module):
       • cols 6-24 (amino acids)   ← DoE AAs  (doe_params[:, 1])
       • all other metabolites     ← C_i_in = 0  (not in perfusion feed)
 
-    Implicit Euler is used for the washout so the scheme is unconditionally
-    stable regardless of F·dt:
-        c_next = (c_prev + (v·coupling + F·C_in·eta)·dt) / (1 + F·eta·dt)
-    For cells and titer-before-day8 eta = 0, denominator = 1 → explicit Euler.
+    Explicit Euler (forward difference), matching COSMIC-dFBA:
+        dc/dt  = v · coupling + F · (C_in - c_prev) · eta
+        c_next = c_prev + dc/dt · dt
+    For cells and titer-before-day8 eta = 0, washout term drops out.
     """
     N_CELL_COLS   = 2              # Cell Density (0), Cell Volume (1)
     IDX_GLUCOSE   = 2              # Glucose
@@ -247,10 +247,11 @@ class DifferentiableIntegrator(nn.Module):
                 c1.expand(-1, C - self.N_CELL_COLS),
             ], dim=-1)
 
-            # Implicit Euler: stable for any F·dt
-            numerator   = c_prev + (v * coupling + f_vec * c_in * eta_t) * dt
-            denominator = 1.0 + f_vec * eta_t * dt
-            concentrations.append(numerator / denominator)
+            # Explicit Euler (forward difference, per COSMIC-dFBA):
+            #   dc/dt = v * coupling + F * (c_in - c_prev) * eta
+            #   c_next = c_prev + dc/dt * dt
+            dc_dt = v * coupling + f_vec * (c_in - c_prev) * eta_t
+            concentrations.append(c_prev + dc_dt * dt)
 
         return torch.stack(concentrations, dim=1)      # (B, T, C)
 

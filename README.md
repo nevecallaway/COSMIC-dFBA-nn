@@ -109,7 +109,7 @@ flowchart TD
 
     subgraph ODE["DifferentiableIntegrator  (Implicit Euler, paper Eq. 2)"]
         direction TB
-        IE["c_next = (c_prev + (v·C1 + F·c_in·η)·dt) / (1 + F·η·dt)\n\nη = 0: cells (idx 0-1) always\nη = 0→1 at day 8: titer (idx 5)\nη = 1: all other metabolites\nF_NORM = 13.0,  F_TITER = 1.0"]
+        IE["dc/dt = v·C1 + F·(c_in − c_prev)·η\nc_next = c_prev + dc/dt · dt\n\nη = 0: cells (idx 0-1) always\nη = 0→1 at day 8: titer (idx 5)\nη = 1: all other metabolites\nF_NORM = 13.0,  F_TITER = 1.0"]
     end
     IC & BL & TP & DOE --> IE
 
