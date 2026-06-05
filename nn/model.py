@@ -117,8 +117,12 @@ class DynamicsEncoder(nn.Module):
     def __init__(self, n_components, n_params, latent_dim=32):
         super().__init__()
         input_size = n_components + n_params
+        # Sigmoid saturation: analogous to Briggs-Haldane / Michaelis-Menten kinetics.
+        # The preceding linear layer's weights act as v_max; sigmoid bounds the
+        # hidden activation to (0, 1), enforcing a biologically plausible saturation
+        # ceiling (any rate must lie between 0 and v_max).
         self.fc = nn.Sequential(
-            nn.Linear(input_size, 64), nn.ReLU(),
+            nn.Linear(input_size, 64), nn.Sigmoid(),
             nn.Linear(64, latent_dim),
         )
         self.latent_dim = latent_dim
