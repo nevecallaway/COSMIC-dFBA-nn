@@ -67,76 +67,56 @@ The architecture was deliberately kept minimal. With 10 reactors and 3 DoE input
 
 Earlier iterations used an LSTM or transformer to predict time-varying rate tensors `(B, T, 25)` and ran the ODE twice (once growth-only to inform the phase head, once blended). Ablations showed this added complexity without improving LOO performance. The current design predicts constant rates per phase -- biologically appropriate since dFBA rates are phase-constant -- and runs a single ODE pass.
 
-```
-INPUTS
-  initial_conditions  (B, 25)   normalized concentrations at t=0
-  time_points         (B, T)    normalized time in [0, 1]  (actual days / 13)
-  parameters          (B, 3)    DoE coded levels: O2, AAs, Glc
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  DynamicsEncoder                          (model.py)        │
-│                                                             │
-│  IN:  cat([initial_conditions, parameters])  →  (B, 28)    │
-│  FC1: Linear(28, 64) + ReLU                                 │
-│  FC2: Linear(64, 32)                                        │
-│  OUT: latent_state                           →  (B, 32)     │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Rate heads                               (model.py)        │
-│                                                             │
-│  amp          = Softplus(Linear(32, 25))     →  (B, 25)    │
-│  growth_rates = Tanh(Linear(32, 25)) * amp   →  (B, 25)    │
-│  prod_rates   = Tanh(Linear(32, 25)) * amp   →  (B, 25)    │
-│                                                             │
-│  Rates are constant per reactor per phase (no LSTM/time     │
-│  embedding). Expanded to (B, T, 25) for the integrator.    │
-│  Amplitude separates magnitude from direction.              │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  PhaseTransitionHead                      (model.py)        │
-│                                                             │
-│  IN:  latent_state  (B, 32)                                 │
-│  raw   = Linear(32, 2)                       →  (B, 2)     │
-│    mu    = sigmoid(raw[:,0])  in (0,1)   transition midpoint│
-│    sigma = softplus(raw[:,1]) > 0        transition width   │
-│                                                             │
-│  f(t) = sigmoid((time - mu) / sigma)        →  (B, T, 1)  │
-│  OUT: phase_weights  in [0,1]               →  (B, T, 1)  │
-│    0 = pure growth phase, 1 = pure production phase         │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  DifferentiableIntegrator                 (model.py)        │
-│                                                             │
-│  blended_rates = (1 - f(t)) * growth_rates                  │
-│                +       f(t)  * prod_rates    →  (B, T, 25) │
-│                                                             │
-│  Implicit Euler ODE per timestep:                           │
-│    cells (idx 0-1):  c_next = c_prev + v * c_prev * dt     │
-│    metabolites:      c_next = (c_prev + (v*c1 + F*c_in)*dt)│
-│                               / (1 + F*dt)                  │
-│    F_NORM = 13.0  (perfusion rate in normalised time)       │
-│    eta: 0 for cells always; 0 for titer before day 8,       │
-│         1 for titer from day 8 onward; 1 for all others     │
-│    c_in built from DoE coded levels (feed concentrations)   │
-│                                                             │
-│  OUT: concentrations        (B, T, 25)                      │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-OUTPUTS (dict)
-  concentrations  (B, T, 25)   predicted state variable trajectories
-  phase_weights   (B, T, 1)    f(t): phase fraction at each timepoint
-  growth_rates    (B, T, 25)   growth-phase rates (constant, expanded)
-  prod_rates      (B, T, 25)   production-phase rates (constant, expanded)
-  transition_mu   (B,)         normalised transition midpoint (x13 = days)
-  transition_sigma (B,)        normalised transition width (x13 = days)
+```mermaid
+flowchart TD
+    IC["initial_conditions (B, 25)\nnormalized concentrations at t=0"]
+    TP["time_points (B, T)\nnormalized time in 0..1"]
+    DOE["parameters (B, 3)\nDoE coded levels: O2, AAs, Glc"]
+
+    IC & DOE --> CAT["cat(IC, params) → (B, 28)"]
+
+    subgraph ENC["DynamicsEncoder"]
+        direction TB
+        E1["Linear(28→64) + ReLU"]
+        E2["Linear(64→32)"]
+        E1 --> E2
+    end
+    CAT --> E1
+    E2 --> LAT["latent (B, 32)"]
+
+    subgraph RH["Rate Heads"]
+        direction TB
+        AMP["amplitude: Linear(32→25) + Softplus → (B, 25)"]
+        GR["growth_head: Linear(32→25) + Tanh × amp → (B, T, 25)"]
+        PR["prod_head:   Linear(32→25) + Tanh × amp → (B, T, 25)"]
+        AMP --> GR & PR
+    end
+    LAT --> AMP & GR & PR
+
+    subgraph PT["PhaseTransitionHead"]
+        direction TB
+        PL["Linear(32→2)"]
+        MU["mu = sigmoid(raw[:,0])  →  (B,)  transition midpoint"]
+        SIG["sigma = softplus(raw[:,1])  →  (B,)  transition width"]
+        FT["f(t) = sigmoid((t − mu) / sigma)  →  (B, T, 1)"]
+        PL --> MU & SIG
+        MU & SIG --> FT
+    end
+    LAT --> PL
+    TP --> FT
+
+    GR & PR & FT --> BL["blended_rates = (1−f)·growth + f·prod  →  (B, T, 25)"]
+
+    subgraph ODE["DifferentiableIntegrator  (Implicit Euler, paper Eq. 2)"]
+        direction TB
+        IE["c_next = (c_prev + (v·C1 + F·c_in·η)·dt) / (1 + F·η·dt)\n\nη = 0: cells (idx 0-1) always\nη = 0→1 at day 8: titer (idx 5)\nη = 1: all other metabolites\nF_NORM = 13.0,  F_TITER = 1.0"]
+    end
+    IC & BL & TP & DOE --> IE
+
+    IE --> CONC["concentrations (B, T, 25)"]
+    FT --> PW["phase_weights (B, T, 1)"]
+    MU --> TMU["transition_mu (B,)  ×13 = days"]
+    SIG --> TSIG["transition_sigma (B,)  ×13 = days"]
 ```
 
 ---
