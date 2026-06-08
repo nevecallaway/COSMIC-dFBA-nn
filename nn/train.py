@@ -144,9 +144,11 @@ class Trainer:
             phase_target = phases_batch.unsqueeze(-1)   # (batch, time, 1)
             phase_loss = 5.0 * nn.functional.mse_loss(phase_pred, phase_target)
 
-        # 7. PINN: Rate-based constraints
-        blended_rates = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
-        rate_smoothness = 0.1 * torch.mean((blended_rates[:, 1:, :] - blended_rates[:, :-1, :]) ** 2)
+        # 7. Rate magnitude -- L1 on constant per-phase rates (B, 25)
+        # Rate smoothness removed: rates are constant per phase so step-to-step
+        # changes in blended_rates come entirely from f_t, already penalised by
+        # phase smoothness (term 8).
+        rate_smoothness = torch.tensor(0.0, device=targets.device)
         rate_magnitude = 0.01 * (torch.mean(torch.abs(growth_rates)) + torch.mean(torch.abs(prod_rates)))
 
         # 8. Phase smoothness (encourage gradual rather than jittery transitions)

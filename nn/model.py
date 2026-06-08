@@ -343,10 +343,10 @@ class CosmicNNSurrogate(nn.Module):
         phase_weights  = torch.stack(all_f, dim=1)   # (B, T, 1)
 
         return {
-            'concentrations': concentrations,
-            'phase_weights':  phase_weights,
-            'growth_rates':   growth.unsqueeze(1).expand(-1, T, -1),
-            'prod_rates':     prod.unsqueeze(1).expand(-1, T, -1),
+            'concentrations': concentrations,   # (B, T, C)
+            'phase_weights':  phase_weights,    # (B, T, 1)
+            'growth_rates':   growth,           # (B, C)
+            'prod_rates':     prod,             # (B, C)
         }
 
 
@@ -408,8 +408,8 @@ class CosmicNNSurrogateLSTM(nn.Module):
                 all_c.append(c)
 
         return {
-            'concentrations': torch.stack(all_c, dim=1),
-            'phase_weights':  torch.stack(all_f, dim=1),
-            'growth_rates':   growth_rates,
-            'prod_rates':     prod_rates,
+            'concentrations': torch.stack(all_c, dim=1),   # (B, T, C)
+            'phase_weights':  torch.stack(all_f, dim=1),   # (B, T, 1)
+            'growth_rates':   growth_rates,                 # (B, T, C)
+            'prod_rates':     prod_rates,                   # (B, T, C)
         }
