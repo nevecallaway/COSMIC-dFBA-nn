@@ -130,24 +130,21 @@ class DynamicsEncoder(nn.Module):
 
 class PhaseTransitionHead(nn.Module):
     """
-    Phase probability from current concentrations -- no time input.
+    Sigmoid phase transition: f(t) = sigmoid((t - mu) / sigma).
 
-    f_t = sigmoid(W · c_t)
-
-    The cell's metabolic state drives the phase, not the clock.
-    A single linear layer keeps the head minimal and interpretable:
-    each weight tells you how much one component pushes toward production.
+    mu and sigma are predicted from the reactor's latent state, so the
+    transition timing is reactor-specific. Output f is (B, T, 1) in [0, 1].
     """
-    def __init__(self, n_components):
+    def __init__(self, latent_dim=32):
         super().__init__()
-        self.linear = nn.Linear(n_components, 1)
-        # Bias initialised negative so f starts near 0 (growth phase) by default.
-        # sigmoid(-5) = 0.007 -- model must learn concentration patterns that
-        # push f above 0.5 rather than fighting a random initialisation.
-        nn.init.constant_(self.linear.bias, -5.0)
+        self.head = nn.Linear(latent_dim, 2)
 
-    def forward(self, concentrations):
-        return torch.sigmoid(self.linear(concentrations))   # (B, 1)
+    def forward(self, latent_state, time_points):
+        raw   = self.head(latent_state)
+        mu    = torch.sigmoid(raw[:, 0])                              # (B,) in [0,1]
+        sigma = F.softplus(raw[:, 1]) + 0.01                         # (B,) > 0
+        f = torch.sigmoid((time_points - mu.unsqueeze(1)) / sigma.unsqueeze(1))
+        return f.unsqueeze(-1), mu, sigma                             # (B,T,1), (B,), (B,)
 
 
 
@@ -305,7 +302,7 @@ class CosmicNNSurrogate(nn.Module):
         self.prod_head   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
         self.register_buffer('v_max_growth', torch.ones(n_components))
         self.register_buffer('v_max_prod',   torch.ones(n_components))
-        self.phase_head   = PhaseTransitionHead(n_components)
+        self.phase_head   = PhaseTransitionHead(latent_dim)
         self.integrator   = DifferentiableIntegrator()
         self.n_components = n_components
         self.n_params     = n_params
@@ -329,28 +326,21 @@ class CosmicNNSurrogate(nn.Module):
                               prod[:, idx:idx+1].clamp(min=0),
                               prod[:, idx+1:]], dim=-1)
 
-        # Sequential: phase from concentrations, one integration step, repeat.
-        c    = initial_conditions
-        all_c = [c]
-        all_f = []
-        for t in range(T):
-            f_t = self.phase_head(c)                               # (B, 1)
-            all_f.append(f_t)
-            if t < T - 1:
-                v = (1 - f_t) * growth + f_t * prod               # (B, C)
-                c = self.integrator.step(c, v,
-                                         time_points[:, t], time_points[:, t + 1],
-                                         parameters)
-                all_c.append(c)
+        # Phase from latent + time (parallel over all T at once).
+        phase_weights, mu, sigma = self.phase_head(latent, time_points)   # (B,T,1)
 
-        concentrations = torch.stack(all_c, dim=1)   # (B, T, C)
-        phase_weights  = torch.stack(all_f, dim=1)   # (B, T, 1)
+        # Blend rates: expand constant (B,C) to (B,T,C) then mix.
+        blended = (1 - phase_weights) * growth.unsqueeze(1) + phase_weights * prod.unsqueeze(1)
+
+        concentrations = self.integrator(initial_conditions, blended, time_points, parameters)
 
         return {
-            'concentrations': concentrations,   # (B, T, C)
-            'phase_weights':  phase_weights,    # (B, T, 1)
-            'growth_rates':   growth,           # (B, C)
-            'prod_rates':     prod,             # (B, C)
+            'concentrations':   concentrations,   # (B, T, C)
+            'phase_weights':    phase_weights,    # (B, T, 1)
+            'growth_rates':     growth,           # (B, C)
+            'prod_rates':       prod,             # (B, C)
+            'transition_mu':    mu,               # (B,)
+            'transition_sigma': sigma,            # (B,)
         }
 
 
@@ -376,7 +366,7 @@ class CosmicNNSurrogateLSTM(nn.Module):
         self.prod_head   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
         self.register_buffer('v_max_growth', torch.ones(n_components))
         self.register_buffer('v_max_prod',   torch.ones(n_components))
-        self.phase_head   = PhaseTransitionHead(n_components)
+        self.phase_head   = PhaseTransitionHead(latent_dim)
         self.integrator   = DifferentiableIntegrator()
         self.n_components = n_components
         self.n_params     = n_params
@@ -397,23 +387,24 @@ class CosmicNNSurrogateLSTM(nn.Module):
         growth_rates = self.growth_head(lstm_out) * self.v_max_growth   # (B, T, C)
         prod_rates   = self.prod_head(lstm_out)   * self.v_max_prod     # (B, T, C)
 
-        # Sequential: phase from concentrations, one integration step, repeat.
-        c     = initial_conditions
-        all_c = [c]
-        all_f = []
-        for t in range(T):
-            f_t = self.phase_head(c)                                   # (B, 1)
-            all_f.append(f_t)
-            if t < T - 1:
-                v = (1 - f_t) * growth_rates[:, t, :] + f_t * prod_rates[:, t, :]
-                c = self.integrator.step(c, v,
-                                         time_points[:, t], time_points[:, t + 1],
-                                         parameters)
-                all_c.append(c)
+        # Clamp titer production rate >= 0.
+        if self.n_components > self.integrator.IDX_TITER:
+            idx = self.integrator.IDX_TITER
+            prod_rates = torch.cat([prod_rates[:, :, :idx],
+                                    prod_rates[:, :, idx:idx+1].clamp(min=0),
+                                    prod_rates[:, :, idx+1:]], dim=-1)
+
+        # Phase from latent + time (parallel over all T at once).
+        phase_weights, mu, sigma = self.phase_head(latent, time_points)   # (B,T,1)
+
+        blended = (1 - phase_weights) * growth_rates + phase_weights * prod_rates   # (B,T,C)
+        concentrations = self.integrator(initial_conditions, blended, time_points, parameters)
 
         return {
-            'concentrations': torch.stack(all_c, dim=1),   # (B, T, C)
-            'phase_weights':  torch.stack(all_f, dim=1),   # (B, T, 1)
-            'growth_rates':   growth_rates,                 # (B, T, C)
-            'prod_rates':     prod_rates,                   # (B, T, C)
+            'concentrations':   concentrations,   # (B, T, C)
+            'phase_weights':    phase_weights,    # (B, T, 1)
+            'growth_rates':     growth_rates,     # (B, T, C)
+            'prod_rates':       prod_rates,       # (B, T, C)
+            'transition_mu':    mu,               # (B,)
+            'transition_sigma': sigma,            # (B,)
         }
