@@ -141,6 +141,10 @@ class PhaseTransitionHead(nn.Module):
     def __init__(self, n_components):
         super().__init__()
         self.linear = nn.Linear(n_components, 1)
+        # Bias initialised negative so f starts near 0 (growth phase) by default.
+        # sigmoid(-5) = 0.007 -- model must learn concentration patterns that
+        # push f above 0.5 rather than fighting a random initialisation.
+        nn.init.constant_(self.linear.bias, -5.0)
 
     def forward(self, concentrations):
         return torch.sigmoid(self.linear(concentrations))   # (B, 1)
