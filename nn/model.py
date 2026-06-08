@@ -130,23 +130,20 @@ class DynamicsEncoder(nn.Module):
 
 class PhaseTransitionHead(nn.Module):
     """
-    Predicts f(t) = sigmoid((t - mu) / sigma) from the latent state alone.
+    Phase probability from current concentrations -- no time input.
 
-      mu   in (0,1): normalised transition midpoint (mu * 13 = transition day)
-      sigma > 0:     transition width -- small = sharp, large = gradual
+    f_t = sigmoid(W · c_t)
 
-    f(t) is monotone by construction and directly parameterises transition MAE.
+    The cell's metabolic state drives the phase, not the clock.
+    A single linear layer keeps the head minimal and interpretable:
+    each weight tells you how much one component pushes toward production.
     """
-    def __init__(self, latent_dim=32):
+    def __init__(self, n_components):
         super().__init__()
-        self.head = nn.Linear(latent_dim, 2)
+        self.linear = nn.Linear(n_components, 1)
 
-    def forward(self, latent_state, time_points):
-        raw   = self.head(latent_state)                                # (B, 2)
-        mu    = torch.sigmoid(raw[:, 0])                               # (B,) in (0, 1)
-        sigma = F.softplus(raw[:, 1]) + 0.01                          # (B,) > 0
-        f = torch.sigmoid((time_points - mu.unsqueeze(1)) / sigma.unsqueeze(1))
-        return f.unsqueeze(-1), mu, sigma                              # (B, T, 1), (B,), (B,)
+    def forward(self, concentrations):
+        return torch.sigmoid(self.linear(concentrations))   # (B, 1)
 
 
 
@@ -229,31 +226,59 @@ class DifferentiableIntegrator(nn.Module):
                 c_in[:, self.IDX_AAS_START:]                 = aas.expand(-1, n_aa)
 
         concentrations = [initial_conditions]
-
         for t in range(1, T):
-            c_prev = concentrations[t - 1]
-            v      = blended_rates[:, t - 1, :]
-            dt     = (time_points[:, t] - time_points[:, t - 1]).unsqueeze(-1)  # (B,1)
-
-            # eta: activate titer washout once t >= day 8 (normalised).
-            # titer_on: (B, 1) -- 1.0 after day 8, 0.0 before.
-            # eta_t: (B, C) via broadcasting -- adds 1 to titer column post day 8.
-            titer_on = (time_points[:, t] >= self.DAY8_NORM).float().unsqueeze(-1)  # (B, 1)
-            eta_t = eta_base + titer_on * titer_onehot  # (B, C)
-
-            c1 = c_prev[:, 0:1]
-            coupling = torch.cat([
-                c_prev[:, :self.N_CELL_COLS],
-                c1.expand(-1, C - self.N_CELL_COLS),
-            ], dim=-1)
-
-            # Explicit Euler (forward difference, per COSMIC-dFBA):
-            #   dc/dt = v * coupling + F * (c_in - c_prev) * eta
-            #   c_next = c_prev + dc/dt * dt
-            dc_dt = v * coupling + f_vec * (c_in - c_prev) * eta_t
-            concentrations.append(c_prev + dc_dt * dt)
-
+            concentrations.append(
+                self.step(concentrations[t-1], blended_rates[:, t-1, :],
+                          time_points[:, t-1], time_points[:, t],
+                          doe_params, eta_base, titer_onehot, f_vec, c_in))
         return torch.stack(concentrations, dim=1)      # (B, T, C)
+
+    def step(self, c_prev, v, t_prev, t_curr,
+             doe_params=None, eta_base=None, titer_onehot=None, f_vec=None, c_in=None):
+        """One explicit-Euler step.
+
+        Can be called standalone (from the model's sequential forward loop) or
+        from DifferentiableIntegrator.forward() with pre-computed constants.
+        When called standalone, all optional tensor args are recomputed from scratch.
+        """
+        B, C   = c_prev.shape
+        device = c_prev.device
+        dt     = (t_curr - t_prev).unsqueeze(-1)   # (B, 1)
+
+        if eta_base is None:
+            eta_base = torch.ones(C, device=device)
+            eta_base[:self.N_CELL_COLS] = 0.0
+            if C > self.IDX_TITER:
+                eta_base[self.IDX_TITER] = 0.0
+
+        if titer_onehot is None:
+            titer_onehot = torch.zeros(C, device=device)
+            if C > self.IDX_TITER:
+                titer_onehot[self.IDX_TITER] = 1.0
+
+        if f_vec is None:
+            f_vec = torch.full((C,), self.F_NORM, device=device)
+            if C > self.IDX_TITER:
+                f_vec[self.IDX_TITER] = self.F_TITER
+
+        if c_in is None:
+            c_in = torch.zeros(B, C, device=device)
+            if doe_params is not None and doe_params.shape[1] >= 3:
+                glc = (doe_params[:, 2:3] + 1.0) / 2.0
+                aas = (doe_params[:, 1:2] + 1.0) / 2.0
+                c_in[:, self.IDX_GLUCOSE:self.IDX_GLUCOSE + 1] = glc
+                n_aa = C - self.IDX_AAS_START
+                if n_aa > 0:
+                    c_in[:, self.IDX_AAS_START:] = aas.expand(-1, n_aa)
+
+        titer_on = (t_curr >= self.DAY8_NORM).float().unsqueeze(-1)   # (B, 1)
+        eta_t    = eta_base + titer_on * titer_onehot
+
+        c1       = c_prev[:, 0:1]
+        coupling = torch.cat([c_prev[:, :self.N_CELL_COLS],
+                               c1.expand(-1, C - self.N_CELL_COLS)], dim=-1)
+        dc_dt    = v * coupling + f_vec * (c_in - c_prev) * eta_t
+        return c_prev + dc_dt * dt
 
 
 class CosmicNNSurrogate(nn.Module):
@@ -276,8 +301,8 @@ class CosmicNNSurrogate(nn.Module):
         self.prod_head   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
         self.register_buffer('v_max_growth', torch.ones(n_components))
         self.register_buffer('v_max_prod',   torch.ones(n_components))
-        self.phase_head  = PhaseTransitionHead(latent_dim)
-        self.integrator  = DifferentiableIntegrator()
+        self.phase_head   = PhaseTransitionHead(n_components)
+        self.integrator   = DifferentiableIntegrator()
         self.n_components = n_components
         self.n_params     = n_params
 
@@ -290,22 +315,38 @@ class CosmicNNSurrogate(nn.Module):
         B, T = time_points.shape
         latent = self.encoder(initial_conditions, parameters)
 
-        growth_rates = self.growth_head(latent).unsqueeze(1).expand(-1, T, -1) * self.v_max_growth
-        prod_rates   = self.prod_head(latent).unsqueeze(1).expand(-1, T, -1)   * self.v_max_prod
+        growth = self.growth_head(latent) * self.v_max_growth   # (B, C)
+        prod   = self.prod_head(latent)   * self.v_max_prod     # (B, C)
 
-        phase_pred, mu, sigma = self.phase_head(latent, time_points)              # (B,T,1), (B,), (B,)
+        # Clamp titer production rate >= 0 (cells can't un-produce antibody).
+        if self.n_components > self.integrator.IDX_TITER:
+            idx = self.integrator.IDX_TITER
+            prod = torch.cat([prod[:, :idx],
+                              prod[:, idx:idx+1].clamp(min=0),
+                              prod[:, idx+1:]], dim=-1)
 
-        blended_rates  = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
-        concentrations = self.integrator(initial_conditions, blended_rates,
-                                         time_points, doe_params=parameters)
+        # Sequential: phase from concentrations, one integration step, repeat.
+        c    = initial_conditions
+        all_c = [c]
+        all_f = []
+        for t in range(T):
+            f_t = self.phase_head(c)                               # (B, 1)
+            all_f.append(f_t)
+            if t < T - 1:
+                v = (1 - f_t) * growth + f_t * prod               # (B, C)
+                c = self.integrator.step(c, v,
+                                         time_points[:, t], time_points[:, t + 1],
+                                         parameters)
+                all_c.append(c)
+
+        concentrations = torch.stack(all_c, dim=1)   # (B, T, C)
+        phase_weights  = torch.stack(all_f, dim=1)   # (B, T, 1)
 
         return {
-            'concentrations':   concentrations,   # (B, T, C)
-            'phase_weights':    phase_pred,        # (B, T, 1)
-            'growth_rates':     growth_rates,      # (B, T, C)
-            'prod_rates':       prod_rates,        # (B, T, C)
-            'transition_mu':    mu,                # (B,) normalised: mu * 13 = transition day
-            'transition_sigma': sigma,             # (B,) normalised: sigma * 13 = transition width
+            'concentrations': concentrations,
+            'phase_weights':  phase_weights,
+            'growth_rates':   growth.unsqueeze(1).expand(-1, T, -1),
+            'prod_rates':     prod.unsqueeze(1).expand(-1, T, -1),
         }
 
 
@@ -331,8 +372,8 @@ class CosmicNNSurrogateLSTM(nn.Module):
         self.prod_head   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
         self.register_buffer('v_max_growth', torch.ones(n_components))
         self.register_buffer('v_max_prod',   torch.ones(n_components))
-        self.phase_head  = PhaseTransitionHead(latent_dim)
-        self.integrator  = DifferentiableIntegrator()
+        self.phase_head   = PhaseTransitionHead(n_components)
+        self.integrator   = DifferentiableIntegrator()
         self.n_components = n_components
         self.n_params     = n_params
 
@@ -352,17 +393,23 @@ class CosmicNNSurrogateLSTM(nn.Module):
         growth_rates = self.growth_head(lstm_out) * self.v_max_growth   # (B, T, C)
         prod_rates   = self.prod_head(lstm_out)   * self.v_max_prod     # (B, T, C)
 
-        phase_pred, mu, sigma = self.phase_head(latent, time_points)
-
-        blended_rates  = (1 - phase_pred) * growth_rates + phase_pred * prod_rates
-        concentrations = self.integrator(initial_conditions, blended_rates,
-                                         time_points, doe_params=parameters)
+        # Sequential: phase from concentrations, one integration step, repeat.
+        c     = initial_conditions
+        all_c = [c]
+        all_f = []
+        for t in range(T):
+            f_t = self.phase_head(c)                                   # (B, 1)
+            all_f.append(f_t)
+            if t < T - 1:
+                v = (1 - f_t) * growth_rates[:, t, :] + f_t * prod_rates[:, t, :]
+                c = self.integrator.step(c, v,
+                                         time_points[:, t], time_points[:, t + 1],
+                                         parameters)
+                all_c.append(c)
 
         return {
-            'concentrations':   concentrations,
-            'phase_weights':    phase_pred,
-            'growth_rates':     growth_rates,
-            'prod_rates':       prod_rates,
-            'transition_mu':    mu,
-            'transition_sigma': sigma,
+            'concentrations': torch.stack(all_c, dim=1),
+            'phase_weights':  torch.stack(all_f, dim=1),
+            'growth_rates':   growth_rates,
+            'prod_rates':     prod_rates,
         }

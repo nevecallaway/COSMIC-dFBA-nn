@@ -2,7 +2,7 @@
 
 A PyTorch surrogate model for predicting bioreactor phase transitions and metabolite trajectories, trained on experimental dFBA data from 10 perfusion reactors.
 
-The primary prediction goal is transition timing for root cause analysis (RCA): predicting when and how a cell line switches from growth phase to production phase, not just final titer. The loss is weighted accordingly, favoring phase transition accuracy over titer. The phase prediction head explicitly outputs two interpretable parameters per reactor: mu (transition midpoint in days) and sigma (transition sharpness in days). Evaluation includes phase AUC, which captures both timing and sharpness of the transition in a single number, alongside transition MAE and standard classification metrics.
+The primary prediction goal is transition timing for root cause analysis (RCA): predicting when and how a cell line switches from growth phase to production phase, not just final titer. The loss is weighted accordingly, favoring phase transition accuracy over titer. Phase is predicted at each time step from the current concentration vector (not from time), so the model responds to the actual metabolic state of the reactor rather than the clock. Transition day is inferred as the first time step where predicted f(t) crosses 0.5. Evaluation includes phase AUC, transition MAE, and standard classification metrics.
 
 **Latest LOO results (FC model, DoE-only inputs, seed=42):** f(t) accuracy +/-0.1: 83.8% (paper: 72.3%) | MCC: 0.906 (paper: 0.454) | Transition MAE: 1.40d | Phase AUC MAE: 0.33d | Shuffled baseline: 2.32d
 
@@ -20,7 +20,7 @@ LSTM variant (same inputs, time-varying rates): LOO MAE 1.46d, f(t) 80.0% -- wor
 | `nn/utils.py` | Data loading, normalization, and diagnostic utilities |
 | `nn/data/data_1.csv` | DoE coded levels per reactor (O2, AAs, Glc: -1 / 0 / +1) -- model input |
 | `nn/data/data_2.csv` | State variable trajectories over time (25 components, 10 reactors) -- model target |
-| `nn/data/data_3.csv` | Phase-specific metabolic rates -- not used as model input (requires dFBA) |
+| `nn/data/data_3.csv` | Phase-specific metabolic rates -- used as v_max bounds on rate heads (not encoder input) |
 | `nn/data/data_4.csv` | FBA objective efficiencies -- not used as model input (requires dFBA) |
 
 ---
@@ -57,21 +57,26 @@ LSTM variant (same inputs, time-varying rates): LOO MAE 1.46d, f(t) 80.0% -- wor
 | 1 | AAs coded level (-1, 0, +1) |
 | 2 | Glc coded level (-1, 0, +1) |
 
-FBA-derived features (data_3 specific rates, data_4 efficiencies) were tested and dropped. They require running dFBA first, which defeats the purpose of a surrogate model. Ablation: removing them costs ~0.3d on LOO transition MAE (1.28d -> 1.60d).
+data_3 specific rates are used to set per-component v_max ceilings on the rate heads (cross-reactor mean of absolute rates per phase, normalised so the highest-activity component = 1.0). They are not encoder inputs -- the encoder still takes only IC and DoE. data_4 FBA objective efficiencies are not used.
 
 ---
 
 ## Model Architecture
 
-The architecture was deliberately kept minimal. With 10 reactors and 3 DoE inputs the problem is low-dimensional, so simpler generalizes better.
+The architecture is deliberately minimal. With 10 reactors and 3 DoE inputs the problem is low-dimensional, so simpler generalizes better.
 
-Earlier iterations used an LSTM or transformer to predict time-varying rate tensors `(B, T, 25)` and ran the ODE twice (once growth-only to inform the phase head, once blended). Ablations showed this added complexity without improving LOO performance. The current design predicts constant rates per phase -- biologically appropriate since dFBA rates are phase-constant -- and runs a single ODE pass.
+Key design decisions:
+- Rates are constant per phase (biologically appropriate -- dFBA rates are phase-constant), not time-varying.
+- Rate head magnitude is bounded by data_3 maxima (v_max buffers), not freely learned.
+- Phase is predicted from the current concentration vector at each time step, not from time. The metabolic state drives the transition, not the clock.
+- The forward pass is sequential: phase and integration alternate step by step.
 
 ```mermaid
 flowchart TD
     IC["initial_conditions (B, 25)\nnormalized concentrations at t=0"]
     TP["time_points (B, T)\nnormalized time in 0..1"]
     DOE["parameters (B, 3)\nDoE coded levels: O2, AAs, Glc"]
+    VM["v_max buffers (25 each)\nfrom data_3 cross-reactor mean\nnormalised: max component = 1.0"]
 
     IC & DOE --> CAT["cat(IC, params) → (B, 28)"]
 
@@ -84,39 +89,33 @@ flowchart TD
     CAT --> E1
     E2 --> LAT["latent (B, 32)"]
 
-    subgraph RH["Rate Heads"]
+    subgraph RH["Rate Heads  (constant per phase)"]
         direction TB
-        AMP["amplitude: Linear(32→25) + Softplus → (B, 25)"]
-        GR["growth_head: Linear(32→25) + Tanh × amp → (B, T, 25)"]
-        PR["prod_head:   Linear(32→25) + Tanh × amp → (B, T, 25)"]
-        AMP --> GR & PR
+        GR["growth_head: Linear(32→25) + Tanh"]
+        PR["prod_head:   Linear(32→25) + Tanh"]
     end
-    LAT --> AMP & GR & PR
+    LAT --> GR & PR
+    GR & VM --> GRV["growth × v_max_growth → (B, 25)"]
+    PR & VM --> PRV["prod × v_max_prod   → (B, 25)"]
 
-    subgraph PT["PhaseTransitionHead"]
+    subgraph LOOP["Sequential forward loop  (t = 0 .. T-1)"]
         direction TB
-        PL["Linear(32→2)"]
-        MU["mu = sigmoid(raw[:,0])  →  (B,)  transition midpoint"]
-        SIG["sigma = softplus(raw[:,1])  →  (B,)  transition width"]
-        FT["f(t) = sigmoid((t − mu) / sigma)  →  (B, T, 1)"]
-        PL --> MU & SIG
-        MU & SIG --> FT
+        PH["PhaseTransitionHead\nLinear(25→1) + Sigmoid\nf_t = sigmoid(W · c_t)  →  (B, 1)"]
+        BL["blend: v_t = (1−f_t)·growth + f_t·prod  →  (B, 25)"]
+        ST["integrator.step(c_t, v_t, t, t+1, DOE)\nexplicit Euler, paper Eq. 2\nc_{t+1} = c_t + dc/dt · dt"]
+        PH --> BL --> ST --> PH
     end
-    LAT --> PL
-    TP --> FT
+    IC --> LOOP
+    GRV & PRV --> LOOP
 
-    GR & PR & FT --> BL["blended_rates = (1−f)·growth + f·prod  →  (B, T, 25)"]
-
-    subgraph ODE["DifferentiableIntegrator  (Implicit Euler, paper Eq. 2)"]
+    subgraph ODE["integrator.step  (one step)"]
         direction TB
-        IE["dc/dt = v·C1 + F·(c_in − c_prev)·η\nc_next = c_prev + dc/dt · dt\n\nη = 0: cells (idx 0-1) always\nη = 0→1 at day 8: titer (idx 5)\nη = 1: all other metabolites\nF_NORM = 13.0,  F_TITER = 1.0"]
+        IE["dc/dt = v·C1 + F·(c_in − c_t)·η\n\nη = 0: cells (idx 0-1) always\nη = 0 before day 8, 1 after: titer (idx 5)\nη = 1: all other metabolites\nF_NORM = 13.0,  F_TITER = 1.0\nc_in from DoE coded levels"]
     end
-    IC & BL & TP & DOE --> IE
+    DOE --> ODE
 
-    IE --> CONC["concentrations (B, T, 25)"]
-    FT --> PW["phase_weights (B, T, 1)"]
-    MU --> TMU["transition_mu (B,)  ×13 = days"]
-    SIG --> TSIG["transition_sigma (B,)  ×13 = days"]
+    LOOP --> CONC["concentrations (B, T, 25)"]
+    LOOP --> PW["phase_weights (B, T, 1)\ntransition day inferred where f crosses 0.5"]
 ```
 
 ---
@@ -135,10 +134,11 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
 ┌─────────────────────────────────────────────────────────────┐
 │  FORWARD PASS                                               │
 │  predictions = model(ic, time, params)                      │
+│  Sequential loop: for each t, phase from c_t, then step     │
 │  OUT: concentrations  (4, 13, 25)                           │
 │       phase_weights   (4, 13, 1)                            │
-│       growth_rates    (4, 13, 25)                           │
-│       prod_rates      (4, 13, 25)                           │
+│       growth_rates    (4, 13, 25)  constant across T        │
+│       prod_rates      (4, 13, 25)  constant across T        │
 └─────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -189,7 +189,8 @@ TRAINING DATA: 9 reactors per fold, batch_size=4
 │  loss.backward()                                            │
 │  Computes gradients for all parameters:                     │
 │    encoder FC weights, rate head weights,                   │
-│    amplitude head, phase head, ODE is differentiable        │
+│    phase head (Linear 25→1), ODE is differentiable          │
+│    v_max buffers are fixed (not trained)                     │
 └─────────────────────────────────────────────────────────────┘
         │
         ▼
