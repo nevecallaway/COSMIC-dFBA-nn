@@ -20,7 +20,7 @@ import time
 # Import neural network architecture from model.py
 from model import CosmicNNSurrogate, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
 # Import data utilities and evaluation metrics from utils.py
-from utils import load_experimental_data, ModelDiagnostics
+from utils import load_experimental_data, load_specific_rates, ModelDiagnostics
 
 IDX_CELL_DENSITY = 0   # Cell Density -- primary RCA target (predicting decline)
 IDX_TITER        = 5   # Antibody titer
@@ -485,6 +485,7 @@ def main():
 
     script_dir  = Path(__file__).parent
     DATA_PATH   = script_dir / "data" / "data_2.csv"
+    DATA3_PATH  = script_dir / "data" / "data_3.csv"
     LATENT_DIM  = 32
     EPOCHS      = 400
     PATIENCE    = 80
@@ -524,6 +525,21 @@ def main():
             n_params=n_params,
             latent_dim=LATENT_DIM,
         )
+
+    # Ground rate heads in data_3 biological maxima.
+    # v_max_growth and v_max_prod are normalised (max component = 1.0) so the
+    # Tanh output in (-1, 1) maps to at most one unit of the highest-activity
+    # component.  Relative magnitudes between components are preserved from data_3.
+    try:
+        sr = load_specific_rates(str(DATA3_PATH))
+        v_max_growth = torch.FloatTensor(sr['v_max_growth'])
+        v_max_prod   = torch.FloatTensor(sr['v_max_prod'])
+        model.set_v_max(v_max_growth, v_max_prod)
+        print(f"  data_3 v_max loaded (scale={sr['v_max_scale']:.3f})")
+        print(f"  v_max_growth range: [{v_max_growth.min():.3f}, {v_max_growth.max():.3f}]")
+        print(f"  v_max_prod   range: [{v_max_prod.min():.3f},   {v_max_prod.max():.3f}]")
+    except FileNotFoundError:
+        print(f"  data_3 not found at {DATA3_PATH} -- rate heads use default v_max=1")
 
     # --- Leave-one-out fine-tuning ---
     # With only 10 reactors a random 70/30 split gives 3 val samples whose

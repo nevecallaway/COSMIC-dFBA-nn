@@ -117,12 +117,8 @@ class DynamicsEncoder(nn.Module):
     def __init__(self, n_components, n_params, latent_dim=32):
         super().__init__()
         input_size = n_components + n_params
-        # Sigmoid saturation: analogous to Briggs-Haldane / Michaelis-Menten kinetics.
-        # The preceding linear layer's weights act as v_max; sigmoid bounds the
-        # hidden activation to (0, 1), enforcing a biologically plausible saturation
-        # ceiling (any rate must lie between 0 and v_max).
         self.fc = nn.Sequential(
-            nn.Linear(input_size, 64), nn.Sigmoid(),
+            nn.Linear(input_size, 64), nn.ReLU(),
             nn.Linear(64, latent_dim),
         )
         self.latent_dim = latent_dim
@@ -273,22 +269,29 @@ class CosmicNNSurrogate(nn.Module):
     def __init__(self, n_components, n_params, latent_dim=32):
         super().__init__()
         self.encoder     = DynamicsEncoder(n_components, n_params, latent_dim)
-        # Amplitude scales Tanh output per component -- separates magnitude from direction.
-        self.amplitude   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Softplus())
+        # Rate heads: Tanh gives signed direction and fractional utilisation in (-1, 1).
+        # Scaled by v_max buffers (set from data_3) so rates are bounded by the
+        # phase-specific biological maxima.  Default = ones until set_v_max() is called.
         self.growth_head = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
         self.prod_head   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
+        self.register_buffer('v_max_growth', torch.ones(n_components))
+        self.register_buffer('v_max_prod',   torch.ones(n_components))
         self.phase_head  = PhaseTransitionHead(latent_dim)
         self.integrator  = DifferentiableIntegrator()
         self.n_components = n_components
         self.n_params     = n_params
 
+    def set_v_max(self, v_max_growth: torch.Tensor, v_max_prod: torch.Tensor) -> None:
+        """Set per-component rate ceilings from data_3 (normalised)."""
+        self.v_max_growth.copy_(v_max_growth)
+        self.v_max_prod.copy_(v_max_prod)
+
     def forward(self, initial_conditions, time_points, parameters):
         B, T = time_points.shape
         latent = self.encoder(initial_conditions, parameters)
 
-        amp          = self.amplitude(latent).unsqueeze(1)                        # (B, 1, C)
-        growth_rates = self.growth_head(latent).unsqueeze(1).expand(-1, T, -1) * amp  # (B, T, C)
-        prod_rates   = self.prod_head(latent).unsqueeze(1).expand(-1, T, -1) * amp    # (B, T, C)
+        growth_rates = self.growth_head(latent).unsqueeze(1).expand(-1, T, -1) * self.v_max_growth
+        prod_rates   = self.prod_head(latent).unsqueeze(1).expand(-1, T, -1)   * self.v_max_prod
 
         phase_pred, mu, sigma = self.phase_head(latent, time_points)              # (B,T,1), (B,), (B,)
 
@@ -324,13 +327,19 @@ class CosmicNNSurrogateLSTM(nn.Module):
         self.c0_proj     = nn.Linear(latent_dim, latent_dim)
         self.lstm        = nn.LSTM(input_size=1, hidden_size=latent_dim,
                                    num_layers=1, batch_first=True)
-        self.amplitude   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Softplus())
         self.growth_head = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
         self.prod_head   = nn.Sequential(nn.Linear(latent_dim, n_components), nn.Tanh())
+        self.register_buffer('v_max_growth', torch.ones(n_components))
+        self.register_buffer('v_max_prod',   torch.ones(n_components))
         self.phase_head  = PhaseTransitionHead(latent_dim)
         self.integrator  = DifferentiableIntegrator()
         self.n_components = n_components
         self.n_params     = n_params
+
+    def set_v_max(self, v_max_growth: torch.Tensor, v_max_prod: torch.Tensor) -> None:
+        """Set per-component rate ceilings from data_3 (normalised)."""
+        self.v_max_growth.copy_(v_max_growth)
+        self.v_max_prod.copy_(v_max_prod)
 
     def forward(self, initial_conditions, time_points, parameters):
         B, T = time_points.shape
@@ -340,9 +349,8 @@ class CosmicNNSurrogateLSTM(nn.Module):
         c0 = self.c0_proj(latent).unsqueeze(0)
         lstm_out, _ = self.lstm(time_points.unsqueeze(-1), (h0, c0))  # (B, T, latent_dim)
 
-        amp          = self.amplitude(latent).unsqueeze(1)   # (B, 1, C)
-        growth_rates = self.growth_head(lstm_out) * amp      # (B, T, C)
-        prod_rates   = self.prod_head(lstm_out) * amp        # (B, T, C)
+        growth_rates = self.growth_head(lstm_out) * self.v_max_growth   # (B, T, C)
+        prod_rates   = self.prod_head(lstm_out)   * self.v_max_prod     # (B, T, C)
 
         phase_pred, mu, sigma = self.phase_head(latent, time_points)
 

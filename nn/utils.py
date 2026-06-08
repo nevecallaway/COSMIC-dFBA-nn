@@ -14,6 +14,72 @@ from sklearn.metrics import (f1_score, confusion_matrix, r2_score,
                              matthews_corrcoef)
 from scipy.stats import spearmanr
 
+def load_specific_rates(data3_file: str) -> Dict[str, np.ndarray]:
+    """
+    Load phase-specific metabolic rates from data_3.csv.
+
+    data_3.csv layout:
+      Row 0: phase headers (Growth Phase, ..., Production Phase, ...)
+      Row 1: reactor names (R0001 ... R0012)
+      Rows 2+: one row per metabolite component
+      Cols 0-1 : component name, unit
+      Cols 2-11: growth phase rates per reactor (10 reactors)
+      Cols 12-21: production phase rates per reactor
+
+    The values are phase-specific maxima from the dFBA model.  Actual rates
+    lie somewhere between 0 and these maxima.  We use their absolute values
+    to set per-component v_max ceilings on the rate heads.
+
+    Returns dict with:
+      'rates_growth'   : (n_reactors, n_components) -- physical units (see data_3 headers)
+      'rates_prod'     : (n_reactors, n_components)
+      'v_max_growth'   : (n_components,) -- cross-reactor mean |rate|, normalised
+      'v_max_prod'     : (n_components,) -- cross-reactor mean |rate|, normalised
+      'v_max_scale'    : float -- global divisor used for normalisation
+                         multiply normalised values by this to recover physical units
+      'reactors'       : list of reactor names in column order
+      'components'     : list of component names
+    """
+    df = pd.read_csv(data3_file, header=None)
+
+    reactors    = [str(df.iloc[1, c]).strip() for c in range(2, 12)]
+    components  = [str(df.iloc[r, 0]).strip() for r in range(2, len(df))]
+    n_reactors  = len(reactors)
+    n_components = len(components)
+
+    rates_growth = np.zeros((n_reactors, n_components))
+    rates_prod   = np.zeros((n_reactors, n_components))
+
+    for ci in range(n_components):
+        row = df.iloc[2 + ci]
+        for ri in range(n_reactors):
+            rates_growth[ri, ci] = float(row.iloc[2 + ri])
+            rates_prod[ri, ci]   = float(row.iloc[12 + ri])
+
+    # Cross-reactor mean of absolute rates per component per phase.
+    # Using the mean (not max) so outlier reactors don't dominate the ceiling.
+    v_max_growth = np.abs(rates_growth).mean(axis=0)   # (n_components,)
+    v_max_prod   = np.abs(rates_prod).mean(axis=0)
+
+    # Normalise by the single largest value across both phases so the
+    # highest-activity component gets v_max = 1.0 and all others scale
+    # proportionally.  The scale factor is stored so callers can convert
+    # back to physical units once a physical anchor is known.
+    global_scale = float(max(v_max_growth.max(), v_max_prod.max()))
+    v_max_growth_norm = v_max_growth / global_scale
+    v_max_prod_norm   = v_max_prod   / global_scale
+
+    return {
+        'rates_growth': rates_growth,
+        'rates_prod':   rates_prod,
+        'v_max_growth': v_max_growth_norm,
+        'v_max_prod':   v_max_prod_norm,
+        'v_max_scale':  global_scale,
+        'reactors':     reactors,
+        'components':   components,
+    }
+
+
 def load_doe_parameters(doe_file: str) -> Dict[str, np.ndarray]:
     """
     Load DoE variable levels from data_1.csv.
