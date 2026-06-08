@@ -101,13 +101,13 @@ class Trainer:
         growth_rates = predictions['growth_rates']
         prod_rates = predictions['prod_rates']
 
-        # 1. Weighted concentration MSE — titer gets 2x weight (reduced from 5x).
-        # Phase transition is the primary prediction target per RCA goals.
-        # Validated: reduced titer weight improved f(t) accuracy from 82.3% to 90.0%
-        # without meaningfully hurting transition MAE (1.285d to 1.283d).
-        comp_weights = torch.ones(targets.shape[-1], device=targets.device)
-        comp_weights[IDX_CELL_DENSITY] = 3.0  # primary RCA target: predict cell density decline
-        comp_weights[IDX_TITER]        = 2.0
+        # 1. Weighted concentration MSE.
+        # Primary targets: cell density (VCD, RCA signal) and titer (production outcome).
+        # All other components kept at low weight to keep ODE trajectories grounded
+        # without dominating the loss.
+        comp_weights = torch.full((targets.shape[-1],), 0.1, device=targets.device)
+        comp_weights[IDX_CELL_DENSITY] = 3.0   # primary RCA target
+        comp_weights[IDX_TITER]        = 2.0   # production outcome
         conc_loss = (((conc_pred - targets) ** 2) * comp_weights).mean()
 
         # 1a. Endpoint titer loss (reduced from 2.0 to 0.5)
