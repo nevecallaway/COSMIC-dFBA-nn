@@ -372,6 +372,10 @@ def generate_all(data_dir=None, output_file=None):
     doe_params   = np.array(doe_params)     # (n_reactors, 3)
     times_out    = np.tile(T_EVAL, (len(trajectories), 1))
 
+    units_list = (
+        ['1e6 cells/mL', 'nL/mL', 'mM', 'mM', 'mM', 'mg/mL'] + ['mM'] * 19
+    )
+
     np.savez(
         output_file,
         trajectories=trajectories,
@@ -380,15 +384,25 @@ def generate_all(data_dir=None, output_file=None):
         phases=phases_out,
         doe_params=doe_params,
         components=np.array(component_names, dtype=object),
-        units=np.array(
-            ['1e6 cells/mL', 'nL/mL', 'mM', 'mM', 'mM', 'mg/mL'] +
-            ['mM'] * 19, dtype=object
-        ),
+        units=np.array(units_list, dtype=object),
     )
-
     print(f'\nSaved {trajectories.shape[0]} reactors x {trajectories.shape[1]} '
           f'timepoints x {trajectories.shape[2]} components')
     print(f'Output: {output_file}')
+
+    # Excel export -- one sheet per reactor
+    xlsx_file = Path(str(output_file).replace('.npz', '.xlsx'))
+    col_names = [f'{c} ({u})' for c, u in zip(component_names, units_list)]
+    with pd.ExcelWriter(xlsx_file, engine='openpyxl') as writer:
+        for i, reactor in enumerate(reactor_ids):
+            df = pd.DataFrame(trajectories[i], columns=col_names)
+            df.insert(0, 'Day',  np.arange(len(df)))
+            df.insert(1, 'O2',   doe_params[i, 0])
+            df.insert(2, 'AAs',  doe_params[i, 1])
+            df.insert(3, 'Glc',  doe_params[i, 2])
+            df.to_excel(writer, sheet_name=reactor, index=False)
+    print(f'Output: {xlsx_file}')
+
     print('\nNominal IC (t=0) used for all reactors:')
     for i, (name, val) in enumerate(zip(component_names, C_NOMINAL)):
         print(f'  [{i:2d}] {name:<20} {val:.4f}')
