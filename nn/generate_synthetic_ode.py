@@ -257,8 +257,11 @@ def make_ode(v_growth, v_prod, pm_func, cin, eta_base):
 
         dC    = np.zeros(N_COMPONENTS)
         for i in range(N_COMPONENTS):
-            washout    = F * (cin[i] - eta[i] * C[i])
+            washout    = F * (cin[i] - eta[i] * max(C[i], 0.0))
             metabolic  = v[i] * C_D
+            # if metabolite is depleted, block further consumption
+            if C[i] <= 0.0 and metabolic < 0.0:
+                metabolic = 0.0
             dC[i]      = washout + metabolic
 
         return dC
