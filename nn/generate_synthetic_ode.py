@@ -412,5 +412,80 @@ def generate_all(data_dir=None, output_file=None):
     return trajectories, times_out, phases_out, doe_params, component_names
 
 
+def plot_comparison(trajectories, reactor_ids, component_names, data_dir=None):
+    """
+    Normalize synthetic trajectories the same way as data_2 (per-reactor
+    per-component divide by max) and overlay with the real normalized data.
+
+    Plots 5 key components. Saves comparison.png next to the script.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    if data_dir is None:
+        data_dir = Path(__file__).parent / 'data'
+
+    # Load real data (data_2): skip units row, overwrite columns
+    df2 = pd.read_csv(Path(data_dir) / 'data_2.csv', skiprows=1)
+    df2.columns = (
+        ['Vessel', 'Time', 'Phase'] +
+        ['C{}'.format(i) for i in range(N_COMPONENTS)]
+    )
+    df2['Time'] = pd.to_numeric(df2['Time'], errors='coerce')
+    df2 = df2.dropna(subset=['Time'])
+
+    plot_indices = [IDX_CD, IDX_GLC, IDX_LAC, IDX_TIT, IDX_GLN]
+    plot_labels  = ['Cell Density', 'Glucose', 'Lactate', 'Titer', 'Glutamine']
+
+    fig, axes = plt.subplots(1, len(plot_indices), figsize=(18, 4))
+    colors = plt.cm.tab10.colors
+
+    for ax, comp_idx, label in zip(axes, plot_indices, plot_labels):
+        for ri, reactor in enumerate(reactor_ids):
+            color = colors[ri % len(colors)]
+
+            # Synthetic: normalize by own max
+            syn = trajectories[ri, :, comp_idx].astype(float)
+            syn_max = syn.max()
+            syn_norm = syn / syn_max if syn_max > 0 else syn
+            ax.plot(T_EVAL, syn_norm, color=color, lw=1.8,
+                    label=reactor if comp_idx == IDX_CD else '')
+
+            # Real: already normalized in data_2
+            rdf = df2[df2['Vessel'] == reactor].sort_values('Time')
+            real_norm = rdf[f'C{comp_idx}'].values.astype(float)
+            real_days = rdf['Time'].values.astype(float)
+            ax.plot(real_days, real_norm, color=color, lw=1.8,
+                    linestyle='--', alpha=0.6)
+
+        ax.set_title(label)
+        ax.set_xlabel('Day')
+        ax.set_ylim(-0.05, 1.3)
+        ax.axhline(0, color='k', lw=0.5, ls=':')
+
+    axes[0].set_ylabel('Normalized concentration')
+    axes[0].legend(fontsize=7, ncol=2)
+
+    # Legend for line style
+    from matplotlib.lines import Line2D
+    fig.legend(
+        handles=[Line2D([0], [0], color='k', lw=1.8, label='Synthetic'),
+                 Line2D([0], [0], color='k', lw=1.8, ls='--', alpha=0.6,
+                        label='Real (data_2)')],
+        loc='upper right', fontsize=9
+    )
+
+    fig.suptitle('Synthetic vs Real -- normalized trajectories', y=1.02)
+    fig.tight_layout()
+
+    out = Path(__file__).parent / 'comparison.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    print(f'Comparison plot saved: {out}')
+
+
 if __name__ == '__main__':
-    generate_all()
+    trajs, times, phases, doe_params, component_names = generate_all()
+    reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
+                   'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
+    plot_comparison(trajs, reactor_ids, component_names)
