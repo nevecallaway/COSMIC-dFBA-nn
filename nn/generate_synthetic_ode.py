@@ -257,11 +257,8 @@ def make_ode(v_growth, v_prod, pm_func, cin, eta_base):
 
         dC    = np.zeros(N_COMPONENTS)
         for i in range(N_COMPONENTS):
-            washout    = F * (cin[i] - eta[i] * max(C[i], 0.0))
+            washout    = F * (cin[i] - eta[i] * C[i])
             metabolic  = v[i] * C_D
-            # if metabolite is depleted, block further consumption
-            if C[i] <= 0.0 and metabolic < 0.0:
-                metabolic = 0.0
             dC[i]      = washout + metabolic
 
         return dC
@@ -299,7 +296,9 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_func, doe,
     if not sol.success:
         print(f'  WARNING: solver failed for {reactor_id}: {sol.message}')
 
-    return sol.y.T, sol.t   # (N_DAYS, N_COMPONENTS), (N_DAYS,)
+    traj = sol.y.T                          # (N_DAYS, N_COMPONENTS)
+    traj = np.clip(traj, 0.0, None)         # concentrations cannot be negative
+    return traj, sol.t
 
 
 def generate_all(data_dir=None, output_file=None):
