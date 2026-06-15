@@ -2,66 +2,69 @@
 """
 Physics-based synthetic data generator for COSMIC-dFBA surrogate.
 
-Implements Supplementary Methods Equation 2 from Gopalakrishnan et al.:
+Implements the ODE system specified by Sarat (per-interval integration):
 
-    dC_i/dt = F * (Cin_i - eta_i * C_i) + v_i(t) * C_1        [Eq. 2]
+    dX/dt     = v_CD_net * X(t)                              [cell density]
+    dX_bm/dt  = v_bm_net * X_bm(t)                          [biomass/cell volume]
+    dC_tit/dt = v_tit_net * X(t) - eta * F * C_tit(t)       [titer]
+    dC_i/dt   = F * (C_i_in - C_i(t)) + v_i_net * X(t)      [all other metabolites]
 
-    v_i(t) = (1 - pm(t)) * v_growth_i + pm(t) * v_stat_i      [Eq. 1]
+    v_net = (1 - f) * v_growth + f * v_prod                  [phase blending]
 
-Inputs:
-    data_3.csv  -- growth and production phase specific rates per reactor
-    data_2.csv  -- phase fraction pm (column C) per reactor per day
-    data_1.csv  -- DoE coded levels per reactor (O2, AAs, Glc)
-    DMEM/F12    -- base media concentrations hardcoded below (mM)
-
-Output:
-    synthetic_ode.npz -- unnormalized trajectories in physical units
+Integration approach: 1-day intervals (day 0-1, 1-2, ..., 11-12).
+Within each interval:
+  - f = phase fraction at the END of the interval (from data_2)
+  - v_net is constant
+  - Final state of interval becomes IC for next interval
 
 Units:
-    Cell Density : 10^6 cells/mL
-    Cell Volume  : nL/mL (total biovolume concentration, see NOTE below)
-    Glucose, AAs : mM
-    Lactate, NH4 : mM
-    Titer        : mg/mL
+    Cell Density (X)   : E9 cells/L  (magnitude used directly; initial = 0.5)
+    Cell Volume (X_bm) : g_CDW/L     (350 pg/cell * 0.5E9 cells/L = 0.175 g/L)
+    Metabolites        : mmol/L
+    Titer              : mg/L
 
-NOTE on Cell Volume: initialized as total biovolume concentration (nL/mL).
-Calculation: d_mean = (14.02 + 15.21)/2 = 14.615 um (Harvard BioNumbers for
-CHO), V_cell = (4/3)*pi*(7.3075)^3 = 1634.5 um^3 = 1.6345e-6 nL/cell.
-At seeding density 0.5e6 cells/mL: C_V0 = 817.3 nL/mL.
-The v_V rate from data_3 (units 1/day) is treated as nL/(1e6 cells * day)
-so that v_V * C_D [1e6 cells/mL] = dC_V/dt [nL/mL/day]. Confirm with Sarat.
+Flux units (data_3, corrected per Sarat):
+    Cell Density : 1/day
+    Cell Volume  : 1/day
+    Metabolites  : mmol / (E9 cells * day)   -- NOTE: table header says E6, actual is E9
+    Titer        : mg / (E9 cells * day)
+
+eta for titer: 0 for t < 8, 1 for t >= 8 (temperature shift at day 8).
+Logistic cap on cell density: CD_MAX (E9 cells/L). Confirm value with Sarat.
 """
 
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from scipy.integrate import solve_ivp
-from scipy.interpolate import interp1d
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-F      = 1.0    # perfusion rate (bioreactor volumes per day)
-DAY8   = 8.0    # day when titer washout activates
-N_DAYS = 13     # total days (day 0 through day 12)
-T_EVAL = np.arange(0, N_DAYS, dtype=float)
+F       = 1.0    # perfusion rate (bioreactor volumes/day, confirmed from paper)
+DAY8    = 8      # temperature shift day; eta switches at start of this interval
+N_DAYS  = 13     # day 0 through day 12 (13 timepoints)
+T_EVAL  = np.arange(0, N_DAYS, dtype=float)
+CD_MAX  = 20.0   # logistic growth ceiling (E9 cells/L = 20e6 cells/mL); confirm with Sarat
+
+CDW_PER_CELL = 350e-12   # g / cell (cell dry weight, from Sarat)
 
 # ---------------------------------------------------------------------------
-# Component indices -- match data_2 / data_3 column order
+# Component indices -- match data_2 / data_3 row order
 # ---------------------------------------------------------------------------
-IDX_CD  = 0   # Cell Density   (10^6 cells/mL)
-IDX_CV  = 1   # Cell Volume    (dimensionless index)
-IDX_GLC = 2   # Glucose        (mM)
-IDX_LAC = 3   # Lactate        (mM)
-IDX_NH4 = 4   # NH4            (mM)
-IDX_TIT = 5   # Titer          (mg/mL)
+IDX_CD  = 0   # Cell Density
+IDX_CV  = 1   # Cell Volume (biomass)
+IDX_GLC = 2   # Glucose
+IDX_LAC = 3   # Lactate
+IDX_NH4 = 4   # NH4
+IDX_TIT = 5   # Titer
 IDX_GLN = 6   # Glutamine
-IDX_GLU = 7   # Glutamate      (secreted)
+IDX_GLU = 7   # Glutamate
 IDX_ASN = 8   # L-Asparagine
-IDX_ASP = 9   # L-Aspartic acid (secreted)
+IDX_ASP = 9   # L-Aspartic acid
 IDX_SER = 10  # L-Serine
-IDX_GLY = 11  # Glycine         (secreted)
-IDX_ALA = 12  # L-Alanine       (secreted)
+IDX_GLY = 11  # Glycine
+IDX_ALA = 12  # L-Alanine
 IDX_PRO = 13  # L-Proline
 IDX_THR = 14  # L-Threonine
 IDX_HIS = 15  # L-Histidine
@@ -76,53 +79,50 @@ IDX_PHE = 23  # L-Phenylalanine
 IDX_TRP = 24  # L-Tryptophan
 
 N_COMPONENTS = 25
-AAS_INDICES  = list(range(6, N_COMPONENTS))  # all amino acid columns
+AAS_INDICES  = list(range(6, N_COMPONENTS))
 
 # ---------------------------------------------------------------------------
-# DMEM/F12 base media -- nominal (DoE level 0) concentrations
-# Used as both IC and nominal Cin for the perfusion feed
+# Initial conditions and feed concentrations
+# Cell density : 0.5 E9 cells/L (Sarat anchor)
+# Cell volume  : 0.5E9 cells/L * 350e-12 g/cell = 0.175 g_CDW/L (< 10, per Sarat)
+# Metabolites  : DMEM/F12 nominal, mmol/L
+# Titer        : 0 (starts at 0)
 # ---------------------------------------------------------------------------
 C_NOMINAL = np.array([
-    0.5,     # Cell Density  (10^6 cells/mL, Sarat anchor)
-    817.3,   # Cell Volume   (nL/mL: 1634.5 um^3/cell * 0.5e6 cells/mL, see NOTE)
-    17.5,    # Glucose       (mM)
-    0.0,     # Lactate       (mM, starts at 0 per meeting notes)
-    0.0,     # NH4           (mM, starts at 0)
-    0.0,     # Titer         (mg/mL, starts at 0)
-    2.5,     # Glutamine     (mM)
-    0.05,    # Glutamate     (mM, secreted -- DMEM/F12 value)
-    0.05,    # L-Asparagine  (mM)
-    0.05,    # L-Aspartic acid (mM, secreted)
-    0.25,    # L-Serine      (mM)
-    0.25,    # Glycine       (mM, secreted)
-    0.05,    # L-Alanine     (mM, secreted)
-    0.15,    # L-Proline     (mM)
-    0.45,    # L-Threonine   (mM)
-    0.15,    # L-Histidine   (mM)
-    0.50,    # L-Lysine      (mM)
-    0.45,    # L-Valine      (mM)
-    0.12,    # L-Methionine  (mM)
-    0.70,    # L-Arginine    (mM)
-    0.20,    # L-Tyrosine    (mM)
-    0.42,    # L-Isoleucine  (mM)
-    0.45,    # L-Leucine     (mM)
-    0.21,    # L-Phenylalanine (mM)
-    0.044,   # L-Tryptophan  (mM)
+    0.5,     # Cell Density  (E9 cells/L)
+    0.175,   # Cell Volume   (g_CDW/L: 0.5E9 * 350e-12 g/cell)
+    17.5,    # Glucose       (mmol/L)
+    0.0,     # Lactate       (mmol/L)
+    0.0,     # NH4           (mmol/L)
+    0.0,     # Titer         (mg/L)
+    2.5,     # Glutamine     (mmol/L)
+    0.05,    # Glutamate     (mmol/L)
+    0.05,    # L-Asparagine  (mmol/L)
+    0.05,    # L-Aspartic acid (mmol/L)
+    0.25,    # L-Serine      (mmol/L)
+    0.25,    # Glycine       (mmol/L)
+    0.05,    # L-Alanine     (mmol/L)
+    0.15,    # L-Proline     (mmol/L)
+    0.45,    # L-Threonine   (mmol/L)
+    0.15,    # L-Histidine   (mmol/L)
+    0.50,    # L-Lysine      (mmol/L)
+    0.45,    # L-Valine      (mmol/L)
+    0.12,    # L-Methionine  (mmol/L)
+    0.70,    # L-Arginine    (mmol/L)
+    0.20,    # L-Tyrosine    (mmol/L)
+    0.42,    # L-Isoleucine  (mmol/L)
+    0.45,    # L-Leucine     (mmol/L)
+    0.21,    # L-Phenylalanine (mmol/L)
+    0.044,   # L-Tryptophan  (mmol/L)
 ], dtype=float)
 
-# Perfusion feed: same as nominal but no cells, no lactate, no NH4, no titer
+# Perfusion feed: no cells, no biomass, no lactate, no NH4, no titer
 CIN_NOMINAL = C_NOMINAL.copy()
 CIN_NOMINAL[IDX_CD]  = 0.0
 CIN_NOMINAL[IDX_CV]  = 0.0
 CIN_NOMINAL[IDX_LAC] = 0.0
 CIN_NOMINAL[IDX_NH4] = 0.0
 CIN_NOMINAL[IDX_TIT] = 0.0
-
-# eta base: 0 for cells and titer (before day 8), 1 for everything else
-ETA_BASE = np.ones(N_COMPONENTS)
-ETA_BASE[IDX_CD]  = 0.0
-ETA_BASE[IDX_CV]  = 0.0
-ETA_BASE[IDX_TIT] = 0.0   # updated to 1 after day 8 in the ODE
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +133,9 @@ def load_rates(data3_path):
     """
     Load growth and production phase specific rates from data_3.csv.
 
+    Flux units (corrected per Sarat): mmol / (E9 cells * day) for metabolites,
+    mg / (E9 cells * day) for titer, 1/day for cell density and volume.
+
     Returns:
         rates_growth : dict {reactor_id: np.array shape (N_COMPONENTS,)}
         rates_prod   : dict {reactor_id: np.array shape (N_COMPONENTS,)}
@@ -140,13 +143,12 @@ def load_rates(data3_path):
     """
     df = pd.read_csv(data3_path, header=None)
 
-    # Row 1 (index 1): header with reactor IDs starting at column 2
+    # Row index 1: reactor IDs in columns 2-11 (growth) and 12-21 (production)
     reactor_ids = [str(df.iloc[1, c]).strip() for c in range(2, 12)]
 
     rates_growth = {r: np.zeros(N_COMPONENTS) for r in reactor_ids}
     rates_prod   = {r: np.zeros(N_COMPONENTS) for r in reactor_ids}
 
-    # Rows 2+ are components in data_2 order
     for comp_idx in range(N_COMPONENTS):
         row = df.iloc[2 + comp_idx]
         for ri, reactor in enumerate(reactor_ids):
@@ -158,11 +160,13 @@ def load_rates(data3_path):
 
 def load_phase_fractions(data2_path):
     """
-    Load pm (production phase fraction) per reactor per day from data_2.csv.
+    Load production phase fraction (f) per reactor at each integer day from data_2.csv.
+
+    Per Sarat: use the value at the END of each interval as the constant f
+    for that interval. Returned as a lookup dict.
 
     Returns:
-        pm_dict : dict {reactor_id: np.array shape (N_DAYS,)}
-        days    : np.array shape (N_DAYS,)
+        pm_dict : dict {reactor_id: {day_int: float}}
     """
     df = pd.read_csv(data2_path, skiprows=1)
     df.columns = (
@@ -175,15 +179,12 @@ def load_phase_fractions(data2_path):
 
     pm_dict = {}
     for reactor in df['Vessel'].dropna().unique():
-        rdf  = df[df['Vessel'] == reactor].sort_values('Time')
-        days = rdf['Time'].values.astype(float)
-        pm   = rdf['Phase'].values.astype(float)
-        # Interpolator: linear, clamped to [0, 1] outside observed range
-        pm_dict[str(reactor)] = interp1d(
-            days, pm, kind='linear',
-            bounds_error=False,
-            fill_value=(pm[0], pm[-1])
-        )
+        rdf = df[df['Vessel'] == reactor].sort_values('Time')
+        by_day = {}
+        for _, row in rdf.iterrows():
+            day = int(round(float(row['Time'])))
+            by_day[day] = float(np.clip(row['Phase'], 0.0, 1.0))
+        pm_dict[str(reactor)] = by_day
 
     return pm_dict
 
@@ -193,7 +194,7 @@ def load_doe(data1_path):
     Load DoE coded levels (-1, 0, +1) per reactor from data_1.csv.
 
     Returns:
-        doe_dict : dict {reactor_id: {'O2': int, 'AAs': int, 'Glc': int}}
+        doe_dict : dict {reactor_id: {'O2': float, 'AAs': float, 'Glc': float}}
     """
     df = pd.read_csv(data1_path, skiprows=1)
     doe_dict = {}
@@ -213,100 +214,116 @@ def make_cin(doe):
     """
     Scale nominal Cin by DoE coded levels.
 
-    DoE convention (meeting notes):
-        level -1 -> half the nominal concentration
-        level  0 -> nominal
-        level +1 -> double the nominal concentration
-
-    DoE AAs factor applies to all amino acid indices (6-24).
-    DoE Glc factor applies to glucose index (2) only.
-    Cells, lactate, NH4, titer are not in the feed (already 0 in CIN_NOMINAL).
+    level -1 = 0.5x nominal, level 0 = nominal, level +1 = 2x nominal.
+    Applied to feed only (base media stays the same).
     """
     cin = CIN_NOMINAL.copy()
-
-    # Glucose scaling
-    glc_factor = 2.0 ** doe['Glc']   # -1 -> 0.5x, 0 -> 1x, +1 -> 2x
-    cin[IDX_GLC] *= glc_factor
-
-    # Amino acid scaling (all AAs including secreted)
-    aas_factor = 2.0 ** doe['AAs']
-    cin[AAS_INDICES] *= aas_factor
-
+    cin[IDX_GLC]      *= 2.0 ** doe['Glc']
+    cin[AAS_INDICES]  *= 2.0 ** doe['AAs']
     return cin
 
 
 # ---------------------------------------------------------------------------
-# ODE
+# Interval-based ODE integration
 # ---------------------------------------------------------------------------
 
-def make_ode(v_growth, v_prod, pm_func, cin, eta_base):
+def _make_interval_ode(v_net, eta_titer, cin):
     """
-    Return the ODE function for one reactor.
+    Build the ODE function for one 1-day interval with constant v_net and eta.
 
-    State vector C has shape (N_COMPONENTS,) in physical units.
+    Per Sarat's equations:
+        dX/dt     = v_CD * X * (1 - X/CD_MAX)        [logistic growth]
+        dX_bm/dt  = v_bm * X_bm
+        dC_tit/dt = v_tit * X - eta * F * C_tit
+        dC_i/dt   = F * (Cin_i - C_i) + v_i * X      [all other components]
     """
     def ode(t, C):
-        pm    = float(np.clip(pm_func(t), 0.0, 1.0))
-        v     = (1.0 - pm) * v_growth + pm * v_prod   # blended rates
+        X    = max(C[IDX_CD], 0.0)
+        dC   = np.zeros(N_COMPONENTS)
 
-        # eta: titer washout activates at day 8
-        eta      = eta_base.copy()
-        eta[IDX_TIT] = 1.0 if t >= DAY8 else 0.0
+        # Cell density with logistic cap
+        dC[IDX_CD] = v_net[IDX_CD] * X * max(1.0 - X / CD_MAX, 0.0)
 
-        C_D   = max(C[IDX_CD], 0.0)   # cell density, floor at 0
+        # Biomass
+        dC[IDX_CV] = v_net[IDX_CV] * C[IDX_CV]
 
-        dC    = np.zeros(N_COMPONENTS)
+        # Titer: production minus washout (washout only active after day 8)
+        dC[IDX_TIT] = v_net[IDX_TIT] * X - eta_titer * F * max(C[IDX_TIT], 0.0)
+
+        # All other metabolites
         for i in range(N_COMPONENTS):
-            washout    = F * (cin[i] - eta[i] * C[i])
-            metabolic  = v[i] * C_D
-            dC[i]      = washout + metabolic
+            if i in (IDX_CD, IDX_CV, IDX_TIT):
+                continue
+            dC[i] = F * (cin[i] - C[i]) + v_net[i] * X
 
         return dC
 
     return ode
 
 
+def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
+    """
+    Integrate the ODE interval by interval (1 day each) per Sarat's specification.
+
+    For interval [d, d+1]:
+      - f  = pm_by_day[d+1]  (phase fraction at end of interval)
+      - v_net = (1-f)*v_growth + f*v_prod  (constant within interval)
+      - eta_titer = 1 if d >= DAY8, else 0
+
+    Returns:
+        trajectory : np.array shape (N_DAYS, N_COMPONENTS)
+        times      : np.array shape (N_DAYS,)
+    """
+    cin        = make_cin(doe)
+    C          = C_NOMINAL.copy()
+    trajectory = [C.copy()]
+
+    n_intervals = N_DAYS - 1   # 12 intervals for days 0-12
+
+    # Fallback f if a day is missing from data_2
+    max_day    = max(pm_by_day.keys())
+    f_fallback = pm_by_day[max_day]
+
+    for d in range(n_intervals):
+        f       = pm_by_day.get(d + 1, f_fallback)
+        v_net   = (1.0 - f) * v_growth + f * v_prod
+        eta_t   = 1.0 if d >= DAY8 else 0.0
+
+        ode_fn  = _make_interval_ode(v_net, eta_t, cin)
+
+        sol = solve_ivp(
+            ode_fn,
+            t_span=(0.0, 1.0),
+            y0=C.copy(),
+            method='RK45',
+            t_eval=[1.0],
+            max_step=0.1,
+            rtol=1e-6,
+            atol=1e-8,
+        )
+
+        if not sol.success:
+            print(f'  WARNING: {reactor_id} interval [{d},{d+1}]: {sol.message}')
+            C_next = C.copy()
+        else:
+            C_next = sol.y[:, -1].copy()
+
+        C_next = np.clip(C_next, 0.0, None)
+        trajectory.append(C_next)
+        C = C_next
+
+    return np.array(trajectory), T_EVAL
+
+
 # ---------------------------------------------------------------------------
 # Main generation
 # ---------------------------------------------------------------------------
 
-def generate_reactor(reactor_id, v_growth, v_prod, pm_func, doe,
-                     t_eval=T_EVAL):
-    """
-    Integrate the ODE for one reactor and return the trajectory.
-
-    Returns:
-        trajectory : np.array shape (N_DAYS, N_COMPONENTS) in physical units
-        times      : np.array shape (N_DAYS,)
-    """
-    cin = make_cin(doe)
-    ode = make_ode(v_growth, v_prod, pm_func, cin, ETA_BASE.copy())
-
-    sol = solve_ivp(
-        ode,
-        t_span=(t_eval[0], t_eval[-1]),
-        y0=C_NOMINAL.copy(),
-        method='RK45',
-        t_eval=t_eval,
-        max_step=0.1,        # max 0.1 day step to handle stiffness
-        rtol=1e-6,
-        atol=1e-8,
-    )
-
-    if not sol.success:
-        print(f'  WARNING: solver failed for {reactor_id}: {sol.message}')
-
-    traj = sol.y.T                          # (N_DAYS, N_COMPONENTS)
-    traj = np.clip(traj, 0.0, None)         # concentrations cannot be negative
-    return traj, sol.t
-
-
 def generate_all(data_dir=None, output_file=None):
     """
-    Generate unnormalized trajectories for all 10 reactors using data_3
-    rates, data_2 phase fractions, and DMEM/F12 initial conditions.
+    Generate unnormalized trajectories for all 10 reactors.
 
-    This reproduces the structure of data_2 (Table 2) in physical units.
+    Outputs synthetic_ode.npz and synthetic_ode.xlsx in the same directory.
     Run by Sarat to verify before using for model training.
     """
     if data_dir is None:
@@ -327,10 +344,6 @@ def generate_all(data_dir=None, output_file=None):
     print('Loading data_1 DoE levels...')
     doe_dict = load_doe(data_dir / 'data_1.csv')
 
-    trajectories = []
-    phases_out   = []
-    doe_params   = []
-
     component_names = [
         'Cell Density', 'Cell Volume', 'Glucose', 'Lactate', 'NH4', 'Titer',
         'Glutamine', 'Glutamate', 'L-Asparagine', 'L-Aspartic acid',
@@ -339,12 +352,20 @@ def generate_all(data_dir=None, output_file=None):
         'L-Tyrosine', 'L-Isoleucine', 'L-Leucine', 'L-Phenylalanine',
         'L-Tryptophan',
     ]
+    units_list = (
+        ['E9 cells/L', 'g_CDW/L', 'mmol/L', 'mmol/L', 'mmol/L', 'mg/L'] +
+        ['mmol/L'] * 19
+    )
+
+    trajectories = []
+    phases_out   = []
+    doe_params   = []
 
     print('\nIntegrating ODEs...')
     for reactor in reactor_ids:
-        doe = doe_dict.get(reactor, {'O2': 0, 'AAs': 0, 'Glc': 0})
-        pm_func = pm_dict.get(reactor)
-        if pm_func is None:
+        doe      = doe_dict.get(reactor, {'O2': 0, 'AAs': 0, 'Glc': 0})
+        pm_days  = pm_dict.get(reactor)
+        if pm_days is None:
             print(f'  WARNING: no phase data for {reactor}, skipping')
             continue
 
@@ -352,31 +373,26 @@ def generate_all(data_dir=None, output_file=None):
             reactor,
             rates_growth[reactor],
             rates_prod[reactor],
-            pm_func,
+            pm_days,
             doe,
         )
 
-        # Phase fraction at eval points for reference
-        pm_vals = np.array([pm_func(t) for t in times])
+        pm_vals = np.array([pm_days.get(int(t), list(pm_days.values())[-1])
+                            for t in times])
 
         trajectories.append(traj)
         phases_out.append(pm_vals)
         doe_params.append([doe['O2'], doe['AAs'], doe['Glc']])
 
-        cd_final  = traj[-1, IDX_CD]
-        tit_final = traj[-1, IDX_TIT]
         print(f'  {reactor} (O2={doe["O2"]:+.0f} AAs={doe["AAs"]:+.0f} '
               f'Glc={doe["Glc"]:+.0f}):  '
-              f'CD_final={cd_final:.3f} Titer_final={tit_final:.4f}')
+              f'CD_final={traj[-1, IDX_CD]:.3f} E9/L  '
+              f'Titer_final={traj[-1, IDX_TIT]:.2f} mg/L')
 
-    trajectories = np.array(trajectories)   # (n_reactors, N_DAYS, N_COMPONENTS)
-    phases_out   = np.array(phases_out)     # (n_reactors, N_DAYS)
-    doe_params   = np.array(doe_params)     # (n_reactors, 3)
+    trajectories = np.array(trajectories)
+    phases_out   = np.array(phases_out)
+    doe_params   = np.array(doe_params)
     times_out    = np.tile(T_EVAL, (len(trajectories), 1))
-
-    units_list = (
-        ['1e6 cells/mL', 'nL/mL', 'mM', 'mM', 'mM', 'mg/mL'] + ['mM'] * 19
-    )
 
     np.savez(
         output_file,
@@ -388,8 +404,7 @@ def generate_all(data_dir=None, output_file=None):
         components=np.array(component_names, dtype=object),
         units=np.array(units_list, dtype=object),
     )
-    print(f'\nSaved {trajectories.shape[0]} reactors x {trajectories.shape[1]} '
-          f'timepoints x {trajectories.shape[2]} components')
+    print(f'\nSaved {trajectories.shape} array')
     print(f'Output: {output_file}')
 
     # Excel export -- one sheet per reactor
@@ -406,8 +421,8 @@ def generate_all(data_dir=None, output_file=None):
     print(f'Output: {xlsx_file}')
 
     print('\nNominal IC (t=0) used for all reactors:')
-    for i, (name, val) in enumerate(zip(component_names, C_NOMINAL)):
-        print(f'  [{i:2d}] {name:<20} {val:.4f}')
+    for i, (name, unit, val) in enumerate(zip(component_names, units_list, C_NOMINAL)):
+        print(f'  [{i:2d}] {name:<20} {val:.4f}  {unit}')
 
     return trajectories, times_out, phases_out, doe_params, component_names
 
@@ -426,7 +441,6 @@ def plot_comparison(trajectories, reactor_ids, component_names, data_dir=None):
     if data_dir is None:
         data_dir = Path(__file__).parent / 'data'
 
-    # Load real data (data_2): skip units row, overwrite columns
     df2 = pd.read_csv(Path(data_dir) / 'data_2.csv', skiprows=1)
     df2.columns = (
         ['Vessel', 'Time', 'Phase'] +
@@ -445,15 +459,13 @@ def plot_comparison(trajectories, reactor_ids, component_names, data_dir=None):
         for ri, reactor in enumerate(reactor_ids):
             color = colors[ri % len(colors)]
 
-            # Synthetic: normalize by own max
-            syn = trajectories[ri, :, comp_idx].astype(float)
+            syn     = trajectories[ri, :, comp_idx].astype(float)
             syn_max = syn.max()
             syn_norm = syn / syn_max if syn_max > 0 else syn
             ax.plot(T_EVAL, syn_norm, color=color, lw=1.8,
                     label=reactor if comp_idx == IDX_CD else '')
 
-            # Real: already normalized in data_2
-            rdf = df2[df2['Vessel'] == reactor].sort_values('Time')
+            rdf       = df2[df2['Vessel'] == reactor].sort_values('Time')
             real_norm = rdf[f'C{comp_idx}'].values.astype(float)
             real_days = rdf['Time'].values.astype(float)
             ax.plot(real_days, real_norm, color=color, lw=1.8,
@@ -467,7 +479,6 @@ def plot_comparison(trajectories, reactor_ids, component_names, data_dir=None):
     axes[0].set_ylabel('Normalized concentration')
     axes[0].legend(fontsize=7, ncol=2)
 
-    # Legend for line style
     from matplotlib.lines import Line2D
     fig.legend(
         handles=[Line2D([0], [0], color='k', lw=1.8, label='Synthetic'),
@@ -476,7 +487,7 @@ def plot_comparison(trajectories, reactor_ids, component_names, data_dir=None):
         loc='upper right', fontsize=9
     )
 
-    fig.suptitle('Synthetic vs Real -- normalized trajectories', y=1.02)
+    fig.suptitle('Synthetic vs Real: normalized trajectories', y=1.02)
     fig.tight_layout()
 
     out = Path(__file__).parent / 'comparison.png'
