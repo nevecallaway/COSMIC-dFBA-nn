@@ -331,40 +331,38 @@ class Trainer:
         return best_val_loss
 
 
-# def load_synthetic_data(npz_path, real_dataset):
-#     """
-#     Load synthetic .npz and apply real dataset's normalization stats.
-#     Both datasets must be in the same normalized space so pre-trained
-#     weights transfer directly to fine-tuning without a scale mismatch.
-#     If the .npz contains 'doe_params' (N, 3) these are passed through as
-#     process parameters so the pre-trained model learns to use them.
-#     """
-#     data = np.load(npz_path, allow_pickle=True)
-#     trajectories = data['trajectories'].copy()        # (N, T, C)
-#     times        = data['times']                      # (N, T)
-#     ics          = data['ics'].copy()                 # (N, C)
-#     phases       = data['phases']                     # (N, T)
-#
-#     # Apply real data's two-step normalization to synthetic data so both
-#     # datasets share the same scale.
-#     traj_norm = (trajectories - real_dataset.traj_min) / (real_dataset.traj_max - real_dataset.traj_min)
-#     trajectories = (traj_norm - real_dataset.traj_scale_min) / (real_dataset.traj_scale_max - real_dataset.traj_scale_min)
-#
-#     ic_norm = (ics - real_dataset.ic_min) / (real_dataset.ic_max - real_dataset.ic_min)
-#     ics = (ic_norm - real_dataset.ic_scale_min) / (real_dataset.ic_scale_max - real_dataset.ic_scale_min)
-#
-#     # Build parameters dict from stored DoE params + specific rates
-#     parameters = {}
-#     if 'doe_params' in data:
-#         dp = data['doe_params']       # (N, 3)
-#         parameters.update({'O2': dp[:, 0], 'AAs': dp[:, 1], 'Glc': dp[:, 2]})
-#     if 'specific_rates' in data:
-#         sr = data['specific_rates']   # (N, 50)
-# #         for k in range(sr.shape[1]):
-#             parameters[f'rate_{k}'] = sr[:, k]
-#
-#     return dFBADataset(trajectories, times, ics, parameters=parameters,
-#                        normalize=False, phases=phases)
+def load_synthetic_data(npz_path):
+    """
+    Load synthetic trajectories from synthetic_ode.npz and normalize
+    per-reactor per-component (divide by max), matching the normalization
+    already applied to the real data in data_2.csv.
+
+    Both datasets end up on the same [0, 1] scale per component so that
+    dFBADataset can treat them identically in the training loop.
+    """
+    data         = np.load(npz_path, allow_pickle=True)
+    trajectories = data['trajectories'].copy()   # (N, T, C)
+    times        = data['times'].copy()          # (N, T)
+    phases       = data['phases'].copy()         # (N, T)
+    doe_params   = data['doe_params'].copy()     # (N, 3)
+
+    # Per-reactor per-component normalization: same as data_2
+    trajs_norm = np.zeros_like(trajectories)
+    for i in range(trajectories.shape[0]):
+        for c in range(trajectories.shape[2]):
+            max_val = trajectories[i, :, c].max()
+            if max_val > 0:
+                trajs_norm[i, :, c] = trajectories[i, :, c] / max_val
+
+    ics        = trajs_norm[:, 0, :]
+    parameters = {
+        'O2':  doe_params[:, 0],
+        'AAs': doe_params[:, 1],
+        'Glc': doe_params[:, 2],
+    }
+
+    return dFBADataset(trajs_norm, times, ics, parameters=parameters,
+                       normalize=True, phases=phases)
 
 
 def load_data(data_path):
@@ -457,6 +455,9 @@ def main():
     parser = argparse.ArgumentParser()
     # parser.add_argument('--no-synthetic', action='store_true',
     #                     help='Skip pre-training on synthetic data, train on real data only')
+    parser.add_argument('--data', type=str, default='synthetic_ode.npz',
+                        metavar='NPZ',
+                        help='Path to synthetic_ode.npz (default: synthetic_ode.npz)')
     parser.add_argument('--shuffle', action='store_true',
                         help='Permutation baseline: shuffle inputs vs outputs before '
                              'training to establish chance-level performance')
@@ -471,7 +472,7 @@ def main():
     print("COSMIC-dFBA Unified Training")
     print(f"{'='*70}")
 
-    # USE_SYNTHETIC = not args.no_synthetic  # synthetic pre-training not currently in use
+    DATA_NPZ    = args.data
     USE_SHUFFLE = args.shuffle
     USE_LSTM    = args.lstm
 
@@ -486,17 +487,17 @@ def main():
     print(f"Random seed: {seed}")
 
     script_dir  = Path(__file__).parent
-    DATA_PATH   = script_dir / "data" / "data_2.csv"
     DATA3_PATH  = script_dir / "data" / "data_3.csv"
     LATENT_DIM  = 32
     EPOCHS      = 400
     PATIENCE    = 80
     FINETUNE_LR = 1e-4
 
+    print(f"Loading synthetic data: {DATA_NPZ}")
     try:
-        dataset = load_data(str(DATA_PATH))
+        dataset = load_synthetic_data(DATA_NPZ)
     except Exception as e:
-        print(f"Error loading data: {e}")
+        print(f"Error loading synthetic data: {e}")
         return
 
     if USE_SHUFFLE:
@@ -543,98 +544,82 @@ def main():
     except FileNotFoundError:
         print(f"  data_3 not found at {DATA3_PATH} -- rate heads use default v_max=1")
 
-    # --- Leave-one-out fine-tuning ---
-    # With only 10 reactors a random 70/30 split gives 3 val samples whose
-    # R2 is dominated by which reactors happen to land there. LOO uses every
-    # reactor as the held-out test once, averaging results across all 10 folds
-    # for a stable metric that isn't luck-of-the-draw.
-    print(f"\n{'='*70}")
-    print("Phase 2: Leave-one-out fine-tuning on real data")
-    print(f"{'='*70}")
-
-    n_reactors  = len(dataset)
-    loo_f1s       = []
-    loo_trans_mae = []   # transition time MAE per fold (days)
-    loo_mcc       = []
-    loo_spec      = []   # specificity per fold  (paper: 0.780)
-    loo_sens      = []   # sensitivity per fold  (paper: 0.681)
-    loo_within10  = []   # fraction of reactors with final titer within 10%
-    pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
-
-    start_time = time.time()
-    for fold in range(n_reactors):
-        # Reset to pre-trained weights for each fold
-        model.load_state_dict(pretrained_state)
-
-        val_indices   = [fold]
-        train_indices = [i for i in range(n_reactors) if i != fold]
-        fold_train = Subset(dataset, train_indices)
-        fold_val   = Subset(dataset, val_indices)
-
-        fold_train_loader = DataLoader(fold_train, batch_size=4, shuffle=True,  collate_fn=dfba_collate_fn)
-        fold_val_loader   = DataLoader(fold_val,   batch_size=1, shuffle=False, collate_fn=dfba_collate_fn)
-
-        fold_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced',
-                               scheduler_patience=15)
-        best_val = fold_trainer.train(fold_train_loader, fold_val_loader,
-                                      epochs=EPOCHS, patience=PATIENCE, verbose=False)
-        report = fold_trainer.validate(fold_val_loader)
-
-        f1        = report['phase_metrics']['phase_f1']               if 'phase_metrics' in report else float('nan')
-        mcc       = report['phase_metrics'].get('mcc', float('nan'))  if 'phase_metrics' in report else float('nan')
-        spec      = report['phase_metrics'].get('specificity', float('nan')) if 'phase_metrics' in report else float('nan')
-        sens      = report['phase_metrics'].get('sensitivity', float('nan')) if 'phase_metrics' in report else float('nan')
-        trans_mae = report['transition']['transition_mae_days']        if 'transition'    in report else float('nan')
-
-        # Compute within-10% final titer in original (denormalized) units
+    def _eval_reactor(report, ref_dataset):
+        """Extract per-reactor metrics from a validate() report."""
+        f1       = report['phase_metrics']['phase_f1']                    if 'phase_metrics' in report else float('nan')
+        mcc      = report['phase_metrics'].get('mcc', float('nan'))       if 'phase_metrics' in report else float('nan')
+        spec     = report['phase_metrics'].get('specificity', float('nan')) if 'phase_metrics' in report else float('nan')
+        sens     = report['phase_metrics'].get('sensitivity', float('nan')) if 'phase_metrics' in report else float('nan')
+        t_mae    = report['transition']['transition_mae_days']             if 'transition'    in report else float('nan')
         within10 = float('nan')
         if 'y_true' in report and 'y_pred' in report:
             y_t = report['y_true'][:, -1, IDX_TITER]
             y_p = report['y_pred'][:, -1, IDX_TITER]
             def _denorm(x):
-                x = x * (dataset.traj_scale_max[IDX_TITER] - dataset.traj_scale_min[IDX_TITER]) + dataset.traj_scale_min[IDX_TITER]
-                return x * (dataset.traj_max[IDX_TITER] - dataset.traj_min[IDX_TITER]) + dataset.traj_min[IDX_TITER]
+                x = x * (ref_dataset.traj_scale_max[IDX_TITER] - ref_dataset.traj_scale_min[IDX_TITER]) + ref_dataset.traj_scale_min[IDX_TITER]
+                return x * (ref_dataset.traj_max[IDX_TITER] - ref_dataset.traj_min[IDX_TITER]) + ref_dataset.traj_min[IDX_TITER]
             within10 = float(np.mean(np.abs(_denorm(y_p) - _denorm(y_t)) / (np.abs(_denorm(y_t)) + 1e-8) <= 0.10))
+        return f1, mcc, spec, sens, t_mae, within10
 
-        loo_f1s.append(f1)
-        loo_mcc.append(mcc)
-        loo_spec.append(spec)
-        loo_sens.append(sens)
-        loo_trans_mae.append(trans_mae)
-        loo_within10.append(within10)
-        trans_str    = f"{trans_mae:.2f}d"        if not np.isnan(trans_mae) else "n/a"
-        mcc_str      = f"{mcc:.3f}"               if not np.isnan(mcc)       else "n/a"
-        spec_str     = f"{spec:.3f}"              if not np.isnan(spec)      else "n/a"
-        sens_str     = f"{sens:.3f}"              if not np.isnan(sens)      else "n/a"
-        within10_str = f"{within10*100:.0f}%"     if not np.isnan(within10)  else "n/a"
-        print(f"  Fold {fold+1:2d}/10 (val=reactor {fold}): "
-              f"TransMAE={trans_str} | MCC={mcc_str} | F1={f1:.4f} | "
-              f"Spec={spec_str} | Sens={sens_str} | Within10%={within10_str}")
+    def _print_summary(loo_f1s, loo_mcc, loo_spec, loo_sens, loo_trans_mae, loo_within10, elapsed):
+        valid_within10 = [x for x in loo_within10 if not np.isnan(x)]
+        within10_count = sum(1 for x in valid_within10 if x > 0.5)
+        print(f"\n✓ Evaluation complete in {elapsed:.1f}s")
+        print(f"  Mean Transition MAE : {np.nanmean(loo_trans_mae):.2f} ± {np.nanstd(loo_trans_mae):.2f} days  (primary metric)")
+        print(f"  Mean MCC            : {np.nanmean(loo_mcc):.4f} ± {np.nanstd(loo_mcc):.4f}   (paper: 0.454)")
+        print(f"  Mean F1             : {np.nanmean(loo_f1s):.4f} ± {np.nanstd(loo_f1s):.4f}   (paper: 0.731)")
+        print(f"  Mean Specificity    : {np.nanmean(loo_spec):.4f} ± {np.nanstd(loo_spec):.4f}   (paper: 0.780)")
+        print(f"  Mean Sensitivity    : {np.nanmean(loo_sens):.4f} ± {np.nanstd(loo_sens):.4f}   (paper: 0.681)")
+        print(f"  Titer Within 10%    : {within10_count}/{len(valid_within10)} reactors  (paper: 10/10)")
+        return within10_count
+
+    n_reactors    = len(dataset)
+    loo_f1s       = []
+    loo_trans_mae = []
+    loo_mcc       = []
+    loo_spec      = []
+    loo_sens      = []
+    loo_within10  = []
+    pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
+    start_time = time.time()
+
+    # LOO cross-validation on synthetic data only.
+    # Train on 9 synthetic reactors, evaluate on the held-out 1, rotate all 10.
+    print(f"\n{'='*70}")
+    print("Leave-one-out cross-validation on synthetic data")
+    print(f"{'='*70}")
+    for fold in range(n_reactors):
+        model.load_state_dict(pretrained_state)
+        fold_train      = Subset(dataset, [i for i in range(n_reactors) if i != fold])
+        fold_val        = Subset(dataset, [fold])
+        fold_train_loader = DataLoader(fold_train, batch_size=4, shuffle=True,
+                                       collate_fn=dfba_collate_fn)
+        fold_val_loader   = DataLoader(fold_val,   batch_size=1, shuffle=False,
+                                       collate_fn=dfba_collate_fn)
+        fold_trainer = Trainer(model, device, learning_rate=FINETUNE_LR,
+                               model_type='enhanced', scheduler_patience=15)
+        fold_trainer.train(fold_train_loader, fold_val_loader,
+                           epochs=EPOCHS, patience=PATIENCE, verbose=False)
+        report = fold_trainer.validate(fold_val_loader)
+        f1, mcc, spec, sens, t_mae, within10 = _eval_reactor(report, dataset)
+        loo_f1s.append(f1); loo_mcc.append(mcc); loo_spec.append(spec)
+        loo_sens.append(sens); loo_trans_mae.append(t_mae); loo_within10.append(within10)
+        t_str = f"{t_mae:.2f}d" if not np.isnan(t_mae) else "n/a"
+        print(f"  Fold {fold+1:2d}/10: TransMAE={t_str} | MCC={mcc:.3f} | "
+              f"F1={f1:.4f} | Within10%={within10*100:.0f}%")
 
     elapsed = time.time() - start_time
-    valid_within10 = [x for x in loo_within10 if not np.isnan(x)]
-    within10_count = sum(1 for x in valid_within10 if x > 0.5)
-    print(f"\n✓ LOO complete in {elapsed:.1f}s")
-    print(f"  Mean Transition MAE : {np.nanmean(loo_trans_mae):.2f} ± {np.nanstd(loo_trans_mae):.2f} days  ← primary metric")
-    print(f"  Mean MCC            : {np.nanmean(loo_mcc):.4f} ± {np.nanstd(loo_mcc):.4f}   (paper: 0.454)")
-    print(f"  Mean F1             : {np.nanmean(loo_f1s):.4f} ± {np.nanstd(loo_f1s):.4f}   (paper: 0.731)")
-    print(f"  Mean Specificity    : {np.nanmean(loo_spec):.4f} ± {np.nanstd(loo_spec):.4f}   (paper: 0.780)")
-    print(f"  Mean Sensitivity    : {np.nanmean(loo_sens):.4f} ± {np.nanstd(loo_sens):.4f}   (paper: 0.681)")
-    print(f"  Titer Within 10%    : {within10_count}/{len(valid_within10)} reactors")
+    within10_count = _print_summary(loo_f1s, loo_mcc, loo_spec, loo_sens,
+                                    loo_trans_mae, loo_within10, elapsed)
 
-    # Save final model (re-trained on all 10 reactors)
-    model.load_state_dict(pretrained_state)
-    all_loader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=dfba_collate_fn)
-    final_trainer = Trainer(model, device, learning_rate=FINETUNE_LR, model_type='enhanced',
-                            scheduler_patience=15)
-    final_trainer.train(all_loader, all_loader, epochs=EPOCHS, patience=PATIENCE)
     torch.save({
         'model_state': model.state_dict(),
         'hyperparams': {
-            'arch': 'lstm' if USE_LSTM else 'fc',
-            'latent_dim': LATENT_DIM,
+            'arch':         'lstm' if USE_LSTM else 'fc',
+            'latent_dim':   LATENT_DIM,
             'n_components': dataset.n_components,
-            'n_params': dataset.n_params,
+            'n_params':     dataset.n_params,
+            'data':         DATA_NPZ,
         },
         'loo_mean_trans_mae':  float(np.nanmean(loo_trans_mae)),
         'loo_mean_mcc':        float(np.nanmean(loo_mcc)),

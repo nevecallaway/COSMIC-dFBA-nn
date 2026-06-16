@@ -3,16 +3,12 @@
 Local evaluation script for a trained COSMIC-dFBA surrogate model.
 
 Usage:
-    # 1. Copy the model from the cluster:
-    #    scp user@cluster:~/cosmic-dfba/improved_model.pt nn/
-    #
-    # 2. Run evaluation against local real data:
-    #    python nn/evaluate.py
-    #    python nn/evaluate.py --model nn/improved_model.pt   # explicit path
+    python evaluate.py --data synthetic_ode.npz
+    python evaluate.py --data synthetic_ode.npz --model improved_model.pt
 
 Outputs:
-  - Metrics printed to stdout (R², Spearman, phase F1 per reactor)
-  - Trajectory plots saved to nn/figures/eval_*.png
+  - Metrics printed to stdout (R2, Spearman, phase F1 per reactor)
+  - Trajectory plots saved to figures/eval_*.png
 """
 
 import argparse
@@ -25,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from model import CosmicNNSurrogate, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
-from utils import load_experimental_data, ModelDiagnostics
+from utils import ModelDiagnostics
 from torch.utils.data import DataLoader
 
 COMPONENT_NAMES = [
@@ -819,9 +815,31 @@ def plot_phase_params(mu_days, sigma_days, phases_true, phases_pred, times_days,
     print('  saved eval_phase_params.png')
 
 
+def load_synthetic_data(npz_path):
+    data         = np.load(npz_path, allow_pickle=True)
+    trajectories = data['trajectories'].copy()
+    times        = data['times'].copy()
+    phases       = data['phases'].copy()
+    doe_params   = data['doe_params'].copy()
+
+    trajs_norm = np.zeros_like(trajectories)
+    for i in range(trajectories.shape[0]):
+        for c in range(trajectories.shape[2]):
+            max_val = trajectories[i, :, c].max()
+            if max_val > 0:
+                trajs_norm[i, :, c] = trajectories[i, :, c] / max_val
+
+    ics        = trajs_norm[:, 0, :]
+    parameters = {'O2': doe_params[:, 0], 'AAs': doe_params[:, 1], 'Glc': doe_params[:, 2]}
+    return dFBADataset(trajs_norm, times, ics, parameters=parameters,
+                       normalize=True, phases=phases)
+
+
 def main():
     here = Path(__file__).parent
     parser = argparse.ArgumentParser()
+    parser.add_argument('--data',          default=str(here / 'synthetic_ode.npz'),
+                        help='Path to synthetic .npz file produced by generate_synthetic_ode.py')
     parser.add_argument('--model',          default=str(here / 'improved_model.pt'))
     parser.add_argument('--shuffled-model', default=str(here / 'shuffled_model.pt'),
                         help='Path to permutation-baseline model for comparison table')
@@ -830,20 +848,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    # Load data — DoE coded levels only (n_params=3)
-    doe_file = str(here / 'data' / 'data_1.csv')
-    trajs, times, ics, meta = load_experimental_data(
-        str(here / 'data' / 'data_2.csv'), doe_file=doe_file)
-    reactors = list(meta['reactors'])
-    phases   = meta['phases']
-    doe_arr  = meta.get('doe_params')
-
-    parameters = {}
-    if doe_arr is not None:
-        parameters.update({'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]})
-
-    dataset = dFBADataset(trajs, times, ics, parameters=parameters,
-                          normalize=True, phases=phases)
+    _npz     = np.load(args.data, allow_pickle=True)
+    times    = _npz['times'].copy()
+    dataset  = load_synthetic_data(args.data)
+    reactors = [f'R{i:04d}' for i in range(len(dataset))]
 
     # Load real model
     model, ckpt = load_model(args.model, device)
