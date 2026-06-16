@@ -19,7 +19,7 @@ Within each interval:
 
 Units:
     Cell Density (X)   : E9 cells/L  (magnitude used directly; initial = 0.5)
-    Cell Volume (X_bm) : g_CDW/L     (350 pg/cell * 0.5E9 cells/L = 0.175 g/L)
+    Cell Volume (X_bm) : um^3 / 1000 (CHO ~1596 um^3/cell -> initial = 1.6; per Sarat)
     Metabolites        : mmol/L
     Titer              : mg/L
 
@@ -30,7 +30,7 @@ Flux units (data_3, corrected per Sarat):
     Titer        : mg / (E9 cells * day)
 
 eta for titer: 0 for t < 8, 1 for t >= 8 (temperature shift at day 8).
-Logistic cap on cell density: CD_MAX (E9 cells/L). Confirm value with Sarat.
+No logistic cap on cell density: phase blending handles the growth-to-stationary reduction.
 """
 
 import numpy as np
@@ -45,9 +45,6 @@ F       = 1.0    # perfusion rate (bioreactor volumes/day, confirmed from paper)
 DAY8    = 8      # temperature shift day; eta switches at start of this interval
 N_DAYS  = 13     # day 0 through day 12 (13 timepoints)
 T_EVAL  = np.arange(0, N_DAYS, dtype=float)
-CD_MAX  = 20.0   # logistic growth ceiling (E9 cells/L = 20e6 cells/mL); confirm with Sarat
-
-CDW_PER_CELL = 350e-12   # g / cell (cell dry weight, from Sarat)
 
 # ---------------------------------------------------------------------------
 # Component indices -- match data_2 / data_3 row order
@@ -84,13 +81,15 @@ AAS_INDICES  = list(range(6, N_COMPONENTS))
 # ---------------------------------------------------------------------------
 # Initial conditions and feed concentrations
 # Cell density : 0.5 E9 cells/L (Sarat anchor)
-# Cell volume  : 0.5E9 cells/L * 350e-12 g/cell = 0.175 g_CDW/L (< 10, per Sarat)
+# Cell volume  : single-cell volume in um^3, scaled by 1/1000 per Sarat
+#                CHO diameter ~14-15 um -> radius ~7.25 um -> V = (4/3)pi*r^3 ~ 1596 um^3
+#                scaled initial value: 1596/1000 = 1.596 -> use 1.6
 # Metabolites  : DMEM/F12 nominal, mmol/L
 # Titer        : 0 (starts at 0)
 # ---------------------------------------------------------------------------
 C_NOMINAL = np.array([
     0.5,     # Cell Density  (E9 cells/L)
-    0.175,   # Cell Volume   (g_CDW/L: 0.5E9 * 350e-12 g/cell)
+    1.6,     # Cell Volume   (um^3 / 1000, per Sarat: keep initial value between 1-10)
     17.5,    # Glucose       (mmol/L)
     0.0,     # Lactate       (mmol/L)
     0.0,     # NH4           (mmol/L)
@@ -232,7 +231,7 @@ def _make_interval_ode(v_net, eta_titer, cin):
     Build the ODE function for one 1-day interval with constant v_net and eta.
 
     Per Sarat's equations:
-        dX/dt     = v_CD * X * (1 - X/CD_MAX)        [logistic growth]
+        dX/dt     = v_CD * X
         dX_bm/dt  = v_bm * X_bm
         dC_tit/dt = v_tit * X - eta * F * C_tit
         dC_i/dt   = F * (Cin_i - C_i) + v_i * X      [all other components]
@@ -241,8 +240,8 @@ def _make_interval_ode(v_net, eta_titer, cin):
         X    = max(C[IDX_CD], 0.0)
         dC   = np.zeros(N_COMPONENTS)
 
-        # Cell density with logistic cap
-        dC[IDX_CD] = v_net[IDX_CD] * X * max(1.0 - X / CD_MAX, 0.0)
+        # Cell density: phase blending handles growth-to-stationary transition
+        dC[IDX_CD] = v_net[IDX_CD] * X
 
         # Biomass
         dC[IDX_CV] = v_net[IDX_CV] * C[IDX_CV]
