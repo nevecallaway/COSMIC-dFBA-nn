@@ -26,6 +26,7 @@ import torch
 from pathlib import Path
 
 from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES
+from utils import load_experimental_data
 
 IDX_TITER = 2   # index of titer within the 8-feature vector
 
@@ -107,6 +108,8 @@ def main():
     parser.add_argument('--shuffled-model', default=None,
                         help='Path to model trained on shuffled data for baseline comparison')
     parser.add_argument('--data',           default=str(here / 'synthetic_ode.npz'))
+    parser.add_argument('--real-data',      default=str(here / 'data' / 'data_2.csv'),
+                        help='Path to real experimental data for validation')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -175,6 +178,47 @@ def main():
         print(f'R{i:04d}     {actual_titer:>10.3f} {pred_titer:>12.3f} {err:>7.1%}  {flag:<4}  {shuf_str}')
 
     print(f'\nMean titer error: {np.nanmean(errors):.1%}')
+
+    # ------------------------------------------------------------------
+    # Real data validation (if available)
+    # ------------------------------------------------------------------
+    if Path(args.real_data).exists():
+        print(f'\n--- Real data validation ({args.real_data}) ---')
+        print('Note: real data is per-reactor normalized [0,1]. '
+              'Predictions normalized per-reactor for comparison.')
+
+        real_trajs, _, _, real_meta = load_experimental_data(args.real_data)
+        # real_trajs: (N, T, 25) already per-reactor-per-component normalized
+
+        real_sub = real_trajs[:, :, FEATURE_INDICES].astype(np.float32)
+        n_real, t_real, _ = real_sub.shape
+        n_real_pred = t_real - SEQ_LEN
+
+        sq_err_real = np.zeros(N_FEATURES)
+        n_pts = 0
+
+        for i in range(n_real):
+            seed = real_sub[i, :SEQ_LEN, :]   # already in [0,1]
+            preds_raw = rollout(model, seed, feature_min, feature_max,
+                                n_steps=n_real_pred, device=device)
+
+            # Normalize predictions per-reactor to match real data scale
+            actual = real_sub[i, SEQ_LEN:, :]
+            for f in range(N_FEATURES):
+                mx = preds_raw[:, f].max()
+                if mx > 0:
+                    preds_raw[:, f] /= mx
+
+            sq_err_real += ((preds_raw - actual) ** 2).sum(axis=0)
+            n_pts += n_real_pred
+
+        rmse_real = np.sqrt(sq_err_real / n_pts)
+        print(f'\n  Per-feature RMSE vs real trajectories (normalized space):')
+        for name, r in zip(FEATURE_NAMES, rmse_real):
+            print(f'    {name:<18}: {r:.4f}')
+        print(f'    {"Mean":<18}: {rmse_real.mean():.4f}')
+    else:
+        print(f'\nReal data not found at {args.real_data} -- skipping real validation')
 
     print_summary(titer_within_10, n_reactors,
                   shuffled_within_10=shuf_within_10 if has_shuf else None)

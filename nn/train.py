@@ -34,39 +34,6 @@ EPOCHS     = 200
 PATIENCE   = 20
 VAL_SPLIT  = 0.2
 
-FEATURE_NAMES = [
-    'Cell Density', 'Cell Size', 'Titer',
-    'Glucose', 'Glutamine', 'Asparagine', 'Serine', 'Glycine',
-]
-
-
-# ---------------------------------------------------------------------------
-# Evaluation helpers
-# ---------------------------------------------------------------------------
-
-def evaluate(model, loader, device):
-    """Mean squared error on raw targets, per feature and overall."""
-    model.eval()
-    sq_err = np.zeros(N_FEATURES)
-    n = 0
-    with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
-            pred = model(x)
-            sq_err += ((pred - y) ** 2).sum(dim=0).cpu().numpy()
-            n += len(x)
-    mse_per_feature = sq_err / n
-    return mse_per_feature
-
-
-def print_metrics(mse_per_feature, label=''):
-    rmse = np.sqrt(mse_per_feature)
-    header = f'  {label}' if label else ''
-    print(header)
-    for name, r in zip(FEATURE_NAMES, rmse):
-        print(f'    {name:<18}: RMSE {r:.4f}')
-    print(f'    {"Mean":<18}: RMSE {rmse.mean():.4f}')
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -159,9 +126,6 @@ def main():
                 val_loss += criterion(model(x), y).item() * len(x)
         val_loss /= n_val
 
-        if epoch % 10 == 0:
-            print(f'Epoch {epoch:4d}  train {train_loss:.6f}  val {val_loss:.6f}')
-
         if val_loss < best_val_loss:
             best_val_loss  = val_loss
             patience_count = 0
@@ -175,23 +139,9 @@ def main():
         else:
             patience_count += 1
             if patience_count >= PATIENCE:
-                print(f'Early stopping at epoch {epoch}')
                 break
 
-    # ------------------------------------------------------------------
-    # Final evaluation on best checkpoint
-    # ------------------------------------------------------------------
-    ckpt = torch.load(args.output, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state'])
-
-    print(f'\nBest val loss: {best_val_loss:.6f}')
-    print(f'Saved to {args.output}\n')
-
-    train_mse = evaluate(model, train_loader, device)
-    val_mse   = evaluate(model, val_loader,   device)
-    print_metrics(train_mse, label='Train RMSE (raw units):')
-    print()
-    print_metrics(val_mse,   label='Val RMSE (raw units):')
+    print(f'Saved to {args.output}')
 
 
 if __name__ == '__main__':
