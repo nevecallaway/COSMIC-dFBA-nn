@@ -30,6 +30,11 @@ from utils import load_experimental_data
 
 IDX_TITER = 2   # index of titer within the 8-feature vector
 
+FEATURE_NAMES = [
+    'Cell Density', 'Cell Size', 'Titer',
+    'Glucose', 'Glutamine', 'Asparagine', 'Serine', 'Glycine',
+]
+
 PAPER = {
     'f_acc_01':   0.723,
     'f_acc_02':   0.908,
