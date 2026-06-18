@@ -29,7 +29,7 @@ Flux units (data_3, corrected per Sarat):
     Metabolites  : mmol / (E9 cells * day)   -- NOTE: table header says E6, actual is E9
     Titer        : mg / (E9 cells * day)
 
-eta for titer: 0 for t < 8, 1 for t >= 8 (temperature shift at day 8).
+eta = 1 for titer at all times (per Sarat: simplifies dynamics, removes day-8 artifact).
 No logistic cap on cell density: phase blending handles the growth-to-stationary reduction.
 """
 
@@ -42,9 +42,24 @@ from scipy.integrate import solve_ivp
 # Constants
 # ---------------------------------------------------------------------------
 F       = 1.0    # perfusion rate (bioreactor volumes/day, confirmed from paper)
-DAY8    = 8      # temperature shift day; eta switches at start of this interval
 N_DAYS  = 13     # day 0 through day 12 (13 timepoints)
 T_EVAL  = np.arange(0, N_DAYS, dtype=float)
+
+# ---------------------------------------------------------------------------
+# Window constants -- must match model.py FEATURE_INDICES / SEQ_LEN
+# ---------------------------------------------------------------------------
+SEQ_LEN = 6   # days per input window
+WINDOW_FEATURE_INDICES = [
+    0,   # Cell Density
+    1,   # Cell Size
+    5,   # Titer
+    2,   # Glucose
+    6,   # Glutamine
+    8,   # Asparagine
+    10,  # Serine
+    11,  # Glycine
+]
+N_WINDOW_FEATURES = len(WINDOW_FEATURE_INDICES)  # 8
 
 # ---------------------------------------------------------------------------
 # Component indices -- match data_2 / data_3 row order
@@ -226,15 +241,18 @@ def make_cin(doe):
 # Interval-based ODE integration
 # ---------------------------------------------------------------------------
 
-def _make_interval_ode(v_net, eta_titer, cin):
+def _make_interval_ode(v_net, cin):
     """
     Build the ODE function for one 1-day interval with constant v_net and eta.
 
-    Per Sarat's equations:
-        dX/dt     = v_CD * X
-        dX_bm/dt  = v_bm * X_bm
-        dC_tit/dt = v_tit * X - eta * F * C_tit
-        dC_i/dt   = F * (Cin_i - C_i) + v_i * X      [all other components]
+    Per paper eq. 2 (uniform form for all components):
+        dC_i/dt = F * (C_i_in - eta * C_i) + v_i * X
+
+    Applied per component:
+        dX/dt     = v_CD * X                           [eta=0, X_in=0]
+        dX_bm/dt  = v_bm * X                           [eta=0, X_bm_in=0; driver is X not X_bm]
+        dC_tit/dt = v_tit * X - F * C_tit              [eta=1 always]
+        dC_i/dt   = F * (Cin_i - C_i) + v_i * X       [eta=1, all other metabolites]
     """
     def ode(t, C):
         X    = max(C[IDX_CD], 0.0)
@@ -243,11 +261,11 @@ def _make_interval_ode(v_net, eta_titer, cin):
         # Cell density: phase blending handles growth-to-stationary transition
         dC[IDX_CD] = v_net[IDX_CD] * X
 
-        # Biomass
-        dC[IDX_CV] = v_net[IDX_CV] * C[IDX_CV]
+        # Cell size: driven by cell density (per paper eq. 2, C_1 = X for all components)
+        dC[IDX_CV] = v_net[IDX_CV] * X
 
-        # Titer: production minus washout (washout only active after day 8)
-        dC[IDX_TIT] = v_net[IDX_TIT] * X - eta_titer * F * max(C[IDX_TIT], 0.0)
+        # Titer: production minus washout (eta=1 always, per Sarat)
+        dC[IDX_TIT] = v_net[IDX_TIT] * X - F * max(C[IDX_TIT], 0.0)
 
         # All other metabolites
         for i in range(N_COMPONENTS):
@@ -267,7 +285,7 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
     For interval [d, d+1]:
       - f  = pm_by_day[d+1]  (phase fraction at end of interval)
       - v_net = (1-f)*v_growth + f*v_prod  (constant within interval)
-      - eta_titer = 1 if d >= DAY8, else 0
+      - eta_titer = 1 always (per Sarat)
 
     Returns:
         trajectory : np.array shape (N_DAYS, N_COMPONENTS)
@@ -286,9 +304,9 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
     for d in range(n_intervals):
         f       = pm_by_day.get(d + 1, f_fallback)
         v_net   = (1.0 - f) * v_growth + f * v_prod
-        eta_t   = 1.0 if d >= DAY8 else 0.0
 
-        ode_fn  = _make_interval_ode(v_net, eta_t, cin)
+
+        ode_fn  = _make_interval_ode(v_net, cin)
 
         sol = solve_ivp(
             ode_fn,
@@ -315,6 +333,49 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
 
 
 # ---------------------------------------------------------------------------
+# Window building
+# ---------------------------------------------------------------------------
+
+def build_windows(trajectories):
+    """
+    Build sliding windows from trajectories for next-day prediction.
+
+    For each reactor and each starting day d in [0, N_DAYS - SEQ_LEN):
+        x: days [d, d+SEQ_LEN)  normalized to [0, 1] per feature
+        y: day  d+SEQ_LEN       raw (unnormalized)
+
+    Returns:
+        windows:     np.ndarray (n_obs, SEQ_LEN, N_WINDOW_FEATURES)  normalized
+        targets:     np.ndarray (n_obs, N_WINDOW_FEATURES)            raw
+        feature_min: np.ndarray (N_WINDOW_FEATURES,)
+        feature_max: np.ndarray (N_WINDOW_FEATURES,)
+        ids:         list of (reactor_idx, start_day)
+    """
+    sub = trajectories[:, :, WINDOW_FEATURE_INDICES].astype(np.float32)
+
+    feature_min = sub.reshape(-1, N_WINDOW_FEATURES).min(axis=0)
+    feature_max = sub.reshape(-1, N_WINDOW_FEATURES).max(axis=0)
+    scale       = feature_max - feature_min
+    scale[scale == 0] = 1.0
+    sub_norm = (sub - feature_min) / scale
+
+    windows, targets, ids = [], [], []
+    N, T, _ = sub.shape
+    for i in range(N):
+        for d in range(T - SEQ_LEN):
+            windows.append(sub_norm[i, d : d + SEQ_LEN, :])
+            targets.append(sub[i, d + SEQ_LEN, :])
+            ids.append((i, d))
+
+    return (
+        np.array(windows, dtype=np.float32),
+        np.array(targets, dtype=np.float32),
+        feature_min,
+        feature_max,
+        ids,
+    )
+
+
 # Main generation
 # ---------------------------------------------------------------------------
 
@@ -393,6 +454,11 @@ def generate_all(data_dir=None, output_file=None):
     doe_params   = np.array(doe_params)
     times_out    = np.tile(T_EVAL, (len(trajectories), 1))
 
+    print('\nBuilding sliding windows...')
+    windows, targets, feature_min, feature_max, _ = build_windows(trajectories)
+    print(f'  {len(windows)} windows  '
+          f'({len(trajectories)} reactors x {N_DAYS - SEQ_LEN} windows each)')
+
     np.savez(
         output_file,
         trajectories=trajectories,
@@ -402,8 +468,12 @@ def generate_all(data_dir=None, output_file=None):
         doe_params=doe_params,
         components=np.array(component_names, dtype=object),
         units=np.array(units_list, dtype=object),
+        windows=windows,
+        targets=targets,
+        feature_min=feature_min,
+        feature_max=feature_max,
     )
-    print(f'\nSaved {trajectories.shape} array')
+    print(f'\nSaved {trajectories.shape} array + {len(windows)} windows')
     print(f'Output: {output_file}')
 
     # Excel export -- one sheet per reactor

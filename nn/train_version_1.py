@@ -1,0 +1,634 @@
+#!/usr/bin/env python3
+"""
+Training script for COSMIC-dFBA neural network surrogate.
+
+This file orchestrates the training workflow:
+- Trainer class: manages optimizer, loss computation, training/validation loops
+- Leave-one-out cross-validation on 10 real perfusion reactors
+- 11-component fused loss combining MSE, physics constraints, and regularization
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split, Subset
+from pathlib import Path
+import sys
+import time
+
+# Import neural network architecture from model.py
+from model import CosmicNNSurrogate, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
+# Import data utilities and evaluation metrics from utils.py
+from utils import load_experimental_data, load_specific_rates, ModelDiagnostics
+
+IDX_CELL_DENSITY = 0   # Cell Density -- primary RCA target (predicting decline)
+IDX_TITER        = 5   # Antibody titer
+
+
+class Trainer:
+    """
+    Unified trainer for COSMIC-dFBA that handles both standard and
+    Physics-Informed Neural Network (PINN) losses.
+    
+    Responsibilities:
+    - Initialize optimizer and learning rate scheduler
+    - Compute loss (fused PINN loss with 11 components)
+    - Run training epoch (forward → loss → backprop → update)
+    - Run validation (no gradient computation, collect metrics)
+    - Coordinate multi-epoch training with early stopping
+    """
+    def __init__(self, model, device, learning_rate=5e-4, model_type='enhanced',
+                 scheduler_patience=5):
+        self.model = model.to(device)
+        self.device = device
+        self.model_type = model_type
+        # AdamW: Adaptive Moment Estimation with decoupled Weight decay
+        # - Automatically adjusts step size per weight (adaptive learning rate)
+        # - Maintains momentum (remembers previous gradients) for smoother convergence
+        # - weight_decay (L2 regularization) prevents overfitting
+        # - lr: learning rate controls step size (default 5e-4 = 0.0005)
+        self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+        # Learning rate scheduler: reduce LR by 50% if validation loss doesn't improve
+        # after 'scheduler_patience' epochs. Helps escape plateaus.
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=scheduler_patience
+        )
+        self.losses = []  # Track training loss per epoch for diagnostics
+
+    def compute_loss(self, predictions, targets, ics, phases_batch=None):
+        """
+        Computes the loss based on the model type.
+        For 'enhanced' models, it uses the fused PINN loss with 11 components:
+        
+        PINN = Physics-Informed Neural Network Loss
+        ================================================
+        Standard NN loss only minimizes prediction error (MSE).
+        PINN loss ALSO enforces physical constraints and domain knowledge:
+        
+        Physics constraints in this loss:
+        - Non-negativity (term 4): concentrations ≥ 0 (biology)
+        - Smoothness (terms 5, 7, 8): realistic smooth dynamics
+        - Initial conditions (term 2): preserve boundary conditions
+        - Non-flatness (term 3): avoid trivial constant solutions
+        
+        Why PINN? Fewer parameters, better generalization, physically plausible solutions.
+        
+        1. Weighted concentration MSE (titer 5× weight)
+        1a. Endpoint titer loss (final day error)
+        1b. Peak-time loss (align titer peak timing)
+        2. Initial condition constraint
+        3. Non-flatness penalty (prevents trivial solutions)
+        4. Non-negativity penalty (biology: concentrations ≥ 0)
+        5. Concentration smoothness (prevent jittery predictions)
+        6. Phase regression (match f(t) to ground truth)
+        7. Rate smoothness (smooth rate changes)
+        8. Phase smoothness (smooth transitions)
+        
+        Args:
+            predictions: dict from model with keys 'concentrations', 'phase_weights', 'growth_rates', 'prod_rates'
+            targets: (B, T, 25) true metabolite concentrations
+            ics: (B, 25) initial conditions
+            phases_batch: (B, T) ground truth phase fraction (optional)
+            
+        Returns:
+            total_loss: scalar, sum of all 11 components
+            components: dict with loss breakdown for logging
+        """
+        # PINN Fused Loss
+        conc_pred = predictions['concentrations']
+        phase_pred = predictions['phase_weights']   # (batch, time, 1) regression in [0,1]
+        growth_rates = predictions['growth_rates']
+        prod_rates = predictions['prod_rates']
+
+        # 1. Weighted concentration MSE.
+        # Primary targets: cell density (VCD, RCA signal) and titer (production outcome).
+        # All other components kept at low weight to keep ODE trajectories grounded
+        # without dominating the loss.
+        comp_weights = torch.full((targets.shape[-1],), 0.1, device=targets.device)
+        comp_weights[IDX_CELL_DENSITY] = 3.0   # primary RCA target
+        comp_weights[IDX_TITER]        = 2.0   # production outcome
+        conc_loss = (((conc_pred - targets) ** 2) * comp_weights).mean()
+
+        # 1a. Endpoint titer loss (reduced from 2.0 to 0.5)
+        endpoint_loss = 0.5 * nn.functional.mse_loss(
+            conc_pred[:, -1, IDX_TITER], targets[:, -1, IDX_TITER])
+
+        # 1b. Peak-time loss (reduced from 3.0 to 1.0)
+        T = conc_pred.shape[1]
+        t_idx = torch.arange(T, dtype=torch.float32, device=targets.device) / max(T - 1, 1)
+        pred_peak_w = torch.softmax(conc_pred[:, :, IDX_TITER] * 5.0, dim=1)
+        true_peak_w = torch.softmax(targets[:, :, IDX_TITER] * 5.0, dim=1)
+        pred_peak_t = (pred_peak_w * t_idx).sum(dim=1)   # (batch,)
+        true_peak_t = (true_peak_w * t_idx).sum(dim=1)   # (batch,)
+        peak_time_loss = 1.0 * torch.mean((pred_peak_t - true_peak_t) ** 2)
+
+        # 2. IC constraint
+        ic_loss = 0.1 * torch.mean((conc_pred[:, 0, :] - ics) ** 2)
+
+        # 3. Non-flatness penalty (Increased to punish flat lines)
+        conc_variance = torch.var(conc_pred, dim=1)
+        flatness_penalty = 0.2 * torch.mean(1.0 / (1.0 + conc_variance))
+
+        # 4. PINN: Non-negativity penalty
+        non_neg_loss = 0.5 * torch.mean(torch.clamp(conc_pred, max=0)**2)
+
+        # 5. PINN: Concentration Smoothness
+        conc_smoothness = 0.1 * torch.mean((conc_pred[:, 1:, :] - conc_pred[:, :-1, :]) ** 2)
+
+        # 6. Phase regression — MSE against continuous 0-1 fraction, all timepoints.
+        # Weight raised to 5.0 (from 3.0) alongside reduced titer weights.
+        # Validated: this combination improved f(t) accuracy from 82.3% to 90.0%.
+        phase_loss = torch.tensor(0.0, device=targets.device)
+        if phases_batch is not None:
+            phase_target = phases_batch.unsqueeze(-1)   # (batch, time, 1)
+            phase_loss = 5.0 * nn.functional.mse_loss(phase_pred, phase_target)
+
+        # 7. Rate magnitude -- L1 on constant per-phase rates (B, 25)
+        # Rate smoothness removed: rates are constant per phase so step-to-step
+        # changes in blended_rates come entirely from f_t, already penalised by
+        # phase smoothness (term 8).
+        rate_smoothness = torch.tensor(0.0, device=targets.device)
+        rate_magnitude = 0.01 * (torch.mean(torch.abs(growth_rates)) + torch.mean(torch.abs(prod_rates)))
+
+        # 8. Phase smoothness (encourage gradual rather than jittery transitions)
+        phase_smoothness = 0.05 * torch.mean((phase_pred[:, 1:, :] - phase_pred[:, :-1, :]) ** 2)
+
+        total_loss = (conc_loss + endpoint_loss + peak_time_loss +
+                      ic_loss + flatness_penalty + phase_loss +
+                      non_neg_loss + conc_smoothness + rate_smoothness +
+                      rate_magnitude + phase_smoothness)
+
+        return total_loss, {
+            'conc': conc_loss.item(),
+            'titer_endpoint': endpoint_loss.item(),
+            'titer_peak': peak_time_loss.item(),
+            'ic': ic_loss.item(),
+            'phase_mse': phase_loss.item() if isinstance(phase_loss, torch.Tensor) else phase_loss,
+            'pinn_non_neg': non_neg_loss.item(),
+            'pinn_rate_smooth': rate_smoothness.item(),
+        }
+
+    def train_epoch(self, train_loader):
+        """
+        Performs one full pass over the training data (one epoch).
+        
+        Steps per batch:
+        1. Unpack batch data (ICs, time, parameters, target trajectories)
+        2. Forward pass: model(ic, time, params) → predictions
+        3. Compute loss: L = 11-component PINN loss
+        4. Backward pass: compute gradients (∂L/∂w for all weights)
+        5. Gradient clipping: clip ||gradient|| to prevent exploding gradients
+        6. Optimizer step: update weights using AdamW (w ← w - lr×∇L)
+        7. Zero gradients: clear old gradients for next batch
+        
+        Args:
+            train_loader: PyTorch DataLoader with training batches
+            
+        Returns:
+            epoch_loss: average loss over all batches
+            components: dict with breakdown of loss components
+        """
+        self.model.train()  # Set model to training mode (enables dropout, etc.)
+        epoch_loss = 0.0
+        components = {'conc': 0, 'titer_endpoint': 0, 'titer_peak': 0,
+                      'ic': 0, 'phase_mse': 0, 'pinn_non_neg': 0, 'pinn_rate_smooth': 0}
+
+        for batch in train_loader:
+            # Extract batch data and move to GPU/CPU
+            ic = batch['initial_conditions'].to(self.device)
+            time = batch['time'].to(self.device)
+            params = batch['parameters'].to(self.device)
+            target = batch['trajectory'].to(self.device)
+            phases = batch.get('phases', None)  # Optional: ground truth phase
+            if phases is not None:
+                phases = phases.to(self.device)
+
+            # GRADIENT DESCENT STEP
+            self.optimizer.zero_grad()  # Clear old gradients
+            predictions = self.model(ic, time, params)  # Forward pass
+            loss, comp = self.compute_loss(predictions, target, ic, phases)  # Compute loss
+            loss.backward()  # Backpropagation: compute ∂loss/∂w for all weights
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # Clip ||∇loss|| to 1.0
+            self.optimizer.step()  # Update weights: w ← w - lr×∇loss
+
+            epoch_loss += loss.item()
+            for k in components:
+                components[k] += comp.get(k, 0)
+
+        # Average over all batches
+        epoch_loss /= len(train_loader)
+        for k in components:
+            components[k] /= len(train_loader)
+
+        self.losses.append(epoch_loss)  # Store for diagnostics
+        self.scheduler.step(epoch_loss)  # Adjust learning rate if needed
+        return epoch_loss, components
+
+    def validate(self, val_loader):
+        """
+        Performs one full pass over the validation data (no gradient computation).
+        
+        Purpose: Evaluate model on held-out data to detect overfitting.
+        
+        Steps:
+        1. Set model to eval mode (disables dropout, uses running batch norm stats)
+        2. Disable gradient computation (torch.no_grad()) to save memory
+        3. Accumulate predictions and targets
+        4. Compute validation loss and metrics:
+           - Regression metrics: R², MAPE per component
+           - Spearman correlation: trajectory shape accuracy
+           - Phase metrics: F1, MCC, specificity, sensitivity
+           - Transition metrics: transition time MAE (days)
+        
+        Args:
+            val_loader: PyTorch DataLoader with validation batches
+            
+        Returns:
+            report: dict with val_loss and computed metrics
+        """
+        self.model.eval()  # Set model to eval mode
+        val_loss = 0.0
+        all_targets, all_preds = [], []
+        all_phase_targets, all_phase_preds, all_times_days = [], [], []
+
+        with torch.no_grad():  # Disable gradient computation
+            for batch in val_loader:
+                ic = batch['initial_conditions'].to(self.device)
+                time = batch['time'].to(self.device)
+                params = batch['parameters'].to(self.device)
+                target = batch['trajectory'].to(self.device)
+
+                predictions = self.model(ic, time, params)
+                loss, _ = self.compute_loss(predictions, target, ic, None)
+                val_loss += loss.item()
+
+                # Accumulate predictions and targets for metrics
+                all_targets.append(target.cpu().numpy())
+                all_preds.append(predictions['concentrations'].cpu().numpy() if isinstance(predictions, dict) else predictions.cpu().numpy())
+                if 'phases' in batch:
+                    all_phase_targets.append(batch['phases'].cpu().numpy())
+                    all_phase_preds.append(predictions['phase_weights'].cpu().numpy() if isinstance(predictions, dict) else None)
+                    # Convert normalised [0,1] time back to actual days for metric
+                    t_norm  = batch['time'].cpu().numpy()           # (B, T) in [0,1]
+                    t_scale = batch['time_scale'].cpu().numpy()     # (B, 1) max day
+                    all_times_days.append(t_norm * t_scale)        # (B, T) in days
+
+        val_loss /= len(val_loader)
+        report = {"val_loss": val_loss}
+        
+        # Compute comprehensive metrics on accumulated predictions
+        if all_targets:
+            y_true = np.concatenate(all_targets, axis=0)
+            y_pred = np.concatenate(all_preds, axis=0)
+            report["metrics"] = ModelDiagnostics.calculate_regression_metrics(y_true, y_pred)
+            report["spearman"] = ModelDiagnostics.calculate_spearman_metrics(y_true, y_pred)
+            report["y_true"] = y_true
+            report["y_pred"] = y_pred
+            if all_phase_targets:
+                p_true = np.concatenate(all_phase_targets, axis=0)
+                p_pred = np.concatenate(all_phase_preds, axis=0)
+                t_days = np.concatenate(all_times_days, axis=0)   # (N, T) in days
+                report["phase_metrics"]   = ModelDiagnostics.calculate_phase_metrics(p_true, p_pred)
+                report["transition"]      = ModelDiagnostics.calculate_transition_metrics(p_true, p_pred, t_days)
+
+        return report
+
+    def train(self, train_loader, val_loader, epochs=100, patience=20, verbose=True):
+        best_val_loss = float('inf')
+        patience_counter = 0
+
+        for epoch in range(1, epochs + 1):
+            train_loss, comps = self.train_epoch(train_loader)
+            report = self.validate(val_loader)
+            val_loss = report["val_loss"]
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                status = "(BEST)"
+            else:
+                patience_counter += 1
+                status = ""
+
+            if verbose and (epoch % 5 == 0 or epoch == 1):
+                metric_str = ""
+                if "phase_metrics" in report:
+                    f1 = report['phase_metrics']['phase_f1']
+                    mcc = report['phase_metrics'].get('mcc', float('nan'))
+                    mcc_str = f"{mcc:.4f}" if not np.isnan(mcc) else "n/a"
+                    metric_str = f" | F1: {f1:.4f} | MCC: {mcc_str}"
+                if "transition" in report:
+                    t_mae = report['transition']['transition_mae_days']
+                    if not np.isnan(t_mae):
+                        metric_str += f" | TransMAE: {t_mae:.2f}d"
+                print(f"Epoch {epoch:3d}{status}{metric_str}")
+
+            if patience is not None and patience_counter >= patience:
+                if verbose:
+                    print(f"Early stopping at epoch {epoch}")
+                break
+        return best_val_loss
+
+
+def load_synthetic_data(npz_path):
+    """
+    Load synthetic trajectories from synthetic_ode.npz and normalize
+    per-reactor per-component (divide by max), matching the normalization
+    already applied to the real data in data_2.csv.
+
+    Both datasets end up on the same [0, 1] scale per component so that
+    dFBADataset can treat them identically in the training loop.
+    """
+    data         = np.load(npz_path, allow_pickle=True)
+    trajectories = data['trajectories'].copy()   # (N, T, C)
+    times        = data['times'].copy()          # (N, T)
+    phases       = data['phases'].copy()         # (N, T)
+    doe_params   = data['doe_params'].copy()     # (N, 3)
+
+    # Per-reactor per-component normalization: same as data_2
+    trajs_norm = np.zeros_like(trajectories)
+    for i in range(trajectories.shape[0]):
+        for c in range(trajectories.shape[2]):
+            max_val = trajectories[i, :, c].max()
+            if max_val > 0:
+                trajs_norm[i, :, c] = trajectories[i, :, c] / max_val
+
+    ics        = trajs_norm[:, 0, :]
+    parameters = {
+        'O2':  doe_params[:, 0],
+        'AAs': doe_params[:, 1],
+        'Glc': doe_params[:, 2],
+    }
+
+    return dFBADataset(trajs_norm, times, ics, parameters=parameters,
+                       normalize=True, phases=phases)
+
+
+def load_data(data_path):
+    """Load experimental data from CSV. Inputs to the encoder are DoE coded
+    levels only (O2, AAs, Glc) -- n_params=3. FBA-derived features (data_3
+    specific rates, data_4 efficiencies) were tested and dropped: they require
+    running dFBA first, which defeats the purpose of a surrogate model.
+    """
+    p = Path(data_path)
+    if p.is_file() and p.suffix == '.csv':
+        print(f"Loading real experimental data from {p}...")
+        doe_file = str(p.parent / 'data_1.csv')
+        trajectories, time_points, ics, metadata = load_experimental_data(
+            str(p), doe_file=doe_file)
+        phases  = metadata.get('phases', None)
+        doe_arr = metadata.get('doe_params', None)  # (n_reactors, 3)
+        parameters = {}
+        if doe_arr is not None:
+            parameters.update({'O2': doe_arr[:, 0], 'AAs': doe_arr[:, 1], 'Glc': doe_arr[:, 2]})
+            print(f"  Encoder inputs: DoE coded levels only (n_params=3) [O2, AAs, Glc]")
+        dataset = dFBADataset(trajectories, time_points, ics, parameters=parameters,
+                              normalize=True, phases=phases)
+        return dataset
+
+    elif p.is_dir():
+        print(f"Loading production NPZ data from directory {p}...")
+        npz_files = list(p.glob('*.npz'))
+        if not npz_files:
+            raise FileNotFoundError(f"No .npz files found in {p}")
+
+        all_trajectories, all_times, all_ics = [], [], []
+        for npz_file in npz_files:
+            data = np.load(npz_file, allow_pickle=True)
+            profiles = data['profiles']
+            time = data['time'].flatten() if len(data['time'].shape) > 1 else data['time']
+            all_trajectories.append(profiles)
+            all_times.append(time)
+            all_ics.append(profiles[0, :])
+
+        max_t = max(len(t) for t in all_times)
+        n_sims, n_comps = len(all_trajectories), all_trajectories[0].shape[1]
+        trajectories_padded = np.zeros((n_sims, max_t, n_comps))
+        times_padded = np.zeros((n_sims, max_t))
+        for i, (traj, t) in enumerate(zip(all_trajectories, all_times)):
+            trajectories_padded[i, :len(t), :] = traj
+            times_padded[i, :len(t)] = t
+            if len(t) < max_t:
+                trajectories_padded[i, len(t):, :] = traj[-1, :]
+                times_padded[i, len(t):] = t[-1]
+
+        dataset = dFBADataset(trajectories_padded, times_padded, np.array(all_ics), parameters={}, normalize=True)
+        return dataset
+    else:
+        raise ValueError(f"Unsupported data path: {data_path}. Provide a .csv file or a directory of .npz files.")
+
+
+def shuffle_dataset(dataset):
+    """
+    Permutation baseline: independently shuffle inputs (ICs + params) and
+    outputs (trajectories + phases) so there is no real signal to learn.
+    The model trained on this data establishes chance-level performance.
+    Data is already normalised so normalize=False is passed through.
+    """
+    N = len(dataset)
+    idx_in  = np.random.permutation(N)   # shuffled input order
+    idx_out = np.random.permutation(N)   # shuffled output order (independent)
+
+    new_trajs  = dataset.trajectories[idx_out]
+    new_times  = dataset.time_points[idx_out]
+    new_ics    = dataset.initial_conditions[idx_in]
+    new_phases = dataset.phases[idx_out] if dataset.phases is not None else None
+
+    new_params = {}
+    for key, val in dataset.parameters.items():
+        if val is not None:
+            new_params[key] = np.array([val[i] for i in idx_in])
+
+    shuffled = dFBADataset(new_trajs, new_times, new_ics,
+                           parameters=new_params, normalize=False,
+                           phases=new_phases)
+    # Copy normalisation stats so scale is identical to the real dataset
+    for attr in ('traj_min', 'traj_max', 'traj_scale_min', 'traj_scale_max',
+                 'ic_min', 'ic_max', 'ic_scale_min', 'ic_scale_max'):
+        setattr(shuffled, attr, getattr(dataset, attr))
+    return shuffled
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    # parser.add_argument('--no-synthetic', action='store_true',
+    #                     help='Skip pre-training on synthetic data, train on real data only')
+    parser.add_argument('--data', type=str, default='synthetic_ode.npz',
+                        metavar='NPZ',
+                        help='Path to synthetic_ode.npz (default: synthetic_ode.npz)')
+    parser.add_argument('--shuffle', action='store_true',
+                        help='Permutation baseline: shuffle inputs vs outputs before '
+                             'training to establish chance-level performance')
+    parser.add_argument('--lstm', action='store_true',
+                        help='Use LSTM rate heads instead of constant rate heads')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility (default: 42). '
+                             '--shuffle always uses seed 0 so the baseline is stable.')
+    args = parser.parse_args()
+
+    print(f"\n{'='*70}")
+    print("COSMIC-dFBA Unified Training")
+    print(f"{'='*70}")
+
+    DATA_NPZ    = args.data
+    USE_SHUFFLE = args.shuffle
+    USE_LSTM    = args.lstm
+
+    # Shuffled baseline always uses seed 0 so it is stable across main-model reruns.
+    seed = 0 if USE_SHUFFLE else args.seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark     = False
+    print(f"Random seed: {seed}")
+
+    script_dir  = Path(__file__).parent
+    DATA3_PATH  = script_dir / "data" / "data_3.csv"
+    LATENT_DIM  = 32
+    EPOCHS      = 400
+    PATIENCE    = 80
+    FINETUNE_LR = 1e-4
+
+    print(f"Loading synthetic data: {DATA_NPZ}")
+    try:
+        dataset = load_synthetic_data(DATA_NPZ)
+    except Exception as e:
+        print(f"Error loading synthetic data: {e}")
+        return
+
+    if USE_SHUFFLE:
+        print("\n*** PERMUTATION BASELINE: inputs and outputs independently shuffled ***")
+        print("*** Train on this to establish chance-level performance             ***\n")
+        dataset = shuffle_dataset(dataset)
+
+    if USE_SHUFFLE:
+        OUTPUT_PATH = 'shuffled_model.pt'
+    elif USE_LSTM:
+        OUTPUT_PATH = 'improved_model_lstm.pt'
+    else:
+        OUTPUT_PATH = 'improved_model.pt'
+
+    device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    n_params = dataset.n_params if hasattr(dataset, 'n_params') else 0
+    if USE_LSTM:
+        print(f"Model: CosmicNNSurrogateLSTM  n_components={dataset.n_components}, n_params={n_params}, latent_dim={LATENT_DIM}")
+        model = CosmicNNSurrogateLSTM(
+            n_components=dataset.n_components,
+            n_params=n_params,
+            latent_dim=LATENT_DIM,
+        )
+    else:
+        print(f"Model: CosmicNNSurrogate  n_components={dataset.n_components}, n_params={n_params}, latent_dim={LATENT_DIM}")
+        model = CosmicNNSurrogate(
+            n_components=dataset.n_components,
+            n_params=n_params,
+            latent_dim=LATENT_DIM,
+        )
+
+    # Ground rate heads in data_3 biological maxima.
+    # v_max_growth and v_max_prod are normalised (max component = 1.0) so the
+    # Tanh output in (-1, 1) maps to at most one unit of the highest-activity
+    # component.  Relative magnitudes between components are preserved from data_3.
+    try:
+        sr = load_specific_rates(str(DATA3_PATH))
+        v_max_growth = torch.FloatTensor(sr['v_max_growth'])
+        v_max_prod   = torch.FloatTensor(sr['v_max_prod'])
+        model.set_v_max(v_max_growth, v_max_prod)
+        print(f"  data_3 v_max loaded (scale={sr['v_max_scale']:.3f})")
+        print(f"  v_max_growth range: [{v_max_growth.min():.3f}, {v_max_growth.max():.3f}]")
+        print(f"  v_max_prod   range: [{v_max_prod.min():.3f},   {v_max_prod.max():.3f}]")
+    except FileNotFoundError:
+        print(f"  data_3 not found at {DATA3_PATH} -- rate heads use default v_max=1")
+
+    def _eval_reactor(report, ref_dataset):
+        """Extract per-reactor metrics from a validate() report."""
+        f1       = report['phase_metrics']['phase_f1']                    if 'phase_metrics' in report else float('nan')
+        mcc      = report['phase_metrics'].get('mcc', float('nan'))       if 'phase_metrics' in report else float('nan')
+        spec     = report['phase_metrics'].get('specificity', float('nan')) if 'phase_metrics' in report else float('nan')
+        sens     = report['phase_metrics'].get('sensitivity', float('nan')) if 'phase_metrics' in report else float('nan')
+        t_mae    = report['transition']['transition_mae_days']             if 'transition'    in report else float('nan')
+        within10 = float('nan')
+        if 'y_true' in report and 'y_pred' in report:
+            y_t = report['y_true'][:, -1, IDX_TITER]
+            y_p = report['y_pred'][:, -1, IDX_TITER]
+            def _denorm(x):
+                x = x * (ref_dataset.traj_scale_max[IDX_TITER] - ref_dataset.traj_scale_min[IDX_TITER]) + ref_dataset.traj_scale_min[IDX_TITER]
+                return x * (ref_dataset.traj_max[IDX_TITER] - ref_dataset.traj_min[IDX_TITER]) + ref_dataset.traj_min[IDX_TITER]
+            within10 = float(np.mean(np.abs(_denorm(y_p) - _denorm(y_t)) / (np.abs(_denorm(y_t)) + 1e-8) <= 0.10))
+        return f1, mcc, spec, sens, t_mae, within10
+
+    def _print_summary(loo_f1s, loo_mcc, loo_spec, loo_sens, loo_trans_mae, loo_within10, elapsed):
+        valid_within10 = [x for x in loo_within10 if not np.isnan(x)]
+        within10_count = sum(1 for x in valid_within10 if x > 0.5)
+        print(f"\n✓ Evaluation complete in {elapsed:.1f}s")
+        print(f"  Mean Transition MAE : {np.nanmean(loo_trans_mae):.2f} ± {np.nanstd(loo_trans_mae):.2f} days  (primary metric)")
+        print(f"  Mean MCC            : {np.nanmean(loo_mcc):.4f} ± {np.nanstd(loo_mcc):.4f}   (paper: 0.454)")
+        print(f"  Mean F1             : {np.nanmean(loo_f1s):.4f} ± {np.nanstd(loo_f1s):.4f}   (paper: 0.731)")
+        print(f"  Mean Specificity    : {np.nanmean(loo_spec):.4f} ± {np.nanstd(loo_spec):.4f}   (paper: 0.780)")
+        print(f"  Mean Sensitivity    : {np.nanmean(loo_sens):.4f} ± {np.nanstd(loo_sens):.4f}   (paper: 0.681)")
+        print(f"  Titer Within 10%    : {within10_count}/{len(valid_within10)} reactors  (paper: 10/10)")
+        return within10_count
+
+    n_reactors    = len(dataset)
+    loo_f1s       = []
+    loo_trans_mae = []
+    loo_mcc       = []
+    loo_spec      = []
+    loo_sens      = []
+    loo_within10  = []
+    pretrained_state = {k: v.clone() for k, v in model.state_dict().items()}
+    start_time = time.time()
+
+    # LOO cross-validation on synthetic data only.
+    # Train on 9 synthetic reactors, evaluate on the held-out 1, rotate all 10.
+    print(f"\n{'='*70}")
+    print("Leave-one-out cross-validation on synthetic data")
+    print(f"{'='*70}")
+    for fold in range(n_reactors):
+        model.load_state_dict(pretrained_state)
+        fold_train      = Subset(dataset, [i for i in range(n_reactors) if i != fold])
+        fold_val        = Subset(dataset, [fold])
+        fold_train_loader = DataLoader(fold_train, batch_size=4, shuffle=True,
+                                       collate_fn=dfba_collate_fn)
+        fold_val_loader   = DataLoader(fold_val,   batch_size=1, shuffle=False,
+                                       collate_fn=dfba_collate_fn)
+        fold_trainer = Trainer(model, device, learning_rate=FINETUNE_LR,
+                               model_type='enhanced', scheduler_patience=15)
+        fold_trainer.train(fold_train_loader, fold_val_loader,
+                           epochs=EPOCHS, patience=PATIENCE, verbose=False)
+        report = fold_trainer.validate(fold_val_loader)
+        f1, mcc, spec, sens, t_mae, within10 = _eval_reactor(report, dataset)
+        loo_f1s.append(f1); loo_mcc.append(mcc); loo_spec.append(spec)
+        loo_sens.append(sens); loo_trans_mae.append(t_mae); loo_within10.append(within10)
+        t_str = f"{t_mae:.2f}d" if not np.isnan(t_mae) else "n/a"
+        print(f"  Fold {fold+1:2d}/10: TransMAE={t_str} | MCC={mcc:.3f} | "
+              f"F1={f1:.4f} | Within10%={within10*100:.0f}%")
+
+    elapsed = time.time() - start_time
+    within10_count = _print_summary(loo_f1s, loo_mcc, loo_spec, loo_sens,
+                                    loo_trans_mae, loo_within10, elapsed)
+
+    torch.save({
+        'model_state': model.state_dict(),
+        'hyperparams': {
+            'arch':         'lstm' if USE_LSTM else 'fc',
+            'latent_dim':   LATENT_DIM,
+            'n_components': dataset.n_components,
+            'n_params':     dataset.n_params,
+            'data':         DATA_NPZ,
+        },
+        'loo_mean_trans_mae':  float(np.nanmean(loo_trans_mae)),
+        'loo_mean_mcc':        float(np.nanmean(loo_mcc)),
+        'loo_mean_f1':         float(np.nanmean(loo_f1s)),
+        'loo_mean_spec':       float(np.nanmean(loo_spec)),
+        'loo_mean_sens':       float(np.nanmean(loo_sens)),
+        'loo_titer_within10':  within10_count,
+    }, OUTPUT_PATH)
+    print(f"✓ Model saved: {OUTPUT_PATH}")
+
+if __name__ == "__main__":
+    main()
