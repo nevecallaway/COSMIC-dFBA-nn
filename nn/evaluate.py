@@ -1,910 +1,183 @@
 #!/usr/bin/env python3
 """
-Local evaluation script for a trained COSMIC-dFBA surrogate model.
+Evaluation script for COSMIC-dFBA surrogate v2 (NextDayPredictor).
+
+Runs autoregressive rollout per reactor and reports metrics against
+paper benchmarks.
+
+Paper benchmarks:
+  f(t) accuracy +/-0.1 : 72.3%   (94/130 time points)
+  f(t) accuracy +/-0.2 : 90.8%   (118/130 time points)
+  Specificity          : 0.780
+  Sensitivity          : 0.681
+  F1                   : 0.731
+  MCC                  : 0.454
+  Titer within 10%     : 10/10
 
 Usage:
-    python evaluate.py --data synthetic_ode.npz
-    python evaluate.py --data synthetic_ode.npz --model improved_model.pt
-
-Outputs:
-  - Metrics printed to stdout (R2, Spearman, phase F1 per reactor)
-  - Trajectory plots saved to figures/eval_*.png
+    !python evaluate.py
+    !python evaluate.py --model model_v2.pt --data synthetic_ode.npz
+    !python evaluate.py --shuffled-model shuffled_v2.pt   # with baseline
 """
 
 import argparse
-import sys
-import warnings
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from model import CosmicNNSurrogate, CosmicNNSurrogateLSTM, dFBADataset, dfba_collate_fn
-from utils import ModelDiagnostics
-from torch.utils.data import DataLoader
+from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES
 
-COMPONENT_NAMES = [
-    'Cell Density', 'Cell Volume', 'Glucose', 'Lactate', 'NH4', 'Titer',
-    'Glutamine', 'Glutamate', 'L-Asparagine', 'L-Aspartic acid', 'L-Serine',
-    'Glycine', 'L-Alanine', 'L-Proline', 'L-Threonine', 'L-Histidine',
-    'L-Lysine', 'L-Valine', 'L-Methionine', 'L-Arginine', 'L-Tyrosine',
-    'L-Isoleucine', 'L-Leucine', 'L-Phenylalanine', 'L-Tryptophan',
-]
+IDX_TITER = 2   # index of titer within the 8-feature vector
 
-IDX_TITER = 5
-
-
-def load_model(checkpoint_path, device):
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    hp = ckpt['hyperparams']
-    cls = CosmicNNSurrogateLSTM if hp.get('arch') == 'lstm' else CosmicNNSurrogate
-    model = cls(
-        n_components=hp['n_components'],
-        n_params=hp['n_params'],
-        latent_dim=hp.get('latent_dim', 32),
-    )
-    result = model.load_state_dict(ckpt['model_state'], strict=False)
-    if result.missing_keys or result.unexpected_keys:
-        print(f"  Warning: architecture mismatch (checkpoint may be from an older version)")
-        print(f"    Missing : {result.missing_keys}")
-        print(f"    Unexpected: {result.unexpected_keys}")
-    model.to(device).eval()
-    def _fmt(v): return f"{v:.4f}" if isinstance(v, float) else "n/a"
-    print(f"Loaded model from {checkpoint_path}")
-    print(f"  Saved LOO Trans MAE : {_fmt(ckpt.get('loo_mean_trans_mae'))}")
-    print(f"  Saved LOO MCC       : {_fmt(ckpt.get('loo_mean_mcc'))}")
-    print(f"  Saved LOO F1        : {_fmt(ckpt.get('loo_mean_f1'))}")
-    return model, ckpt
+PAPER = {
+    'f_acc_01':   0.723,
+    'f_acc_02':   0.908,
+    'specificity': 0.780,
+    'sensitivity': 0.681,
+    'f1':          0.731,
+    'mcc':         0.454,
+    'titer_within_10': '10/10',
+}
 
 
-def run_inference(model, dataset, device):
-    """Run model on all reactors, return (n_reactors, T, C) arrays."""
-    loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False,
-                        collate_fn=dfba_collate_fn)
-    batch = next(iter(loader))
-    ic     = batch['initial_conditions'].to(device)
-    time   = batch['time'].to(device)
-    params = batch['parameters'].to(device)
-    target = batch['trajectory'].to(device)
+# ---------------------------------------------------------------------------
+# Rollout
+# ---------------------------------------------------------------------------
 
-    # Truncate params if the model was trained with fewer features than the
-    # current dataset provides (e.g. shuffled model trained before FBA features).
-    if params.shape[1] != model.n_params:
-        params = params[:, :model.n_params]
+def rollout(model, seed_norm, feature_min, feature_max, n_steps, device):
+    scale = feature_max - feature_min
+    scale[scale == 0] = 1.0
 
+    window = seed_norm.copy()
+    preds  = []
+
+    model.eval()
     with torch.no_grad():
-        out = model(ic, time, params)
-
-    y_pred      = out['concentrations'].cpu().numpy()    # (N, T, C)
-    y_true      = target.cpu().numpy()
-    phases_pred = out['phase_weights'].cpu().numpy()     # (N, T, 1)
-    phases_true = batch['phases'].cpu().numpy() if 'phases' in batch else None
-
-    # mu and sigma are in normalised time [0, 1]; convert to days using per-reactor scale
-    time_scale = batch['time_scale'].cpu().numpy()       # (N, 1)
-    mu_days    = None
-    sigma_days = None
-    if 'transition_mu' in out:
-        mu_days    = (out['transition_mu'].cpu().numpy()    * time_scale.squeeze(-1))  # (N,)
-        sigma_days = (out['transition_sigma'].cpu().numpy() * time_scale.squeeze(-1))  # (N,)
-
-    return y_true, y_pred, phases_true, phases_pred, mu_days, sigma_days
-
-
-def print_metrics(y_true, y_pred, phases_true, phases_pred, reactors):
-    print(f"\n{'='*65}")
-    print("Regression Metrics (normalised space)")
-    print(f"{'='*65}")
-    reg = ModelDiagnostics.calculate_regression_metrics(y_true, y_pred)
-    print(f"  Global R²   : {reg['global_r2']:.4f}")
-    print(f"  Titer R²    : {reg['component_r2'].get('comp_5', float('nan')):.4f}")
-
-    print(f"\n{'='*65}")
-    print("Within-Reactor Spearman Correlation")
-    print(f"{'='*65}")
-    spear = ModelDiagnostics.calculate_spearman_metrics(y_true, y_pred)
-    print(f"  Mean Spearman       : {spear['mean_spearman']:.4f}")
-    print(f"  Titer Spearman      : {spear['titer_spearman']:.4f}")
-    print(f"\n  Per-reactor titer Spearman:")
-    for r_key, rho in spear['per_reactor_titer_spearman'].items():
-        idx = int(r_key.split('_')[1])
-        name = reactors[idx] if idx < len(reactors) else r_key
-        print(f"    {name}: {rho:.4f}")
-
-    print(f"\n  Bottom-5 components by Spearman:")
-    comp_spear = spear['component_spearman']
-    sorted_comps = sorted(comp_spear.items(), key=lambda x: x[1])
-    for k, v in sorted_comps[:5]:
-        idx = int(k.split('_')[1])
-        name = COMPONENT_NAMES[idx] if idx < len(COMPONENT_NAMES) else k
-        print(f"    {name}: {v:.4f}")
-
-    if phases_true is not None:
-        print(f"\n{'='*65}")
-        print("Phase Metrics  (paper benchmarks: F1=0.731, MCC=0.454, Spec=0.78, Sens=0.681)")
-        print(f"{'='*65}")
-        pm = ModelDiagnostics.calculate_phase_metrics(phases_true, phases_pred)
-        print(f"  F1          : {pm['phase_f1']:.4f}   (paper: 0.731)")
-        print(f"  MCC         : {pm['mcc']:.4f}   (paper: 0.454)")
-        print(f"  Specificity : {pm['specificity']:.4f}   (paper: 0.780)")
-        print(f"  Sensitivity : {pm['sensitivity']:.4f}   (paper: 0.681)")
-        print(f"  Confusion matrix:\n{pm['confusion_matrix']}")
-
-
-def print_transition_metrics(phases_true, phases_pred, time_points, reactors,
-                             mu_days=None, sigma_days=None):
-    """Print COSMIC-paper-aligned transition timing metrics."""
-    if phases_true is None:
-        return
-    tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, time_points)
-
-    print(f"\n{'='*65}")
-    print("Transition-Time Metrics  (primary metric per supervisor)")
-    print(f"{'='*65}")
-    print(f"  Mean transition MAE    : {tm['transition_mae_days']:.2f} ± {tm['transition_std_days']:.2f} days")
-    print(f"  f(t) accuracy  ±0.1   : {tm['f_accuracy_01']*100:.1f}%  (paper benchmark: 72%)")
-    print(f"  f(t) accuracy  ±0.2   : {tm['f_accuracy_02']*100:.1f}%  (paper benchmark: 91%)")
-    auc = calculate_phase_auc(phases_true, phases_pred, time_points)
-    print(f"  Phase AUC MAE          : {auc['auc_mae']:.2f} ± {auc['auc_std']:.2f} days")
-    print(f"    (AUC = integral of f(t) dt — captures both timing and sharpness of transition)")
-
-    if mu_days is not None:
-        print(f"\n  Transition parameters (mu = midpoint, sigma = width):")
-        print(f"  {'Reactor':<8} {'Actual':>8} {'mu':>8} {'err':>7} {'sigma':>8}  interpretation")
-        print(f"  {'-'*65}")
-        for r, name in enumerate(reactors):
-            t_true = tm['true_transition_days'][r]
-            mu     = mu_days[r]
-            sig    = sigma_days[r]
-            err    = mu - t_true
-            sharp  = "sharp" if sig < 1.0 else ("gradual" if sig > 2.5 else "moderate")
-            print(f"  {name:<8} {t_true:>8.1f}d {mu:>7.1f}d {err:>+7.1f}d {sig:>7.1f}d  {sharp}")
-
-    print(f"\n  Per-reactor transition day (actual vs predicted) and AUC:")
-    for r, name in enumerate(reactors):
-        t_true   = tm['true_transition_days'][r]
-        t_pred   = tm['pred_transition_days'][r]
-        err      = tm['transition_errors_per_reactor'][r]
-        a_true   = auc['auc_true'][r]
-        a_pred   = auc['auc_pred'][r]
-        a_err    = auc['auc_errors'][r]
-        print(f"    {name}: day {t_true:.1f}→{t_pred:.1f} (err={err:.1f}d) | "
-              f"AUC {a_true:.2f}→{a_pred:.2f} (err={a_err:.2f}d)")
-
-
-def plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_dir):
-    """One figure per reactor: predicted vs actual for key metabolites."""
-    key_comps = [0, 2, 3, IDX_TITER, 6]  # CD, Glc, Lac, Titer, Gln
-    key_names = [COMPONENT_NAMES[i] for i in key_comps]
-    n_reactors = y_true.shape[0]
-    T = y_true.shape[1]
-    t = np.linspace(0, 1, T)
-
-    for r in range(n_reactors):
-        fig, axes = plt.subplots(2, 3, figsize=(14, 7))
-        axes = axes.flatten()
-        name = reactors[r] if r < len(reactors) else f"Reactor {r}"
-
-        for i, (cidx, cname) in enumerate(zip(key_comps, key_names)):
-            ax = axes[i]
-            ax.plot(t, y_true[r, :, cidx], 'o-', color='#1565C0', label='Actual', markersize=4)
-            ax.plot(t, y_pred[r, :, cidx], 's--', color='#E53935', label='Predicted', markersize=4)
-            ax.set_title(cname, fontsize=9)
-            ax.set_xlabel('Normalised time')
-            ax.tick_params(labelsize=7)
-            if i == 0:
-                ax.legend(fontsize=7)
-
-        # Phase subplot
-        ax = axes[5]
-        if phases_true is not None:
-            ax.plot(t, phases_true[r], 'o-', color='#1565C0', label='Actual f', markersize=4)
-        ax.plot(t, phases_pred[r, :, 0], 's--', color='#E53935', label='Predicted f', markersize=4)
-        ax.axhline(0.2, color='gray', linewidth=0.7, linestyle=':')
-        ax.axhline(0.8, color='gray', linewidth=0.7, linestyle=':')
-        ax.set_ylim(-0.05, 1.05)
-        ax.set_title('Phase f(t)')
-        ax.set_xlabel('Normalised time')
-        ax.legend(fontsize=7)
-
-        fig.suptitle(f'{name} — Predicted vs Actual', fontsize=11)
-        fig.tight_layout()
-        fig.savefig(out_dir / f'eval_{name}.png', dpi=150)
-        plt.close(fig)
-
-    print(f"\nTrajectory plots saved to {out_dir}/")
-
-
-def plot_transition_times(phases_true, phases_pred, time_points, reactors, out_dir):
-    """Bar chart: actual vs predicted transition day per reactor."""
-    if phases_true is None:
-        return
-    tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, time_points)
-    true_t = tm['true_transition_days']
-    pred_t = tm['pred_transition_days']
-    N = len(reactors)
-    x = np.arange(N)
-    w = 0.35
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-
-    # Left: bar chart of actual vs predicted transition day
-    ax = axes[0]
-    ax.bar(x - w/2, true_t, w, label='Actual',    color='#1565C0', alpha=0.8)
-    ax.bar(x + w/2, pred_t, w, label='Predicted', color='#E53935', alpha=0.8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(reactors, rotation=45, ha='right', fontsize=8)
-    ax.set_ylabel('Transition day (f crosses 0.5)')
-    ax.set_title(f'Transition Time: Actual vs Predicted\n'
-                 f'MAE = {tm["transition_mae_days"]:.2f} days')
-    ax.legend()
-    ax.axhline(true_t.mean(), color='#1565C0', linewidth=0.8, linestyle='--', alpha=0.5)
-
-    # Right: scatter predicted vs actual (identity line = perfect)
-    ax = axes[1]
-    ax.scatter(true_t, pred_t, s=80, zorder=3, color='#E53935', edgecolors='black', linewidths=0.6)
-    for i, name in enumerate(reactors):
-        ax.annotate(name, (true_t[i], pred_t[i]),
-                    fontsize=7, textcoords='offset points', xytext=(5, 5))
-    lo = min(true_t.min(), pred_t.min()) - 0.5
-    hi = max(true_t.max(), pred_t.max()) + 0.5
-    ax.plot([lo, hi], [lo, hi], 'k--', linewidth=1, label='y = x  (perfect)')
-    ax.set_xlabel('Actual transition day')
-    ax.set_ylabel('Predicted transition day')
-    ax.set_title(f'Predicted vs Actual Transition Day\n'
-                 f'f(t) acc ±0.1: {tm["f_accuracy_01"]*100:.1f}%  '
-                 f'±0.2: {tm["f_accuracy_02"]*100:.1f}%')
-    ax.legend(fontsize=8)
-
-    fig.suptitle('State Transition Timing  (f(t) crosses 0.5)', fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_dir / 'eval_transition_times.png', dpi=150)
-    plt.close(fig)
-    print('  saved eval_transition_times.png')
-
-
-def calculate_phase_auc(phases_true, phases_pred, times_days):
-    """
-    Compute AUC of f(t) per reactor using the trapezoidal rule.
-
-    AUC = integral of f(t) dt over the full run (units: days).
-    It captures both transition timing and sharpness in a single number:
-    a reactor that transitions earlier or more gradually has a larger AUC.
-    Two reactors with identical transition MAE can have very different AUCs
-    if one switches sharply and the other drifts slowly.
-
-    phases_true : (N, T)
-    phases_pred : (N, T, 1) or (N, T)
-    times_days  : (N, T)  actual day values per reactor
-    """
-    if phases_pred.ndim == 3:
-        phases_pred = phases_pred[:, :, 0]
-    N = phases_true.shape[0]
-    auc_true   = np.array([np.trapezoid(phases_true[r], times_days[r]) for r in range(N)])
-    auc_pred   = np.array([np.trapezoid(phases_pred[r], times_days[r]) for r in range(N)])
-    auc_errors = np.abs(auc_pred - auc_true)
-    return {
-        'auc_true':   auc_true,
-        'auc_pred':   auc_pred,
-        'auc_errors': auc_errors,
-        'auc_mae':    float(auc_errors.mean()),
-        'auc_std':    float(auc_errors.std()),
-    }
-
-
-def collect_metrics(model, dataset, device, times_days):
-    """
-    Run inference and return a flat dict of all summary-table metrics.
-
-    times_days: (n_reactors, T) actual day values — used for transition MAE.
-    """
-    y_true, y_pred, phases_true, phases_pred, mu_days, sigma_days = run_inference(model, dataset, device)
-
-    m = {}
-    if phases_true is not None:
-        pm = ModelDiagnostics.calculate_phase_metrics(phases_true, phases_pred)
-        m['mcc']         = pm['mcc']
-        m['f1']          = pm['phase_f1']
-        m['specificity'] = pm['specificity']
-        m['sensitivity'] = pm['sensitivity']
-        tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, times_days)
-        m['trans_mae'] = tm['transition_mae_days']
-        m['f_acc_01']  = tm['f_accuracy_01']
-        m['f_acc_02']  = tm['f_accuracy_02']
-    if phases_true is not None:
-        auc = calculate_phase_auc(phases_true, phases_pred, times_days)
-        m['auc_mae'] = auc['auc_mae']
-        m['auc_std'] = auc['auc_std']
-        m['_auc']    = auc   # full per-reactor data for printing
-    actual_final    = y_true[:, -1, IDX_TITER]
-    predicted_final = y_pred[:, -1, IDX_TITER]
-    frac_err = np.abs(predicted_final - actual_final) / (np.abs(actual_final) + 1e-8)
-    m['titer_mean_err'] = float(frac_err.mean())
-    m['within10']       = int((frac_err <= 0.10).sum())
-    m['n_reactors']     = len(actual_final)
-    return m, y_true, y_pred, phases_true, phases_pred, mu_days, sigma_days
-
-
-def print_summary_table(real_m, shuffled_m=None, real_loo=None):
-    """
-    Print the paper-aligned summary table.
-    Columns: metric | our model | shuffled baseline | paper benchmark
-    Paper benchmarks from Gopalakrishnan et al. (COSMIC dFBA).
-    """
-    N = real_m['n_reactors']
-
-    def fmt_mae(v):    return f"{v:.2f}d"     if v is not None else "—"
-    def fmt_f(v):      return f"{v:.3f}"      if v is not None else "—"
-    def fmt_pct(v):    return f"{v*100:.1f}%" if v is not None else "—"
-    def fmt_n10(v, n): return f"{v}/{n}"      if v is not None else "—"
-    def shuf(key):     return real_m.get(key) if shuffled_m is None else shuffled_m.get(key)
-
-    def loo(key):
-        """Return LOO value from checkpoint if available, else None."""
-        return real_loo.get(key) if real_loo else None
-
-    loo_trans = loo('trans_mae')
-    loo_mcc   = loo('mcc')
-    loo_f1    = loo('f1')
-    loo_spec  = loo('spec')
-    loo_sens  = loo('sens')
-
-    # For each binary metric use LOO from checkpoint when available,
-    # fall back to full-dataset (annotated) only if not saved.
-    def _m(loo_val, full_key):
-        return loo_val if loo_val is not None else real_m.get(full_key)
-
-    def _lbl(loo_val, label):
-        """Append (LOO) or (full) suffix so the source is always clear."""
-        suffix = ' (LOO)' if loo_val is not None else ' (full)'
-        return label + suffix
-
-    rows = [
-        # (label, ours, shuffled, paper)
-        ("Transition MAE (LOO)",      fmt_mae(loo_trans),                         "—",                           "—"),
-        ("Transition MAE (full)",     fmt_mae(real_m.get('trans_mae')),            fmt_mae(shuf('trans_mae')),     "—"),
-        (_lbl(loo_mcc,  "MCC"),       fmt_f(_m(loo_mcc,  'mcc')),                 fmt_f(shuf('mcc')),             "0.454"),
-        (_lbl(loo_f1,   "F1"),        fmt_f(_m(loo_f1,   'f1')),                  fmt_f(shuf('f1')),              "0.731"),
-        (_lbl(loo_spec, "Specificity"),fmt_f(_m(loo_spec, 'specificity')),         fmt_f(shuf('specificity')),     "0.780"),
-        (_lbl(loo_sens, "Sensitivity"),fmt_f(_m(loo_sens, 'sensitivity')),         fmt_f(shuf('sensitivity')),     "0.681"),
-        ("f(t) ±0.1 accuracy",        fmt_pct(real_m.get('f_acc_01')),            fmt_pct(shuf('f_acc_01')),      "72.3%"),
-        ("f(t) ±0.2 accuracy",        fmt_pct(real_m.get('f_acc_02')),            fmt_pct(shuf('f_acc_02')),      "90.8%"),
-        ("Phase AUC MAE (days)",      fmt_mae(real_m.get('auc_mae')),             fmt_mae(shuf('auc_mae')),       "—"),
-        ("Final titer mean error",    fmt_pct(real_m.get('titer_mean_err')),      fmt_pct(shuf('titer_mean_err')),"—"),
-        ("Within 10% titer",          fmt_n10(real_m.get('within10'), N),         fmt_n10(shuf('within10'), N) if shuffled_m else "—", "—"),
-    ]
-
-    c0 = max(len(r[0]) for r in rows)
-    c1 = max(len(r[1]) for r in rows) + 2
-    c2 = max(len(r[2]) for r in rows) + 2
-    c3 = max(len(r[3]) for r in rows) + 2
-    hdr = f"{'Metric':<{c0}}  {'Our model':<{c1}}  {'Shuffled':<{c2}}  {'Paper':<{c3}}"
-    sep = "=" * len(hdr)
-    print(f"\n{sep}\n{hdr}\n{'-'*len(hdr)}")
-    for r in rows:
-        print(f"{r[0]:<{c0}}  {r[1]:<{c1}}  {r[2]:<{c2}}  {r[3]:<{c3}}")
-    print(sep)
-
-
-def print_final_titer_metrics(y_true, y_pred, reactors):
-    """
-    Paper-aligned titer metric: predicted vs actual final (day-13) titer.
-    The COSMIC paper reports 'within 10% of measured data' as its titer benchmark.
-    All values are in normalised space; fractional errors are still meaningful.
-    """
-    actual_final    = y_true[:, -1, IDX_TITER]
-    predicted_final = y_pred[:, -1, IDX_TITER]
-    frac_errors     = np.abs(predicted_final - actual_final) / (np.abs(actual_final) + 1e-8)
-    within_10pct    = (frac_errors <= 0.10).sum()
-    within_20pct    = (frac_errors <= 0.20).sum()
-    N               = len(reactors)
-
-    print(f"\n{'='*65}")
-    print("Final Titer Metrics  (paper benchmark: within 10% of measured)")
-    print(f"{'='*65}")
-    print(f"  Within 10% : {within_10pct}/{N}  ({within_10pct/N*100:.0f}%)   (paper: 10/10 → 100%)")
-    print(f"  Within 20% : {within_20pct}/{N}  ({within_20pct/N*100:.0f}%)")
-    print(f"  Mean fractional error : {frac_errors.mean()*100:.1f}%")
-    print(f"\n  Per-reactor (actual → predicted, error%):")
-    for i, name in enumerate(reactors):
-        print(f"    {name}: {actual_final[i]:.3f} → {predicted_final[i]:.3f}  "
-              f"({frac_errors[i]*100:.1f}%)")
-
-
-def plot_paper_comparison(real_m, real_loo, out_dir):
-    """
-    Bar chart comparing our model's metrics against the paper's COSMIC dFBA values.
-
-    Binary classification (MCC, F1, Spec, Sens) uses LOO values from the
-    checkpoint where available — that is the fair comparison since the paper
-    evaluates its mechanistic model on all 10 reactors without fitting.
-    Continuous f(t) accuracy is compared on the full dataset (same basis as paper).
-    """
-    PAPER = {
-        'MCC':            0.454,
-        'F1':             0.731,
-        'Specificity':    0.780,
-        'Sensitivity':    0.681,
-        'f(t) ±0.1':      0.723,
-        'f(t) ±0.2':      0.908,
-    }
-
-    def _loo_or_full(loo_key, full_key):
-        v = real_loo.get(loo_key) if real_loo else None
-        return v if v is not None else real_m.get(full_key)
-
-    def _is_loo(loo_key):
-        return real_loo is not None and real_loo.get(loo_key) is not None
-
-    # Prefer LOO for binary metrics; fall back to full-dataset
-    ours = {
-        'MCC':         _loo_or_full('mcc',  'mcc'),
-        'F1':          _loo_or_full('f1',   'f1'),
-        'Specificity': _loo_or_full('spec', 'specificity'),
-        'Sensitivity': _loo_or_full('sens', 'sensitivity'),
-        'f(t) ±0.1':   real_m.get('f_acc_01'),
-        'f(t) ±0.2':   real_m.get('f_acc_02'),
-    }
-
-    # LOO flag per metric — drives annotation
-    is_loo = {
-        'MCC':         _is_loo('mcc'),
-        'F1':          _is_loo('f1'),
-        'Specificity': _is_loo('spec'),
-        'Sensitivity': _is_loo('sens'),
-        'f(t) ±0.1':   False,
-        'f(t) ±0.2':   False,
-    }
-
-    labels = list(PAPER.keys())
-    paper_vals = [PAPER[k] for k in labels]
-    our_vals   = [ours[k]  for k in labels]
-
-    x   = np.arange(len(labels))
-    w   = 0.35
-    fig, ax = plt.subplots(figsize=(10, 5))
-
-    bars_paper = ax.bar(x - w/2, paper_vals, w, label='COSMIC dFBA (paper)',
-                        color='#1565C0', alpha=0.85)
-    bars_ours  = ax.bar(x + w/2, our_vals,   w, label='Our NN surrogate',
-                        color='#E53935', alpha=0.85)
-
-    # Value labels on bars
-    for bar in bars_paper:
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                f'{bar.get_height():.3f}', ha='center', va='bottom', fontsize=8,
-                color='#1565C0')
-    for bar, key in zip(bars_ours, labels):
-        suffix = ' (LOO)' if is_loo[key] else ''
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                f'{bar.get_height():.3f}{suffix}', ha='center', va='bottom',
-                fontsize=8, color='#E53935')
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=10)
-    ax.set_ylim(0, 1.15)
-    ax.set_ylabel('Score', fontsize=11)
-    ax.set_title('NN Surrogate vs COSMIC dFBA (Gopalakrishnan et al.)\n'
-                 'Binary metrics: LOO where available; f(t) accuracy: full dataset',
-                 fontsize=11)
-    ax.legend(fontsize=10)
-    ax.axhline(1.0, color='gray', linewidth=0.7, linestyle='--', alpha=0.5)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-
-    fig.tight_layout()
-    fig.savefig(out_dir / 'eval_paper_comparison.png', dpi=150)
-    plt.close(fig)
-    print('  saved eval_paper_comparison.png')
-
-
-def plot_titer_summary(y_true, y_pred, reactors, out_dir):
-    """Scatter of predicted vs actual final titer across all reactors."""
-    actual_final    = y_true[:, -1, IDX_TITER]
-    predicted_final = y_pred[:, -1, IDX_TITER]
-    frac_errors     = np.abs(predicted_final - actual_final) / (np.abs(actual_final) + 1e-8)
-    within_10 = (frac_errors <= 0.10).sum()
-
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.scatter(actual_final, predicted_final, s=60, zorder=3)
-    for i, name in enumerate(reactors):
-        ax.annotate(name, (actual_final[i], predicted_final[i]),
-                    fontsize=7, textcoords='offset points', xytext=(4, 4))
-    lo = min(actual_final.min(), predicted_final.min()) - 0.05
-    hi = max(actual_final.max(), predicted_final.max()) + 0.05
-    ax.plot([lo, hi], [lo, hi], 'k--', linewidth=1, label='y = x  (perfect)')
-    # ±10% bands
-    ax.fill_between([lo, hi], [lo*0.9, hi*0.9], [lo*1.1, hi*1.1],
-                    alpha=0.1, color='green', label='±10% band')
-    ax.set_xlabel('Actual final titer (normalised)')
-    ax.set_ylabel('Predicted final titer (normalised)')
-    ax.set_title(f'Final Titer: Predicted vs Actual\n'
-                 f'{within_10}/{len(reactors)} within 10%  (paper benchmark: 10/10)')
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_dir / 'eval_titer_scatter.png', dpi=150)
-    plt.close(fig)
-    print("  saved eval_titer_scatter.png")
-
-
-# ── Conformal prediction ──────────────────────────────────────────────────────
-def build_conformal_intervals(conformal_cal, y_pred, alpha=0.1):
-    """
-    Split conformal and adjusted (normalised) conformal prediction intervals.
-
-    conformal_cal: list of dicts with 'y_true', 'y_pred' from LOO folds
-    y_pred: (N, T, C) — predictions to wrap with intervals
-    alpha:  miscoverage rate (0.1 → 90% coverage)
-
-    Split conformal: fixed-width intervals from raw LOO residual quantile.
-    Adjusted conformal: locally adaptive intervals — sigma derived from the
-    per-(timepoint, component) std of LOO residuals, so the interval width
-    reflects how consistently wrong the model is at each point in time.
-
-    Returns dict with 'split' and 'adjusted' keys, each with 'lower'/'upper'
-    arrays of shape (N, T, C).
-    """
-    if not conformal_cal:
-        return None
-
-    cal_true = np.concatenate([c['y_true'] for c in conformal_cal], axis=0)
-    cal_pred = np.concatenate([c['y_pred'] for c in conformal_cal], axis=0)
-    raw_residuals = np.abs(cal_true - cal_pred)   # (n_cal, T, C)
-
-    n_cal = raw_residuals.shape[0]
-    level = min(np.ceil((n_cal + 1) * (1 - alpha)) / n_cal, 1.0)
-
-    # Split conformal: one quantile per (T, C) position
-    q_split = np.quantile(raw_residuals, level, axis=0)   # (T, C)
-    split = {
-        'lower': y_pred - q_split,
-        'upper': y_pred + q_split,
-        'q': q_split,
-    }
-
-    # Adjusted conformal: sigma = std of LOO residuals per (T, C)
-    # Normalise calibration scores by this sigma, then scale new intervals
-    sigma_cal = np.std(raw_residuals, axis=0) + 1e-8       # (T, C)
-    norm_residuals = raw_residuals / sigma_cal              # (n_cal, T, C)
-    q_adj = np.quantile(norm_residuals, level, axis=0)     # (T, C)
-    adjusted = {
-        'lower': y_pred - q_adj * sigma_cal,
-        'upper': y_pred + q_adj * sigma_cal,
-        'q': q_adj,
-        'sigma': sigma_cal,
-    }
-
-    return {'split': split, 'adjusted': adjusted}
-
-
-def plot_conformal_titer(y_true, y_pred, intervals, reactors, out_dir):
-    """Per-reactor titer trajectory with split and adjusted conformal bands."""
-    n = y_true.shape[0]
-    T = y_true.shape[1]
-    t = np.linspace(0, 1, T)
-
-    fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharey=False)
-    axes = axes.flatten()
-
-    for r in range(n):
-        ax = axes[r]
-        name = reactors[r] if r < len(reactors) else f"R{r}"
-
-        ax.plot(t, y_true[r, :, IDX_TITER], 'o-', color='#1565C0',
-                label='Actual', markersize=5, zorder=4)
-        ax.plot(t, y_pred[r, :, IDX_TITER], 's--', color='#E53935',
-                label='Predicted', markersize=4, zorder=3)
-
-        if intervals and intervals['split']:
-            lo = intervals['split']['lower'][r, :, IDX_TITER]
-            hi = intervals['split']['upper'][r, :, IDX_TITER]
-            ax.fill_between(t, lo, hi, alpha=0.15, color='#E53935', label='Split 90% CI')
-
-        if intervals and intervals['adjusted']:
-            lo = intervals['adjusted']['lower'][r, :, IDX_TITER]
-            hi = intervals['adjusted']['upper'][r, :, IDX_TITER]
-            ax.fill_between(t, lo, hi, alpha=0.25, color='#FF6F00', label='Adjusted 90% CI')
-
-
-        ax.set_title(name, fontsize=9)
-        ax.set_xlabel('Normalised time', fontsize=7)
-        ax.tick_params(labelsize=7)
-        if r == 0:
-            ax.legend(fontsize=6)
-
-    fig.suptitle('Titer Trajectories with Conformal Prediction Intervals', fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_dir / 'eval_conformal_titer.png', dpi=150)
-    plt.close(fig)
-    print('  saved eval_conformal_titer.png')
-
-
-def plot_problem_reactors(y_true, y_pred, phases_true, phases_pred,
-                          reactors, out_dir):
-    """
-    Deep-dive plots for reactors with negative titer Spearman.
-    Shows all 25 components side by side for the problem cases.
-    """
-    from scipy.stats import spearmanr
-
-    # Identify problem reactors (titer Spearman < 0)
-    problem = []
-    for r in range(y_true.shape[0]):
-        t = y_true[r, :, IDX_TITER]
-        p = y_pred[r, :, IDX_TITER]
-        if t.std() > 1e-8 and p.std() > 1e-8:
-            rho, _ = spearmanr(t, p)
-            if rho < 0:
-                problem.append((r, rho))
-
-    if not problem:
-        print('  No problem reactors found (all titer Spearman ≥ 0)')
-        return
-
-    print(f'  Problem reactors (negative titer Spearman): '
-          f'{[reactors[r] for r, _ in problem]}')
-
-    T = y_true.shape[1]
-    t = np.linspace(0, 1, T)
-    ncols = 5
-    nrows = 5  # 25 components in a 5×5 grid
-
-    for r_idx, rho in problem:
-        name = reactors[r_idx] if r_idx < len(reactors) else f"R{r_idx}"
-        fig, axes = plt.subplots(nrows, ncols, figsize=(18, 14))
-        axes = axes.flatten()
-
-        for c in range(25):
-            ax = axes[c]
-            ax.plot(t, y_true[r_idx, :, c], 'o-', color='#1565C0',
-                    markersize=3, linewidth=1, label='Actual')
-            ax.plot(t, y_pred[r_idx, :, c], 's--', color='#E53935',
-                    markersize=3, linewidth=1, label='Predicted')
-            cname = COMPONENT_NAMES[c] if c < len(COMPONENT_NAMES) else f'comp_{c}'
-            # Highlight titer
-            color = '#B71C1C' if c == IDX_TITER else 'black'
-            ax.set_title(cname, fontsize=7, color=color)
-            ax.tick_params(labelsize=6)
-            if c == 0:
-                ax.legend(fontsize=6)
-
-        fig.suptitle(f'{name} — All Components  |  Titer Spearman = {rho:.3f}',
-                     fontsize=12)
-        fig.tight_layout()
-        fig.savefig(out_dir / f'eval_problem_{name}.png', dpi=150)
-        plt.close(fig)
-        print(f'  saved eval_problem_{name}.png')
-
-        # Also plot the phase trajectory for this reactor
-        if phases_true is not None:
-            fig, ax = plt.subplots(figsize=(6, 3))
-            ax.plot(t, phases_true[r_idx], 'o-', color='#1565C0', label='Actual f')
-            ax.plot(t, phases_pred[r_idx, :, 0], 's--', color='#E53935', label='Predicted f')
-            ax.axhline(0.2, color='gray', linestyle=':', linewidth=0.8)
-            ax.axhline(0.8, color='gray', linestyle=':', linewidth=0.8)
-            ax.set_ylim(-0.05, 1.05)
-            ax.set_xlabel('Normalised time')
-            ax.set_ylabel('f (phase fraction)')
-            ax.set_title(f'{name} — Phase Trajectory')
-            ax.legend()
-            fig.tight_layout()
-            fig.savefig(out_dir / f'eval_problem_{name}_phase.png', dpi=150)
-            plt.close(fig)
-            print(f'  saved eval_problem_{name}_phase.png')
-
-
-def print_cell_density_metrics(y_true, y_pred, reactors, times_days, mu_days=None):
-    """
-    Report cell density (component 0) trajectory accuracy and post-transition slope.
-
-    Post-transition slope: linear fit to predicted cell density after the transition
-    midpoint (mu if available, else after f crosses 0.5). A negative slope means the
-    model predicts declining cell density, which is the proxy signal for cell death risk.
-    """
-    from scipy.stats import spearmanr, linregress
-
-    IDX_CD = 0
-    N = y_true.shape[0]
-    T = y_true.shape[1]
-
-    print(f"\n{'='*65}")
-    print("Cell Density Metrics  (component 0 — primary RCA target)")
-    print(f"{'='*65}")
-
-    cd_true = y_true[:, :, IDX_CD]   # (N, T)
-    cd_pred = y_pred[:, :, IDX_CD]
-
-    # Overall R2
-    from sklearn.metrics import r2_score
-    r2 = r2_score(cd_true.flatten(), cd_pred.flatten())
-    print(f"  Global cell density R²  : {r2:.4f}")
-
-    print(f"\n  Per-reactor cell density (Spearman, post-transition slope):")
-    print(f"  {'Reactor':<8} {'Spearman':>10} {'Slope (pred)':>14} {'Slope (actual)':>16}  {'Health signal'}")
-    print(f"  {'-'*70}")
-
-    for r in range(N):
-        name = reactors[r] if r < len(reactors) else f"R{r}"
-        t = cd_true[r]
-        p = cd_pred[r]
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            rho = spearmanr(t, p).statistic if t.std() > 1e-8 and p.std() > 1e-8 else float('nan')
-
-        # Post-transition window: from mu onward (in normalised time indices)
-        if mu_days is not None and times_days is not None:
-            t_days = times_days[r]
-            t_max  = t_days.max()
-            mu_norm = mu_days[r] / t_max if t_max > 0 else 0.5
-            post_idx = np.where(np.linspace(0, 1, T) >= mu_norm)[0]
-        else:
-            post_idx = np.arange(T // 2, T)
-
-        if len(post_idx) >= 3:
-            x = np.linspace(0, 1, len(post_idx))
-            slope_pred   = linregress(x, p[post_idx]).slope
-            slope_actual = linregress(x, t[post_idx]).slope
-            health = "declining" if slope_pred < -0.05 else ("stable" if abs(slope_pred) <= 0.05 else "rising")
-        else:
-            slope_pred = slope_actual = float('nan')
-            health = "n/a"
-
-        rho_str   = f"{rho:.3f}"   if not np.isnan(rho)         else "nan"
-        sp_str    = f"{slope_pred:+.3f}"  if not np.isnan(slope_pred)  else "nan"
-        sa_str    = f"{slope_actual:+.3f}" if not np.isnan(slope_actual) else "nan"
-        print(f"  {name:<8} {rho_str:>10} {sp_str:>14} {sa_str:>16}  {health}")
-
-
-def plot_phase_params(mu_days, sigma_days, phases_true, phases_pred, times_days, reactors, out_dir):
-    """
-    Two-panel plot surfacing the PhaseTransitionHead's explicit parameters.
-
-    Left: scatter of mu (predicted transition midpoint) vs actual transition day.
-          Points on the diagonal = perfect timing. Offset = systematic bias.
-
-    Right: sigma per reactor (transition width in days).
-           Small sigma = sharp switch, large sigma = gradual drift.
-           Wide sigma on a reactor with good timing may signal biological uncertainty.
-    """
-    if mu_days is None:
-        return
-
-    tm = ModelDiagnostics.calculate_transition_metrics(phases_true, phases_pred, times_days)
-    actual_days = tm['true_transition_days']   # (N,)
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    # Left: mu vs actual transition day
-    ax = axes[0]
-    ax.scatter(actual_days, mu_days, s=80, zorder=3, color='#E53935',
-               edgecolors='black', linewidths=0.6)
-    for i, name in enumerate(reactors):
-        ax.annotate(name, (actual_days[i], mu_days[i]),
-                    fontsize=7, textcoords='offset points', xytext=(5, 4))
-    lo = min(actual_days.min(), mu_days.min()) - 0.5
-    hi = max(actual_days.max(), mu_days.max()) + 0.5
-    ax.plot([lo, hi], [lo, hi], 'k--', linewidth=1, label='y = x  (perfect)')
-    ax.set_xlabel('Actual transition day')
-    ax.set_ylabel('mu (predicted transition midpoint, days)')
-    ax.set_title('PhaseTransitionHead: mu vs actual transition day\n'
-                 'mu is the explicit parameter the model learned; not derived from f(t) > 0.5')
-    ax.legend(fontsize=8)
-
-    # Right: sigma per reactor
-    ax = axes[1]
-    x = np.arange(len(reactors))
-    bars = ax.bar(x, sigma_days, color='#1565C0', alpha=0.8, edgecolor='black', linewidth=0.5)
-    ax.axhline(1.0, color='gray', linewidth=0.8, linestyle='--', label='1 day (sharp threshold)')
-    ax.axhline(2.5, color='orange', linewidth=0.8, linestyle='--', label='2.5 days (gradual)')
-    for bar, val in zip(bars, sigma_days):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
-                f'{val:.1f}d', ha='center', va='bottom', fontsize=8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(reactors, rotation=45, ha='right', fontsize=8)
-    ax.set_ylabel('sigma (transition width, days)')
-    ax.set_title('PhaseTransitionHead: sigma per reactor\n'
-                 'small = sharp switch, large = gradual transition')
-    ax.legend(fontsize=8)
-
-    fig.suptitle('Explicit transition parameters from PhaseTransitionHead', fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_dir / 'eval_phase_params.png', dpi=150)
-    plt.close(fig)
-    print('  saved eval_phase_params.png')
-
-
-def load_synthetic_data(npz_path):
-    data         = np.load(npz_path, allow_pickle=True)
-    trajectories = data['trajectories'].copy()
-    times        = data['times'].copy()
-    phases       = data['phases'].copy()
-    doe_params   = data['doe_params'].copy()
-
-    trajs_norm = np.zeros_like(trajectories)
-    for i in range(trajectories.shape[0]):
-        for c in range(trajectories.shape[2]):
-            max_val = trajectories[i, :, c].max()
-            if max_val > 0:
-                trajs_norm[i, :, c] = trajectories[i, :, c] / max_val
-
-    ics        = trajs_norm[:, 0, :]
-    parameters = {'O2': doe_params[:, 0], 'AAs': doe_params[:, 1], 'Glc': doe_params[:, 2]}
-    return dFBADataset(trajs_norm, times, ics, parameters=parameters,
-                       normalize=True, phases=phases)
-
+        for _ in range(n_steps):
+            x        = torch.from_numpy(window).unsqueeze(0).float().to(device)
+            pred_raw = model(x).squeeze(0).cpu().numpy()
+            preds.append(pred_raw)
+            pred_norm = np.clip((pred_raw - feature_min) / scale, 0.0, 1.0)
+            window    = np.vstack([window[1:], pred_norm])
+
+    return np.array(preds)   # (n_steps, N_FEATURES) raw
+
+
+# ---------------------------------------------------------------------------
+# Summary table
+# ---------------------------------------------------------------------------
+
+def print_summary(titer_within_10, n_reactors, shuffled_within_10=None):
+    w10_str  = f'{titer_within_10}/{n_reactors}'
+    shuf_str = f'{shuffled_within_10}/{n_reactors}' if shuffled_within_10 is not None else ''
+
+    has_shuffled = shuffled_within_10 is not None
+    col = f'{"Shuffled":>10}' if has_shuffled else ''
+
+    print()
+    print('=' * (55 + (11 if has_shuffled else 0)))
+    print(f'{"Metric":<28} {"Ours":>8}  {col}  {"Paper":>10}')
+    print('-' * (55 + (11 if has_shuffled else 0)))
+
+    def row(name, ours, shuf, paper):
+        s = f'{shuf:>10}  ' if has_shuffled else ''
+        print(f'{name:<28} {ours:>8}  {s}{paper:>10}')
+
+    row('f(t) acc +/-0.1', 'N/A', 'N/A', f'{PAPER["f_acc_01"]:.1%}')
+    row('f(t) acc +/-0.2', 'N/A', 'N/A', f'{PAPER["f_acc_02"]:.1%}')
+    row('Specificity',      'N/A', 'N/A', f'{PAPER["specificity"]:.3f}')
+    row('Sensitivity',      'N/A', 'N/A', f'{PAPER["sensitivity"]:.3f}')
+    row('F1',               'N/A', 'N/A', f'{PAPER["f1"]:.3f}')
+    row('MCC',              'N/A', 'N/A', f'{PAPER["mcc"]:.3f}')
+    row('Titer within 10%', w10_str, shuf_str, PAPER['titer_within_10'])
+
+    print('=' * (55 + (11 if has_shuffled else 0)))
+    print('N/A: phase prediction not yet implemented in v2')
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    here = Path(__file__).parent
+    here   = Path(__file__).parent
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data',          default=str(here / 'synthetic_ode.npz'),
-                        help='Path to synthetic .npz file produced by generate_synthetic_ode.py')
-    parser.add_argument('--model',          default=str(here / 'improved_model.pt'))
-    parser.add_argument('--shuffled-model', default=str(here / 'shuffled_model.pt'),
-                        help='Path to permutation-baseline model for comparison table')
+    parser.add_argument('--model',          default=str(here / 'model_v2.pt'))
+    parser.add_argument('--shuffled-model', default=None,
+                        help='Path to model trained on shuffled data for baseline comparison')
+    parser.add_argument('--data',           default=str(here / 'synthetic_ode.npz'))
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
+    print(f'Device: {device}')
 
-    _npz     = np.load(args.data, allow_pickle=True)
-    times    = _npz['times'].copy()
-    dataset  = load_synthetic_data(args.data)
-    reactors = [f'R{i:04d}' for i in range(len(dataset))]
+    ckpt        = torch.load(args.model, map_location=device, weights_only=False)
+    feature_min = ckpt['feature_min']
+    feature_max = ckpt['feature_max']
 
-    # Load real model
-    model, ckpt = load_model(args.model, device)
-    conformal_cal = ckpt.get('conformal_cal', [])
-    real_loo = {
-        'trans_mae': ckpt.get('loo_mean_trans_mae'),
-        'mcc':       ckpt.get('loo_mean_mcc'),
-        'f1':        ckpt.get('loo_mean_f1'),
-        'spec':      ckpt.get('loo_mean_spec'),
-        'sens':      ckpt.get('loo_mean_sens'),
-    }
+    model = NextDayPredictor(hidden=ckpt.get('hidden', 64)).to(device)
+    model.load_state_dict(ckpt['model_state'])
+    model.eval()
+    print(f'Loaded {args.model}')
 
-    # Collect real-model metrics and inference outputs
-    real_m, y_true, y_pred, phases_true, phases_pred, mu_days, sigma_days = collect_metrics(
-        model, dataset, device, times)
+    npz          = np.load(args.data, allow_pickle=True)
+    trajectories = npz['trajectories'].astype(np.float32)
+    n_reactors, n_days, _ = trajectories.shape
+    sub   = trajectories[:, :, FEATURE_INDICES]
+    scale = feature_max - feature_min
+    scale[scale == 0] = 1.0
 
-    # Shuffled baseline (optional)
-    shuffled_m = None
-    shuffled_path = Path(args.shuffled_model)
-    if shuffled_path.exists():
-        print(f"\nLoading shuffled baseline from {shuffled_path}...")
-        shuffled_model, _ = load_model(str(shuffled_path), device)
-        shuffled_m, *_ = collect_metrics(shuffled_model, dataset, device, times)
+    # Load shuffled model if provided
+    shuffled_model = None
+    if args.shuffled_model and Path(args.shuffled_model).exists():
+        shuf_ckpt     = torch.load(args.shuffled_model, map_location=device,
+                                   weights_only=False)
+        shuffled_model = NextDayPredictor(hidden=shuf_ckpt.get('hidden', 64)).to(device)
+        shuffled_model.load_state_dict(shuf_ckpt['model_state'])
+        shuffled_model.eval()
+        print(f'Loaded shuffled baseline from {args.shuffled_model}')
 
-    # Summary table (primary output)
-    print_summary_table(real_m, shuffled_m, real_loo)
+    n_pred          = n_days - SEQ_LEN
+    titer_within_10 = 0
+    shuf_within_10  = 0
+    errors          = []
 
-    # Detailed per-metric breakdowns
-    print_metrics(y_true, y_pred, phases_true, phases_pred, reactors)
-    print_cell_density_metrics(y_true, y_pred, reactors, times, mu_days=mu_days)
-    print_final_titer_metrics(y_true, y_pred, reactors)
-    print_transition_metrics(phases_true, phases_pred, times, reactors,
-                             mu_days=mu_days, sigma_days=sigma_days)
+    has_shuf = shuffled_model is not None
+    shuf_col = f'{"Shuf pred":>12} {"Shuf err":>9}' if has_shuf else ''
+    print(f'\n{"Reactor":<10} {"Actual":>10} {"Predicted":>12} {"Error":>8}  {shuf_col}')
+    print('-' * (48 + (23 if has_shuf else 0)))
 
-    # Conformal intervals from LOO calibration residuals
-    intervals = build_conformal_intervals(conformal_cal, y_pred, alpha=0.1)
-    if intervals:
-        print(f"\nConformal prediction (90% coverage):")
-        q = intervals['split']['q'][:, IDX_TITER]
-        print(f"  Split interval half-width (titer, mean over time)   : +-{q.mean():.4f}")
-        q_adj = intervals['adjusted']['q'][:, IDX_TITER]
-        print(f"  Adjusted interval scale   (titer, mean over time)   : x{q_adj.mean():.4f} x sigma_cal")
+    for i in range(n_reactors):
+        seed_raw  = sub[i, :SEQ_LEN, :]
+        seed_norm = np.clip((seed_raw - feature_min) / scale, 0.0, 1.0)
+        preds     = rollout(model, seed_norm, feature_min, feature_max,
+                            n_steps=n_pred, device=device)
 
-    # Plots
-    out_dir = here / 'figures'
-    out_dir.mkdir(exist_ok=True)
-    plot_paper_comparison(real_m, real_loo, out_dir)
-    plot_trajectories(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)
-    plot_transition_times(phases_true, phases_pred, times, reactors, out_dir)
-    plot_titer_summary(y_true, y_pred, reactors, out_dir)
-    plot_conformal_titer(y_true, y_pred, intervals, reactors, out_dir)
-    plot_problem_reactors(y_true, y_pred, phases_true, phases_pred, reactors, out_dir)
-    plot_phase_params(mu_days, sigma_days, phases_true, phases_pred, times, reactors, out_dir)
+        actual_titer = sub[i, -1, IDX_TITER]
+        pred_titer   = preds[-1, IDX_TITER]
+        err = abs(pred_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
+        errors.append(err)
+        if not np.isnan(err) and err <= 0.10:
+            titer_within_10 += 1
+
+        shuf_str = ''
+        if has_shuf:
+            shuf_preds = rollout(shuffled_model, seed_norm, feature_min, feature_max,
+                                 n_steps=n_pred, device=device)
+            shuf_titer = shuf_preds[-1, IDX_TITER]
+            shuf_err   = abs(shuf_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
+            if not np.isnan(shuf_err) and shuf_err <= 0.10:
+                shuf_within_10 += 1
+            shuf_str = f'{shuf_titer:>12.3f} {shuf_err:>8.1%}'
+
+        flag = 'OK' if (not np.isnan(err) and err <= 0.10) else ''
+        print(f'R{i:04d}     {actual_titer:>10.3f} {pred_titer:>12.3f} {err:>7.1%}  {flag:<4}  {shuf_str}')
+
+    print(f'\nMean titer error: {np.nanmean(errors):.1%}')
+
+    print_summary(titer_within_10, n_reactors,
+                  shuffled_within_10=shuf_within_10 if has_shuf else None)
 
 
 if __name__ == '__main__':

@@ -82,11 +82,19 @@ def main():
     parser.add_argument('--lr',      type=float, default=LR)
     parser.add_argument('--batch',   type=int,   default=BATCH_SIZE)
     parser.add_argument('--seed',    type=int,   default=42)
+    parser.add_argument('--shuffle', action='store_true',
+                        help='Permutation baseline: shuffle targets before training')
     args = parser.parse_args()
+
+    # Default output name for shuffled run
+    if args.shuffle and args.output == str(here / 'model_v2.pt'):
+        args.output = str(here / 'shuffled_v2.pt')
 
     torch.manual_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
+    if args.shuffle:
+        print('Permutation baseline: targets will be shuffled')
 
     # ------------------------------------------------------------------
     # Data
@@ -98,6 +106,10 @@ def main():
     feature_max = npz['feature_max']
     print(f'Windows: {len(windows)} | Features: {windows.shape[2]} | '
           f'Seq len: {windows.shape[1]}')
+
+    if args.shuffle:
+        rng     = np.random.default_rng(args.seed)
+        targets = targets[rng.permutation(len(targets))]
 
     dataset = WindowDataset(windows, targets)
 
@@ -169,7 +181,7 @@ def main():
     # ------------------------------------------------------------------
     # Final evaluation on best checkpoint
     # ------------------------------------------------------------------
-    ckpt = torch.load(args.output, map_location=device)
+    ckpt = torch.load(args.output, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state'])
 
     print(f'\nBest val loss: {best_val_loss:.6f}')
