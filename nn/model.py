@@ -64,23 +64,25 @@ class WindowDataset(Dataset):
     can load directly without recomputing.
     """
 
-    def __init__(self, windows, targets):
+    def __init__(self, windows, targets, doe=None):
         """
         Args:
             windows: np.ndarray (n_obs, SEQ_LEN, N_FEATURES)  normalized inputs
             targets: np.ndarray (n_obs, N_FEATURES)            raw targets
+            doe:     np.ndarray (n_obs, 3) or None             DoE coded levels
         """
         self.windows = windows.astype(np.float32)
         self.targets = targets.astype(np.float32)
+        self.doe     = doe.astype(np.float32) if doe is not None else None
 
     def __len__(self):
         return len(self.windows)
 
     def __getitem__(self, idx):
-        return (
-            torch.from_numpy(self.windows[idx]),  # x: (SEQ_LEN, N_FEATURES)
-            torch.from_numpy(self.targets[idx]),  # y: (N_FEATURES,)
-        )
+        x = torch.from_numpy(self.windows[idx])
+        y = torch.from_numpy(self.targets[idx])
+        d = torch.from_numpy(self.doe[idx]) if self.doe is not None else torch.zeros(0)
+        return x, d, y
 
 
 # ---------------------------------------------------------------------------
@@ -92,17 +94,20 @@ class NextDayPredictor(nn.Module):
     1D CNN + attention head for next-day bioprocess prediction.
 
     Input:  (batch, SEQ_LEN, N_FEATURES)  -- normalized 6-day window
+            (batch, n_doe)                -- DoE coded levels (O2, AAs, Glc)
     Output: (batch, N_FEATURES)           -- raw next-day values
 
     Architecture:
         1. Conv1d layers extract local temporal patterns across the 6-day window
         2. Attention scores each time step and produces a single context vector
-        3. Linear head maps context to next-day prediction
+        3. DoE vector concatenated to context (DoE is constant within a window)
+        4. Linear head maps context+DoE to next-day prediction
     """
 
     def __init__(self, n_features=N_FEATURES, seq_len=SEQ_LEN,
-                 hidden=64, n_conv_layers=3, dropout=0.1):
+                 hidden=64, n_conv_layers=3, dropout=0.1, n_doe=3):
         super().__init__()
+        self.n_doe = n_doe
 
         # Conv stack: (batch, n_features, seq_len) -> (batch, hidden, seq_len)
         conv_layers = [
@@ -121,16 +126,17 @@ class NextDayPredictor(nn.Module):
         # Attention: learn a scalar score per time step, softmax -> weighted sum
         self.attn = nn.Linear(hidden, 1)
 
-        # Output head
+        # Output head: takes context + DoE
         self.head = nn.Sequential(
-            nn.Linear(hidden, hidden),
+            nn.Linear(hidden + n_doe, hidden),
             nn.ReLU(),
             nn.Linear(hidden, n_features),
         )
 
-    def forward(self, x):
+    def forward(self, x, doe=None):
         """
-        x: (batch, seq_len, n_features)
+        x:   (batch, seq_len, n_features)
+        doe: (batch, n_doe) or None
         returns: (batch, n_features)
         """
         h = self.conv(x.transpose(1, 2))        # (batch, hidden, seq_len)
@@ -139,5 +145,8 @@ class NextDayPredictor(nn.Module):
         scores  = self.attn(h).squeeze(-1)       # (batch, seq_len)
         weights = torch.softmax(scores, dim=-1)  # (batch, seq_len)
         context = (h * weights.unsqueeze(-1)).sum(dim=1)  # (batch, hidden)
+
+        if self.n_doe > 0 and doe is not None:
+            context = torch.cat([context, doe], dim=-1)  # (batch, hidden + n_doe)
 
         return self.head(context)                # (batch, n_features)

@@ -69,16 +69,17 @@ def main():
     npz         = np.load(args.data, allow_pickle=True)
     windows     = npz['windows']      # (n_obs, SEQ_LEN, N_FEATURES)  normalized
     targets     = npz['targets']      # (n_obs, N_FEATURES)            raw
+    window_doe  = npz['window_doe']   # (n_obs, 3)  DoE coded levels
     feature_min = npz['feature_min']
     feature_max = npz['feature_max']
     print(f'Windows: {len(windows)} | Features: {windows.shape[2]} | '
-          f'Seq len: {windows.shape[1]}')
+          f'Seq len: {windows.shape[1]} | DoE: {window_doe.shape[1]}')
 
     if args.shuffle:
         rng     = np.random.default_rng(args.seed)
         targets = targets[rng.permutation(len(targets))]
 
-    dataset = WindowDataset(windows, targets)
+    dataset = WindowDataset(windows, targets, doe=window_doe)
 
     n_val   = max(1, int(len(dataset) * VAL_SPLIT))
     n_train = len(dataset) - n_val
@@ -94,7 +95,8 @@ def main():
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    model     = NextDayPredictor(hidden=args.hidden).to(device)
+    n_doe = window_doe.shape[1]
+    model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss()
     n_params  = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -109,10 +111,10 @@ def main():
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
+        for x, d, y in train_loader:
+            x, d, y = x.to(device), d.to(device), y.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(x), y)
+            loss = criterion(model(x, d), y)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * len(x)
@@ -121,9 +123,9 @@ def main():
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for x, y in val_loader:
-                x, y = x.to(device), y.to(device)
-                val_loss += criterion(model(x), y).item() * len(x)
+            for x, d, y in val_loader:
+                x, d, y = x.to(device), d.to(device), y.to(device)
+                val_loss += criterion(model(x, d), y).item() * len(x)
         val_loss /= n_val
 
         if val_loss < best_val_loss:
@@ -135,6 +137,7 @@ def main():
                 'feature_max': feature_max,
                 'hidden':      args.hidden,
                 'n_features':  N_FEATURES,
+                'n_doe':       n_doe,
             }, args.output)
         else:
             patience_count += 1

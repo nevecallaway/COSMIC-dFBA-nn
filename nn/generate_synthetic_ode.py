@@ -336,17 +336,19 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
 # Window building
 # ---------------------------------------------------------------------------
 
-def build_windows(trajectories):
+def build_windows(trajectories, doe_params=None):
     """
     Build sliding windows from trajectories for next-day prediction.
 
     For each reactor and each starting day d in [0, N_DAYS - SEQ_LEN):
-        x: days [d, d+SEQ_LEN)  normalized to [0, 1] per feature
-        y: day  d+SEQ_LEN       raw (unnormalized)
+        x:   days [d, d+SEQ_LEN)  normalized to [0, 1] per feature
+        y:   day  d+SEQ_LEN       raw (unnormalized)
+        doe: DoE coded levels for that reactor (O2, AAs, Glc)
 
     Returns:
         windows:     np.ndarray (n_obs, SEQ_LEN, N_WINDOW_FEATURES)  normalized
         targets:     np.ndarray (n_obs, N_WINDOW_FEATURES)            raw
+        window_doe:  np.ndarray (n_obs, 3) or None
         feature_min: np.ndarray (N_WINDOW_FEATURES,)
         feature_max: np.ndarray (N_WINDOW_FEATURES,)
         ids:         list of (reactor_idx, start_day)
@@ -359,17 +361,22 @@ def build_windows(trajectories):
     scale[scale == 0] = 1.0
     sub_norm = (sub - feature_min) / scale
 
-    windows, targets, ids = [], [], []
+    windows, targets, window_doe, ids = [], [], [], []
     N, T, _ = sub.shape
     for i in range(N):
         for d in range(T - SEQ_LEN):
             windows.append(sub_norm[i, d : d + SEQ_LEN, :])
             targets.append(sub[i, d + SEQ_LEN, :])
+            if doe_params is not None:
+                window_doe.append(doe_params[i])
             ids.append((i, d))
+
+    doe_arr = np.array(window_doe, dtype=np.float32) if window_doe else None
 
     return (
         np.array(windows, dtype=np.float32),
         np.array(targets, dtype=np.float32),
+        doe_arr,
         feature_min,
         feature_max,
         ids,
@@ -455,7 +462,8 @@ def generate_all(data_dir=None, output_file=None):
     times_out    = np.tile(T_EVAL, (len(trajectories), 1))
 
     print('\nBuilding sliding windows...')
-    windows, targets, feature_min, feature_max, _ = build_windows(trajectories)
+    windows, targets, window_doe, feature_min, feature_max, _ = build_windows(
+        trajectories, doe_params=doe_params)
     print(f'  {len(windows)} windows  '
           f'({len(trajectories)} reactors x {N_DAYS - SEQ_LEN} windows each)')
 
@@ -470,6 +478,7 @@ def generate_all(data_dir=None, output_file=None):
         units=np.array(units_list, dtype=object),
         windows=windows,
         targets=targets,
+        window_doe=window_doe,
         feature_min=feature_min,
         feature_max=feature_max,
     )

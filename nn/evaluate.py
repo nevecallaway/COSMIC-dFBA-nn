@@ -50,18 +50,19 @@ PAPER = {
 # Rollout
 # ---------------------------------------------------------------------------
 
-def rollout(model, seed_norm, feature_min, feature_max, n_steps, device):
+def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=None):
     scale = feature_max - feature_min
     scale[scale == 0] = 1.0
 
-    window = seed_norm.copy()
-    preds  = []
+    window   = seed_norm.copy()
+    doe_t    = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
+    preds    = []
 
     model.eval()
     with torch.no_grad():
         for _ in range(n_steps):
             x        = torch.from_numpy(window).unsqueeze(0).float().to(device)
-            pred_raw = model(x).squeeze(0).cpu().numpy()
+            pred_raw = model(x, doe_t).squeeze(0).cpu().numpy()
             preds.append(pred_raw)
             pred_norm = np.clip((pred_raw - feature_min) / scale, 0.0, 1.0)
             window    = np.vstack([window[1:], pred_norm])
@@ -124,13 +125,15 @@ def main():
     feature_min = ckpt['feature_min']
     feature_max = ckpt['feature_max']
 
-    model = NextDayPredictor(hidden=ckpt.get('hidden', 64)).to(device)
+    model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
+                             n_doe=ckpt.get('n_doe', 0)).to(device)
     model.load_state_dict(ckpt['model_state'])
     model.eval()
     print(f'Loaded {args.model}')
 
     npz          = np.load(args.data, allow_pickle=True)
     trajectories = npz['trajectories'].astype(np.float32)
+    doe_params   = npz['doe_params'].astype(np.float32)   # (N, 3)
     n_reactors, n_days, _ = trajectories.shape
     sub   = trajectories[:, :, FEATURE_INDICES]
     scale = feature_max - feature_min
@@ -160,7 +163,7 @@ def main():
         seed_raw  = sub[i, :SEQ_LEN, :]
         seed_norm = np.clip((seed_raw - feature_min) / scale, 0.0, 1.0)
         preds     = rollout(model, seed_norm, feature_min, feature_max,
-                            n_steps=n_pred, device=device)
+                            n_steps=n_pred, device=device, doe=doe_params[i])
 
         actual_titer = sub[i, -1, IDX_TITER]
         pred_titer   = preds[-1, IDX_TITER]
@@ -172,7 +175,7 @@ def main():
         shuf_str = ''
         if has_shuf:
             shuf_preds = rollout(shuffled_model, seed_norm, feature_min, feature_max,
-                                 n_steps=n_pred, device=device)
+                                 n_steps=n_pred, device=device, doe=doe_params[i])
             shuf_titer = shuf_preds[-1, IDX_TITER]
             shuf_err   = abs(shuf_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
             if not np.isnan(shuf_err) and shuf_err <= 0.10:
