@@ -144,6 +144,9 @@ def main():
                 val_loss += criterion(model(x, d), y).item() * len(x)
         val_loss /= n_val
 
+        if epoch % 10 == 0 or epoch == 1:
+            print(f'Epoch {epoch:4d}  train={train_loss:.6f}  val={val_loss:.6f}')
+
         if val_loss < best_val_loss:
             best_val_loss  = val_loss
             patience_count = 0
@@ -160,6 +163,7 @@ def main():
         else:
             patience_count += 1
             if patience_count >= PATIENCE:
+                print(f'Early stop at epoch {epoch}  best_val={best_val_loss:.6f}')
                 break
 
     print(f'Saved to {args.output}')
