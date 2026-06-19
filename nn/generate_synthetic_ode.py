@@ -383,12 +383,55 @@ def build_windows(trajectories, doe_params=None):
     )
 
 
+# Extra reactor generation
+# ---------------------------------------------------------------------------
+
+def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict, seed=0):
+    """
+    Generate n_extra additional synthetic reactors with randomly sampled DoE.
+
+    Each extra reactor gets:
+      - DoE sampled uniformly from [-1, 1] for each factor (O2, AAs, Glc)
+      - Rates randomly drawn from one of the existing 10 reactors
+      - Phase fractions randomly drawn from one of the existing 10 reactors
+
+    Returns:
+        trajectories: np.ndarray (n_extra, N_DAYS, N_COMPONENTS)
+        doe_params:   np.ndarray (n_extra, 3)
+    """
+    rng = np.random.default_rng(seed)
+    trajs, does = [], []
+
+    for k in range(n_extra):
+        doe = {
+            'O2':  float(rng.uniform(-1, 1)),
+            'AAs': float(rng.uniform(-1, 1)),
+            'Glc': float(rng.uniform(-1, 1)),
+        }
+        # Borrow rates and phase fractions from a random existing reactor
+        donor = reactor_ids[rng.integers(len(reactor_ids))]
+        traj, _ = generate_reactor(
+            f'extra_{k:04d}',
+            rates_growth[donor],
+            rates_prod[donor],
+            pm_dict[donor],
+            doe,
+        )
+        trajs.append(traj)
+        does.append([doe['O2'], doe['AAs'], doe['Glc']])
+        if (k + 1) % 10 == 0:
+            print(f'  Generated {k + 1}/{n_extra} extra reactors')
+
+    return np.array(trajs), np.array(does, dtype=np.float32)
+
+
 # Main generation
 # ---------------------------------------------------------------------------
 
-def generate_all(data_dir=None, output_file=None):
+def generate_all(data_dir=None, output_file=None, n_extra=50):
     """
-    Generate unnormalized trajectories for all 10 reactors.
+    Generate unnormalized trajectories for all 10 reactors plus n_extra
+    synthetic reactors with randomly sampled DoE conditions.
 
     Outputs synthetic_ode.npz and synthetic_ode.xlsx in the same directory.
     Run by Sarat to verify before using for model training.
@@ -459,7 +502,19 @@ def generate_all(data_dir=None, output_file=None):
     trajectories = np.array(trajectories)
     phases_out   = np.array(phases_out)
     doe_params   = np.array(doe_params)
-    times_out    = np.tile(T_EVAL, (len(trajectories), 1))
+
+    if n_extra > 0:
+        print(f'\nGenerating {n_extra} extra reactors with random DoE...')
+        extra_trajs, extra_doe = generate_extra(
+            n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict)
+        # Dummy phases for extras: repeat last phase value from first reactor
+        extra_phases = np.tile(phases_out[0], (n_extra, 1))
+        trajectories = np.concatenate([trajectories, extra_trajs], axis=0)
+        doe_params   = np.concatenate([doe_params, extra_doe], axis=0)
+        phases_out   = np.concatenate([phases_out, extra_phases], axis=0)
+        print(f'Total reactors: {len(trajectories)}')
+
+    times_out = np.tile(T_EVAL, (len(trajectories), 1))
 
     print('\nBuilding sliding windows...')
     windows, targets, window_doe, feature_min, feature_max, _ = build_windows(
@@ -574,7 +629,13 @@ def plot_comparison(trajectories, reactor_ids, component_names, data_dir=None):
 
 
 if __name__ == '__main__':
-    trajs, times, phases, doe_params, component_names = generate_all()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--n-extra', type=int, default=50,
+                        help='Number of extra reactors with random DoE (default: 50)')
+    args = parser.parse_args()
+
+    trajs, times, phases, doe_params, component_names = generate_all(n_extra=args.n_extra)
     reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
                    'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
-    plot_comparison(trajs, reactor_ids, component_names)
+    plot_comparison(trajs[:10], reactor_ids, component_names)
