@@ -20,7 +20,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from pathlib import Path
 
 from model import NextDayPredictor, WindowDataset, N_FEATURES
@@ -84,21 +84,27 @@ def main():
     print(f'Windows: {len(windows)} | Features: {windows.shape[2]} | '
           f'Seq len: {windows.shape[1]} | DoE: {window_doe.shape[1]}')
 
+    # Split by reactor, not by window, to prevent data leakage
+    reactor_idx  = npz['window_reactor_idx']
+    all_reactors = np.unique(reactor_idx)
+    rng_split    = np.random.default_rng(args.seed)
+    rng_split.shuffle(all_reactors)
+    n_val_reactors = max(1, int(len(all_reactors) * VAL_SPLIT))
+    val_reactors   = set(all_reactors[:n_val_reactors].tolist())
+    train_mask = np.array([r not in val_reactors for r in reactor_idx])
+    val_mask   = ~train_mask
+
     if args.shuffle:
         rng     = np.random.default_rng(args.seed)
         targets = targets[rng.permutation(len(targets))]
 
-    dataset = WindowDataset(windows, targets, doe=window_doe)
-
-    n_val   = max(1, int(len(dataset) * VAL_SPLIT))
-    n_train = len(dataset) - n_val
-    train_ds, val_ds = random_split(
-        dataset, [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
+    train_ds = WindowDataset(windows[train_mask], targets[train_mask], doe=window_doe[train_mask])
+    val_ds   = WindowDataset(windows[val_mask],   targets[val_mask],   doe=window_doe[val_mask])
+    n_train, n_val = len(train_ds), len(val_ds)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False)
+    print(f'Train reactors: {len(all_reactors) - n_val_reactors} | Val reactors: {n_val_reactors}')
     print(f'Train windows: {n_train} | Val windows: {n_val}')
 
     # ------------------------------------------------------------------
