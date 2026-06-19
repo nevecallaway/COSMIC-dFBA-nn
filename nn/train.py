@@ -51,6 +51,9 @@ def main():
     parser.add_argument('--seed',    type=int,   default=42)
     parser.add_argument('--shuffle', action='store_true',
                         help='Permutation baseline: shuffle targets before training')
+    parser.add_argument('--titer-weight', type=float, default=1.0,
+                        help='Loss weight multiplier for titer feature (index 2). '
+                             'Values >1 penalise titer errors more heavily.')
     args = parser.parse_args()
 
     # Default output name for shuffled run
@@ -98,7 +101,14 @@ def main():
     n_doe = window_doe.shape[1]
     model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.MSELoss()
+
+    # Per-feature loss weights: titer is feature index 2 in the 8-feature vector
+    loss_weights = torch.ones(N_FEATURES, device=device)
+    loss_weights[2] = args.titer_weight   # IDX_TITER = 2
+
+    def criterion(pred, target):
+        return ((pred - target) ** 2 * loss_weights).mean()
+
     n_params  = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Parameters: {n_params:,}')
 
