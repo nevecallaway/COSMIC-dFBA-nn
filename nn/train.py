@@ -72,9 +72,15 @@ def main():
     npz         = np.load(args.data, allow_pickle=True)
     windows     = npz['windows']      # (n_obs, SEQ_LEN, N_FEATURES)  normalized
     targets     = npz['targets']      # (n_obs, N_FEATURES)            raw
-    window_doe  = npz['window_doe']   # (n_obs, 3)  DoE coded levels
     feature_min = npz['feature_min']
     feature_max = npz['feature_max']
+
+    # Normalize DoE inputs to [0, 1] using per-column min/max
+    doe_min    = npz['doe_min'].astype(np.float32)
+    doe_max    = npz['doe_max'].astype(np.float32)
+    doe_scale  = doe_max - doe_min
+    doe_scale[doe_scale == 0] = 1.0
+    window_doe = ((npz['window_doe'] - doe_min) / doe_scale).astype(np.float32)
     print(f'Windows: {len(windows)} | Features: {windows.shape[2]} | '
           f'Seq len: {windows.shape[1]} | DoE: {window_doe.shape[1]}')
 
@@ -145,6 +151,8 @@ def main():
                 'model_state': model.state_dict(),
                 'feature_min': feature_min,
                 'feature_max': feature_max,
+                'doe_min':     doe_min,
+                'doe_max':     doe_max,
                 'hidden':      args.hidden,
                 'n_features':  N_FEATURES,
                 'n_doe':       n_doe,

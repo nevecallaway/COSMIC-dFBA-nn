@@ -532,6 +532,9 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
 
     n_original = len(reactor_ids)   # number of real-data reactors (always 10)
 
+    doe_min = doe_params.min(axis=0)
+    doe_max = doe_params.max(axis=0)
+
     np.savez(
         output_file,
         trajectories=trajectories,
@@ -539,6 +542,8 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
         ics=trajectories[:, 0, :],
         phases=phases_out,
         doe_params=doe_params,
+        doe_min=doe_min,
+        doe_max=doe_max,
         components=np.array(component_names, dtype=object),
         units=np.array(units_list, dtype=object),
         windows=windows,
