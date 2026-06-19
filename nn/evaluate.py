@@ -199,6 +199,7 @@ def main():
         # real_trajs: (N, T, 25) already per-reactor-per-component normalized
 
         real_sub = real_trajs[:, :, FEATURE_INDICES].astype(np.float32)
+        real_doe = real_meta.get('doe_params')   # (N, 3) or None
         n_real, t_real, _ = real_sub.shape
         n_real_pred = t_real - SEQ_LEN
 
@@ -206,9 +207,10 @@ def main():
         n_pts = 0
 
         for i in range(n_real):
-            seed = real_sub[i, :SEQ_LEN, :]   # already in [0,1]
+            seed     = real_sub[i, :SEQ_LEN, :]   # already in [0,1]
+            doe_i    = real_doe[i].astype(np.float32) if real_doe is not None else None
             preds_raw = rollout(model, seed, feature_min, feature_max,
-                                n_steps=n_real_pred, device=device)
+                                n_steps=n_real_pred, device=device, doe=doe_i)
 
             # Normalize predictions per-reactor to match real data scale
             actual = real_sub[i, SEQ_LEN:, :]
