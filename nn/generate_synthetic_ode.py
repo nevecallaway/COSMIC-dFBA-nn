@@ -404,10 +404,14 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
     for k in range(n_extra):
         doe = {
-            'O2':  float(rng.uniform(-1, 1)),
+            'O2':  float(rng.choice([-1, 0, 1])),   # categorical
             'AAs': float(rng.uniform(-1, 1)),
             'Glc': float(rng.uniform(-1, 1)),
         }
+        cin = make_cin(doe)
+        glc_conc = cin[IDX_GLC]
+        aas_conc = float(sum(cin[i] for i in AAS_INDICES))
+
         # Borrow rates and phase fractions from a random existing reactor
         donor = reactor_ids[rng.integers(len(reactor_ids))]
         traj, _ = generate_reactor(
@@ -418,7 +422,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
             doe,
         )
         trajs.append(traj)
-        does.append([doe['O2'], doe['AAs'], doe['Glc']])
+        does.append([doe['O2'], glc_conc, aas_conc])
         if (k + 1) % 10 == 0:
             print(f'  Generated {k + 1}/{n_extra} extra reactors')
 
@@ -490,12 +494,16 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
         pm_vals = np.array([pm_days.get(int(t), list(pm_days.values())[-1])
                             for t in times])
 
+        cin = make_cin(doe)
+        glc_conc = cin[IDX_GLC]
+        aas_conc = float(sum(cin[i] for i in AAS_INDICES))
+
         trajectories.append(traj)
         phases_out.append(pm_vals)
-        doe_params.append([doe['O2'], doe['AAs'], doe['Glc']])
+        doe_params.append([doe['O2'], glc_conc, aas_conc])
 
-        print(f'  {reactor} (O2={doe["O2"]:+.0f} AAs={doe["AAs"]:+.0f} '
-              f'Glc={doe["Glc"]:+.0f}):  '
+        print(f'  {reactor} (O2={doe["O2"]:+.0f} Glc={glc_conc:.1f} mmol/L '
+              f'AAs={aas_conc:.2f} mmol/L):  '
               f'CD_final={traj[-1, IDX_CD]:.3f} E9/L  '
               f'Titer_final={traj[-1, IDX_TIT]:.2f} mg/L')
 
