@@ -116,6 +116,8 @@ def main():
     parser.add_argument('--data',           default=str(here / 'synthetic_ode.npz'))
     parser.add_argument('--real-data',      default=str(here / 'data' / 'data_2.csv'),
                         help='Path to real experimental data for validation')
+    parser.add_argument('--n-eval',         type=int, default=None,
+                        help='Evaluate only the first N reactors (default: n_original from npz, or all)')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -134,7 +136,15 @@ def main():
     npz          = np.load(args.data, allow_pickle=True)
     trajectories = npz['trajectories'].astype(np.float32)
     doe_params   = npz['doe_params'].astype(np.float32)   # (N, 3)
+
+    # Limit evaluation to original real-data reactors by default.
+    # n_original is saved by generate_synthetic_ode.py; fall back to all.
+    n_original = int(npz['n_original']) if 'n_original' in npz else len(trajectories)
+    n_eval     = args.n_eval if args.n_eval is not None else n_original
+    trajectories = trajectories[:n_eval]
+    doe_params   = doe_params[:n_eval]
     n_reactors, n_days, _ = trajectories.shape
+    print(f'Evaluating {n_reactors} reactors (n_original={n_original}, total in npz={len(npz["trajectories"])})')
     sub   = trajectories[:, :, FEATURE_INDICES]
     scale = feature_max - feature_min
     scale[scale == 0] = 1.0

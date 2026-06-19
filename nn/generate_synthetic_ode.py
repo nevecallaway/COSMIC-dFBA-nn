@@ -522,6 +522,8 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
     print(f'  {len(windows)} windows  '
           f'({len(trajectories)} reactors x {N_DAYS - SEQ_LEN} windows each)')
 
+    n_original = len(reactor_ids)   # number of real-data reactors (always 10)
+
     np.savez(
         output_file,
         trajectories=trajectories,
@@ -536,6 +538,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
         window_doe=window_doe,
         feature_min=feature_min,
         feature_max=feature_max,
+        n_original=np.array(n_original),
     )
     print(f'\nSaved {trajectories.shape} array + {len(windows)} windows')
     print(f'Output: {output_file}')
