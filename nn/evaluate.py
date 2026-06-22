@@ -50,22 +50,29 @@ PAPER = {
 # Rollout
 # ---------------------------------------------------------------------------
 
-def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=None):
+def rollout(model, seed_norm, feature_min, feature_max, n_steps, device,
+            doe=None, return_uncertainty=False):
     """Autoregressive rollout. Returns normalized [0,1] predictions."""
-    window = seed_norm.copy()
-    doe_t  = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
-    preds  = []
+    window   = seed_norm.copy()
+    doe_t    = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
+    preds    = []
+    log_vars = []
 
     model.eval()
     with torch.no_grad():
         for _ in range(n_steps):
             x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
-            mu, _     = model(x, doe_t)          # discard log_var at inference
+            mu, lv    = model(x, doe_t)
             pred_norm = np.clip(mu.squeeze(0).cpu().numpy(), 0.0, 1.0)
             preds.append(pred_norm)
+            if return_uncertainty:
+                log_vars.append(lv.squeeze(0).cpu().numpy())
             window = np.vstack([window[1:], pred_norm])
 
-    return np.array(preds)   # (n_steps, N_FEATURES) normalized [0,1]
+    preds = np.array(preds)   # (n_steps, N_FEATURES) normalized [0,1]
+    if return_uncertainty:
+        return preds, np.array(log_vars)
+    return preds
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +171,12 @@ def main():
     shuf_within_10  = 0
     errors          = []
 
+    # Accumulators for new metrics
+    all_preds_norm   = []   # (n_reactors, n_pred, N_FEATURES) normalized
+    all_actuals_norm = []   # (n_reactors, n_pred, N_FEATURES) normalized
+    all_log_vars     = []   # (n_reactors, n_pred, N_FEATURES)
+    endpoint_within_10 = np.zeros(N_FEATURES, dtype=int)
+
     has_shuf = shuffled_model is not None
     shuf_col = f'{"Shuf pred":>12} {"Shuf err":>9}' if has_shuf else ''
     print(f'\n{"Reactor":<10} {"Actual":>10} {"Predicted":>12} {"Error":>8}  {shuf_col}')
@@ -177,21 +190,37 @@ def main():
             doe_scale = doe_max - doe_min
             doe_scale[doe_scale == 0] = 1.0
             doe_raw = (doe_raw - doe_min) / doe_scale
-        preds     = rollout(model, seed_norm, feature_min, feature_max,
-                            n_steps=n_pred, device=device, doe=doe_raw)
+        preds, log_var = rollout(model, seed_norm, feature_min, feature_max,
+                                 n_steps=n_pred, device=device, doe=doe_raw,
+                                 return_uncertainty=True)
 
-        actual_titer = sub[i, -1, IDX_TITER]   # raw
-        pred_titer   = preds[-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]  # denormalized
+        # Normalized actuals for R² and calibration
+        actual_norm = np.clip((sub[i, SEQ_LEN:, :] - feature_min) / scale, 0.0, 1.0)
+        all_preds_norm.append(preds)
+        all_actuals_norm.append(actual_norm)
+        all_log_vars.append(log_var)
+
+        # Titer within 10% (primary benchmark)
+        actual_titer = sub[i, -1, IDX_TITER]
+        pred_titer   = preds[-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]
         err = abs(pred_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
         errors.append(err)
         if not np.isnan(err) and err <= 0.10:
             titer_within_10 += 1
 
+        # Endpoint within 10% for all features
+        for f in range(N_FEATURES):
+            actual_end = sub[i, -1, f]
+            pred_end   = preds[-1, f] * scale[f] + feature_min[f]
+            if actual_end > 0:
+                if abs(pred_end - actual_end) / actual_end <= 0.10:
+                    endpoint_within_10[f] += 1
+
         shuf_str = ''
         if has_shuf:
             shuf_preds = rollout(shuffled_model, seed_norm, feature_min, feature_max,
                                  n_steps=n_pred, device=device, doe=doe_raw)
-            shuf_titer = shuf_preds[-1, IDX_TITER]
+            shuf_titer = shuf_preds[-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]
             shuf_err   = abs(shuf_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
             if not np.isnan(shuf_err) and shuf_err <= 0.10:
                 shuf_within_10 += 1
@@ -201,6 +230,33 @@ def main():
         print(f'R{i:04d}     {actual_titer:>10.3f} {pred_titer:>12.3f} {err:>7.1%}  {flag:<4}  {shuf_str}')
 
     print(f'\nMean titer error: {np.nanmean(errors):.1%}')
+
+    # ------------------------------------------------------------------
+    # R², endpoint within 10%, calibration
+    # ------------------------------------------------------------------
+    all_preds_norm   = np.array(all_preds_norm)    # (R, T, F)
+    all_actuals_norm = np.array(all_actuals_norm)  # (R, T, F)
+    all_log_vars     = np.array(all_log_vars)      # (R, T, F)
+
+    print(f'\n{"Feature":<18} {"R²":>6}  {"End 10%":>8}  {"90% Cov":>8}')
+    print('-' * 46)
+    for f, name in enumerate(FEATURE_NAMES):
+        y_true = all_actuals_norm[:, :, f].flatten()
+        y_pred = all_preds_norm[:, :, f].flatten()
+
+        ss_res = ((y_true - y_pred) ** 2).sum()
+        ss_tot = ((y_true - y_true.mean()) ** 2).sum()
+        r2     = 1 - ss_res / ss_tot if ss_tot > 0 else float('nan')
+
+        end_str = f'{endpoint_within_10[f]}/{n_reactors}'
+
+        sigma   = np.exp(0.5 * all_log_vars[:, :, f].flatten())
+        lower   = y_pred - 1.645 * sigma
+        upper   = y_pred + 1.645 * sigma
+        coverage = ((y_true >= lower) & (y_true <= upper)).mean()
+
+        print(f'{name:<18} {r2:>6.3f}  {end_str:>8}  {coverage:>7.1%}')
+    print()
 
     # ------------------------------------------------------------------
     # Real data validation (if available)
