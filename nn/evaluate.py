@@ -284,41 +284,53 @@ def main():
     # ------------------------------------------------------------------
     if Path(args.real_data).exists():
         print(f'\n--- Real data validation ({args.real_data}) ---')
-        print('Note: real data is per-reactor normalized [0,1]. '
-              'Predictions normalized per-reactor for comparison.')
+        print('RMSE in per-reactor reference space: predictions and actuals both')
+        print('denormalized using each reactor\'s own feature min/max.')
 
         real_trajs, _, _, real_meta = load_experimental_data(args.real_data)
-        # real_trajs: (N, T, 25) already per-reactor-per-component normalized
-
         real_sub = real_trajs[:, :, FEATURE_INDICES].astype(np.float32)
         real_doe = real_meta.get('doe_params')   # (N, 3) or None
         n_real, t_real, _ = real_sub.shape
         n_real_pred = t_real - SEQ_LEN
 
-        sq_err_real = np.zeros(N_FEATURES)
-        n_pts = 0
+        real_reactors = real_meta.get('reactors', [f'R{i:04d}' for i in range(n_real)])
 
+        # Per-reactor per-feature RMSE, denormalized per-reactor
+        rmse_per_reactor = np.zeros((n_real, N_FEATURES))
         for i in range(n_real):
-            seed     = real_sub[i, :SEQ_LEN, :]   # already in [0,1]
-            doe_i    = real_doe[i].astype(np.float32) if real_doe is not None else None
-            preds_raw = rollout(model, seed, feature_min, feature_max,
-                                n_steps=n_real_pred, device=device, doe=doe_i)
+            # Per-reactor reference: min/max of each feature over the full real trajectory
+            full_traj  = real_sub[i, :, :]                     # (t_real, N_FEATURES)
+            r_min      = full_traj.min(axis=0)                  # (N_FEATURES,)
+            r_max      = full_traj.max(axis=0)                  # (N_FEATURES,)
+            r_scale    = r_max - r_min
+            r_scale[r_scale == 0] = 1.0
 
-            # Normalize predictions per-reactor to match real data scale
-            actual = real_sub[i, SEQ_LEN:, :]
-            for f in range(N_FEATURES):
-                mx = preds_raw[:, f].max()
-                if mx > 0:
-                    preds_raw[:, f] /= mx
+            seed  = real_sub[i, :SEQ_LEN, :]
+            doe_i = real_doe[i].astype(np.float32) if real_doe is not None else None
+            preds_norm = rollout(model, seed, feature_min, feature_max,
+                                 n_steps=n_real_pred, device=device, doe=doe_i)
 
-            sq_err_real += ((preds_raw - actual) ** 2).sum(axis=0)
-            n_pts += n_real_pred
+            # Denormalize both to this reactor's own reference space
+            actual_norm = real_sub[i, SEQ_LEN:, :]                    # (n_pred, N_FEATURES)
+            pred_phys   = preds_norm  * r_scale + r_min               # (n_pred, N_FEATURES)
+            actual_phys = actual_norm * r_scale + r_min               # (n_pred, N_FEATURES)
 
-        rmse_real = np.sqrt(sq_err_real / n_pts)
-        print(f'\n  Per-feature RMSE vs real trajectories (normalized space):')
-        for name, r in zip(FEATURE_NAMES, rmse_real):
-            print(f'    {name:<18}: {r:.4f}')
-        print(f'    {"Mean":<18}: {rmse_real.mean():.4f}')
+            rmse_per_reactor[i] = np.sqrt(((pred_phys - actual_phys) ** 2).mean(axis=0))
+
+        # Header: reactor | one col per feature | mean
+        short_names = ['CellD', 'CellSz', 'Titer', 'Glc', 'Gln', 'Asn', 'Ser', 'Gly']
+        col_w = 8
+        header = f'  {"Reactor":<10}' + ''.join(f'{n:>{col_w}}' for n in short_names) + f'{"Mean":>{col_w}}'
+        print(f'\n{header}')
+        print(f'  {"-" * (10 + col_w * (N_FEATURES + 1))}')
+        for i, rname in enumerate(real_reactors):
+            row = f'  {rname:<10}' + ''.join(f'{rmse_per_reactor[i, f]:>{col_w}.4f}' for f in range(N_FEATURES))
+            row += f'{rmse_per_reactor[i].mean():>{col_w}.4f}'
+            print(row)
+        print(f'  {"-" * (10 + col_w * (N_FEATURES + 1))}')
+        mean_row = f'  {"Mean":<10}' + ''.join(f'{rmse_per_reactor[:, f].mean():>{col_w}.4f}' for f in range(N_FEATURES))
+        mean_row += f'{rmse_per_reactor.mean():>{col_w}.4f}'
+        print(mean_row)
     else:
         print(f'\nReal data not found at {args.real_data} -- skipping real validation')
 
