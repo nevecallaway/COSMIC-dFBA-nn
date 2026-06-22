@@ -172,10 +172,12 @@ def main():
     errors          = []
 
     # Accumulators for new metrics
-    all_preds_norm   = []   # (n_reactors, n_pred, N_FEATURES) normalized
-    all_actuals_norm = []   # (n_reactors, n_pred, N_FEATURES) normalized
-    all_log_vars     = []   # (n_reactors, n_pred, N_FEATURES)
-    endpoint_within_10 = np.zeros(N_FEATURES, dtype=int)
+    all_preds_norm        = []
+    all_actuals_norm      = []
+    all_log_vars          = []
+    all_shuf_preds_norm   = []
+    endpoint_within_10      = np.zeros(N_FEATURES, dtype=int)
+    shuf_endpoint_within_10 = np.zeros(N_FEATURES, dtype=int)
 
     has_shuf = shuffled_model is not None
     shuf_col = f'{"Shuf pred":>12} {"Shuf err":>9}' if has_shuf else ''
@@ -220,11 +222,18 @@ def main():
         if has_shuf:
             shuf_preds = rollout(shuffled_model, seed_norm, feature_min, feature_max,
                                  n_steps=n_pred, device=device, doe=doe_raw)
+            all_shuf_preds_norm.append(shuf_preds)
             shuf_titer = shuf_preds[-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]
             shuf_err   = abs(shuf_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
             if not np.isnan(shuf_err) and shuf_err <= 0.10:
                 shuf_within_10 += 1
             shuf_str = f'{shuf_titer:>12.3f} {shuf_err:>8.1%}'
+            for f in range(N_FEATURES):
+                actual_end  = sub[i, -1, f]
+                shuf_end    = shuf_preds[-1, f] * scale[f] + feature_min[f]
+                if actual_end > 0:
+                    if abs(shuf_end - actual_end) / actual_end <= 0.10:
+                        shuf_endpoint_within_10[f] += 1
 
         flag = 'OK' if (not np.isnan(err) and err <= 0.10) else ''
         print(f'R{i:04d}     {actual_titer:>10.3f} {pred_titer:>12.3f} {err:>7.1%}  {flag:<4}  {shuf_str}')
@@ -234,12 +243,16 @@ def main():
     # ------------------------------------------------------------------
     # R², endpoint within 10%, calibration
     # ------------------------------------------------------------------
-    all_preds_norm   = np.array(all_preds_norm)    # (R, T, F) normalized
-    all_actuals_norm = np.array(all_actuals_norm)  # (R, T, F) normalized
-    all_log_vars     = np.array(all_log_vars)      # (R, T, F)
+    all_preds_norm   = np.array(all_preds_norm)
+    all_actuals_norm = np.array(all_actuals_norm)
+    all_log_vars     = np.array(all_log_vars)
+    has_shuf_preds   = len(all_shuf_preds_norm) == n_reactors
+    if has_shuf_preds:
+        all_shuf_preds_norm = np.array(all_shuf_preds_norm)
 
-    print(f'\n{"Feature":<18} {"R²":>6}  {"End 10%":>8}  {"90% Cov":>8}')
-    print('-' * 46)
+    shuf_header = f'  {"Shuf R²":>7}  {"Shuf E10%":>9}' if has_shuf_preds else ''
+    print(f'\n{"Feature":<18} {"R²":>6}  {"End 10%":>8}  {"90% Cov":>8}{shuf_header}')
+    print('-' * (46 + (20 if has_shuf_preds else 0)))
     for f, name in enumerate(FEATURE_NAMES):
         y_true = all_actuals_norm[:, :, f].flatten()
         y_pred = all_preds_norm[:, :, f].flatten()
@@ -255,7 +268,15 @@ def main():
         upper    = y_pred + 1.645 * sigma
         coverage = ((y_true >= lower) & (y_true <= upper)).mean()
 
-        print(f'{name:<18} {r2:>6.3f}  {end_str:>8}  {coverage:>7.1%}')
+        shuf_str = ''
+        if has_shuf_preds:
+            y_shuf   = all_shuf_preds_norm[:, :, f].flatten()
+            ss_res_s = ((y_true - y_shuf) ** 2).sum()
+            r2_shuf  = 1 - ss_res_s / ss_tot if ss_tot > 0 else float('nan')
+            shuf_end = f'{shuf_endpoint_within_10[f]}/{n_reactors}'
+            shuf_str = f'  {r2_shuf:>7.3f}  {shuf_end:>9}'
+
+        print(f'{name:<18} {r2:>6.3f}  {end_str:>8}  {coverage:>7.1%}{shuf_str}')
     print()
 
     # ------------------------------------------------------------------
