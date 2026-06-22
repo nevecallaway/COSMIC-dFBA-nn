@@ -295,13 +295,19 @@ def main():
 
         real_reactors = real_meta.get('reactors', [f'R{i:04d}' for i in range(n_real)])
 
-        # Per-reactor per-feature RMSE, denormalized per-reactor
-        rmse_per_reactor = np.zeros((n_real, N_FEATURES))
+        # Per-reactor per-feature RMSE and titer endpoint, denormalized per-reactor
+        rmse_per_reactor   = np.zeros((n_real, N_FEATURES))
+        real_titer_within_10 = 0
+        real_titer_errors    = []
+
+        print(f'\n{"Reactor":<10} {"Actual":>10} {"Predicted":>12} {"Error":>8}')
+        print('-' * 44)
+
         for i in range(n_real):
             # Per-reactor reference: min/max of each feature over the full real trajectory
-            full_traj  = real_sub[i, :, :]                     # (t_real, N_FEATURES)
-            r_min      = full_traj.min(axis=0)                  # (N_FEATURES,)
-            r_max      = full_traj.max(axis=0)                  # (N_FEATURES,)
+            full_traj  = real_sub[i, :, :]          # (t_real, N_FEATURES)
+            r_min      = full_traj.min(axis=0)       # (N_FEATURES,)
+            r_max      = full_traj.max(axis=0)       # (N_FEATURES,)
             r_scale    = r_max - r_min
             r_scale[r_scale == 0] = 1.0
 
@@ -311,17 +317,31 @@ def main():
                                  n_steps=n_real_pred, device=device, doe=doe_i)
 
             # Denormalize both to this reactor's own reference space
-            actual_norm = real_sub[i, SEQ_LEN:, :]                    # (n_pred, N_FEATURES)
-            pred_phys   = preds_norm  * r_scale + r_min               # (n_pred, N_FEATURES)
-            actual_phys = actual_norm * r_scale + r_min               # (n_pred, N_FEATURES)
+            actual_norm = real_sub[i, SEQ_LEN:, :]               # (n_pred, N_FEATURES)
+            pred_phys   = preds_norm  * r_scale + r_min           # (n_pred, N_FEATURES)
+            actual_phys = actual_norm * r_scale + r_min           # (n_pred, N_FEATURES)
 
             rmse_per_reactor[i] = np.sqrt(((pred_phys - actual_phys) ** 2).mean(axis=0))
 
-        # Header: reactor | one col per feature | mean
+            # Titer endpoint within 10%
+            actual_titer = actual_phys[-1, IDX_TITER]
+            pred_titer   = pred_phys[-1, IDX_TITER]
+            err = abs(pred_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
+            real_titer_errors.append(err)
+            flag = 'OK' if (not np.isnan(err) and err <= 0.10) else ''
+            if not np.isnan(err) and err <= 0.10:
+                real_titer_within_10 += 1
+            rname = real_reactors[i]
+            print(f'{rname:<10} {actual_titer:>10.3f} {pred_titer:>12.3f} {err:>7.1%}  {flag}')
+
+        print(f'\nMean real titer error: {np.nanmean(real_titer_errors):.1%}')
+        print(f'Titer within 10%: {real_titer_within_10}/{n_real}')
+
+        # RMSE table
         short_names = ['CellD', 'CellSz', 'Titer', 'Glc', 'Gln', 'Asn', 'Ser', 'Gly']
         col_w = 8
-        header = f'  {"Reactor":<10}' + ''.join(f'{n:>{col_w}}' for n in short_names) + f'{"Mean":>{col_w}}'
-        print(f'\n{header}')
+        header = f'\n  {"Reactor":<10}' + ''.join(f'{n:>{col_w}}' for n in short_names) + f'{"Mean":>{col_w}}'
+        print(header)
         print(f'  {"-" * (10 + col_w * (N_FEATURES + 1))}')
         for i, rname in enumerate(real_reactors):
             row = f'  {rname:<10}' + ''.join(f'{rmse_per_reactor[i, f]:>{col_w}.4f}' for f in range(N_FEATURES))
