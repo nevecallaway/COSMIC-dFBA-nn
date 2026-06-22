@@ -51,7 +51,10 @@ PAPER = {
 # ---------------------------------------------------------------------------
 
 def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=None):
-    """Autoregressive rollout. Returns normalized [0,1] predictions."""
+    """Autoregressive rollout. Returns raw predictions."""
+    scale  = feature_max - feature_min
+    scale[scale == 0] = 1.0
+
     window = seed_norm.copy()
     doe_t  = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
     preds  = []
@@ -59,13 +62,14 @@ def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=Non
     model.eval()
     with torch.no_grad():
         for _ in range(n_steps):
-            x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
-            pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()
-            pred_norm = np.clip(pred_norm, 0.0, 1.0)
-            preds.append(pred_norm)
+            x        = torch.from_numpy(window).unsqueeze(0).float().to(device)
+            mu, _    = model(x, doe_t)          # discard log_var at inference
+            pred_raw = mu.squeeze(0).cpu().numpy()
+            preds.append(pred_raw)
+            pred_norm = np.clip((pred_raw - feature_min) / scale, 0.0, 1.0)
             window = np.vstack([window[1:], pred_norm])
 
-    return np.array(preds)   # (n_steps, N_FEATURES) normalized [0,1]
+    return np.array(preds)   # (n_steps, N_FEATURES) raw
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +184,8 @@ def main():
         preds     = rollout(model, seed_norm, feature_min, feature_max,
                             n_steps=n_pred, device=device, doe=doe_raw)
 
-        actual_titer = sub[i, -1, IDX_TITER]   # raw value
-        pred_titer   = preds[-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]  # denormalized
+        actual_titer = sub[i, -1, IDX_TITER]
+        pred_titer   = preds[-1, IDX_TITER]
         err = abs(pred_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
         errors.append(err)
         if not np.isnan(err) and err <= 0.10:
@@ -227,9 +231,12 @@ def main():
             preds_raw = rollout(model, seed, feature_min, feature_max,
                                 n_steps=n_real_pred, device=device, doe=doe_i)
 
-            # Predictions are already in [0,1] (training normalization).
-            # Real data is per-reactor normalized [0,1]. Comparison is approximate.
+            # Normalize predictions per-reactor to match real data scale
             actual = real_sub[i, SEQ_LEN:, :]
+            for f in range(N_FEATURES):
+                mx = preds_raw[:, f].max()
+                if mx > 0:
+                    preds_raw[:, f] /= mx
 
             sq_err_real += ((preds_raw - actual) ** 2).sum(axis=0)
             n_pts += n_real_pred

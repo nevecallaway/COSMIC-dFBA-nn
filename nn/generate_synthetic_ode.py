@@ -342,12 +342,12 @@ def build_windows(trajectories, doe_params=None):
 
     For each reactor and each starting day d in [0, N_DAYS - SEQ_LEN):
         x:   days [d, d+SEQ_LEN)  normalized to [0, 1] per feature
-        y:   day  d+SEQ_LEN       normalized to [0, 1] (same scale as inputs)
+        y:   day  d+SEQ_LEN       raw values (unnormalized)
         doe: DoE vector for that reactor (O2 coded, Glc mmol/L, AAs mmol/L)
 
     Returns:
         windows:          np.ndarray (n_obs, SEQ_LEN, N_WINDOW_FEATURES)  normalized
-        targets:          np.ndarray (n_obs, N_WINDOW_FEATURES)            normalized
+        targets:          np.ndarray (n_obs, N_WINDOW_FEATURES)            raw
         window_doe:       np.ndarray (n_obs, 3) or None
         feature_min:      np.ndarray (N_WINDOW_FEATURES,)
         feature_max:      np.ndarray (N_WINDOW_FEATURES,)
@@ -366,7 +366,7 @@ def build_windows(trajectories, doe_params=None):
     for i in range(N):
         for d in range(T - SEQ_LEN):
             windows.append(sub_norm[i, d : d + SEQ_LEN, :])
-            targets.append(sub_norm[i, d + SEQ_LEN, :])   # normalized, not raw
+            targets.append(sub[i, d + SEQ_LEN, :])   # raw values
             if doe_params is not None:
                 window_doe.append(doe_params[i])
             reactor_indices.append(i)

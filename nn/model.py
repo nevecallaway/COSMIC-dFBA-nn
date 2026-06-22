@@ -107,7 +107,8 @@ class NextDayPredictor(nn.Module):
     def __init__(self, n_features=N_FEATURES, seq_len=SEQ_LEN,
                  hidden=64, n_conv_layers=3, dropout=0.1, n_doe=3):
         super().__init__()
-        self.n_doe = n_doe
+        self.n_doe      = n_doe
+        self.n_features = n_features
 
         # Conv stack: (batch, n_features, seq_len) -> (batch, hidden, seq_len)
         conv_layers = [
@@ -126,18 +127,20 @@ class NextDayPredictor(nn.Module):
         # Attention: learn a scalar score per time step, softmax -> weighted sum
         self.attn = nn.Linear(hidden, 1)
 
-        # Output head: takes context + DoE
+        # Output head: outputs mu and log_var for each feature (n_features * 2)
         self.head = nn.Sequential(
             nn.Linear(hidden + n_doe, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, n_features),
+            nn.Linear(hidden, n_features * 2),
         )
 
     def forward(self, x, doe=None):
         """
         x:   (batch, seq_len, n_features)
         doe: (batch, n_doe) or None
-        returns: (batch, n_features)
+        returns: (mu, log_var) each (batch, n_features)
+            mu:      predicted mean for each feature (raw units)
+            log_var: predicted log-variance (controls per-feature uncertainty)
         """
         h = self.conv(x.transpose(1, 2))        # (batch, hidden, seq_len)
         h = h.transpose(1, 2)                    # (batch, seq_len, hidden)
@@ -149,4 +152,7 @@ class NextDayPredictor(nn.Module):
         if self.n_doe > 0 and doe is not None:
             context = torch.cat([context, doe], dim=-1)  # (batch, hidden + n_doe)
 
-        return self.head(context)                # (batch, n_features)
+        out     = self.head(context)                          # (batch, n_features * 2)
+        mu      = out[:, :self.n_features]                    # (batch, n_features)
+        log_var = out[:, self.n_features:]                    # (batch, n_features)
+        return mu, log_var

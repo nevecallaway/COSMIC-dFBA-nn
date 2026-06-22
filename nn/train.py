@@ -51,9 +51,6 @@ def main():
     parser.add_argument('--seed',    type=int,   default=42)
     parser.add_argument('--shuffle', action='store_true',
                         help='Permutation baseline: shuffle targets before training')
-    parser.add_argument('--titer-weight', type=float, default=1.0,
-                        help='Loss weight multiplier for titer feature (index 2). '
-                             'Values >1 penalise titer errors more heavily.')
     args = parser.parse_args()
 
     # Default output name for shuffled run
@@ -112,14 +109,14 @@ def main():
     # ------------------------------------------------------------------
     n_doe = window_doe.shape[1]
     model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    # Per-feature loss weights: titer is feature index 2 in the 8-feature vector
-    loss_weights = torch.ones(N_FEATURES, device=device)
-    loss_weights[2] = args.titer_weight   # IDX_TITER = 2
-
-    def criterion(pred, target):
-        return ((pred - target) ** 2 * loss_weights).mean()
+    def criterion(mu, log_var, target):
+        # Gaussian NLL: exp(-log_var) * (mu - y)^2 + log_var
+        # log_var is clamped for stability
+        log_var = torch.clamp(log_var, -10, 10)
+        return (torch.exp(-log_var) * (mu - target) ** 2 + log_var).mean()
 
     n_params  = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Parameters: {n_params:,}')
@@ -136,7 +133,8 @@ def main():
         for x, d, y in train_loader:
             x, d, y = x.to(device), d.to(device), y.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(x, d), y)
+            mu, log_var = model(x, d)
+            loss = criterion(mu, log_var, y)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * len(x)
@@ -147,7 +145,8 @@ def main():
         with torch.no_grad():
             for x, d, y in val_loader:
                 x, d, y = x.to(device), d.to(device), y.to(device)
-                val_loss += criterion(model(x, d), y).item() * len(x)
+                mu, log_var = model(x, d)
+                val_loss += criterion(mu, log_var, y).item() * len(x)
         val_loss /= n_val
 
         if epoch % 10 == 0 or epoch == 1:
