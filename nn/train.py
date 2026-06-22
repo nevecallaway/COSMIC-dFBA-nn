@@ -113,6 +113,7 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     def criterion(mu, log_var, target):
+        # New loss function!
         # Gaussian NLL: exp(-log_var) * (mu - y)^2 + log_var
         # log_var is clamped for stability
         log_var = torch.clamp(log_var, -10, 10)
