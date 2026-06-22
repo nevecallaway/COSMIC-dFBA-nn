@@ -52,7 +52,13 @@ PAPER = {
 
 def rollout(model, seed_norm, feature_min, feature_max, n_steps, device,
             doe=None, return_uncertainty=False):
-    """Autoregressive rollout. Returns normalized [0,1] predictions."""
+    """Autoregressive rollout. Returns raw predictions.
+    Raw predictions are normalized before feeding back into the window,
+    but returned in original units for evaluation.
+    """
+    scale  = feature_max - feature_min
+    scale[scale == 0] = 1.0
+
     window   = seed_norm.copy()
     doe_t    = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
     preds    = []
@@ -61,15 +67,17 @@ def rollout(model, seed_norm, feature_min, feature_max, n_steps, device,
     model.eval()
     with torch.no_grad():
         for _ in range(n_steps):
-            x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
-            mu, lv    = model(x, doe_t)
-            pred_norm = np.clip(mu.squeeze(0).cpu().numpy(), 0.0, 1.0)
-            preds.append(pred_norm)
+            x        = torch.from_numpy(window).unsqueeze(0).float().to(device)
+            mu, lv   = model(x, doe_t)
+            pred_raw = mu.squeeze(0).cpu().numpy()
+            preds.append(pred_raw)
             if return_uncertainty:
                 log_vars.append(lv.squeeze(0).cpu().numpy())
+            # Normalize for window feedback only
+            pred_norm = np.clip((pred_raw - feature_min) / scale, 0.0, 1.0)
             window = np.vstack([window[1:], pred_norm])
 
-    preds = np.array(preds)   # (n_steps, N_FEATURES) normalized [0,1]
+    preds = np.array(preds)   # (n_steps, N_FEATURES) raw
     if return_uncertainty:
         return preds, np.array(log_vars)
     return preds
@@ -194,24 +202,24 @@ def main():
                                  n_steps=n_pred, device=device, doe=doe_raw,
                                  return_uncertainty=True)
 
-        # Normalized actuals for R² and calibration
-        actual_norm = np.clip((sub[i, SEQ_LEN:, :] - feature_min) / scale, 0.0, 1.0)
-        all_preds_norm.append(preds)
-        all_actuals_norm.append(actual_norm)
+        # Store raw preds, raw actuals, and log_vars for metrics
+        actual_raw = sub[i, SEQ_LEN:, :]   # (n_pred, N_FEATURES) raw
+        all_preds_norm.append(preds)        # raw predictions stored here
+        all_actuals_norm.append(actual_raw)
         all_log_vars.append(log_var)
 
-        # Titer within 10% (primary benchmark)
+        # Titer within 10% (primary benchmark) -- preds are raw
         actual_titer = sub[i, -1, IDX_TITER]
-        pred_titer   = preds[-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]
+        pred_titer   = preds[-1, IDX_TITER]
         err = abs(pred_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
         errors.append(err)
         if not np.isnan(err) and err <= 0.10:
             titer_within_10 += 1
 
-        # Endpoint within 10% for all features
+        # Endpoint within 10% for all features -- preds are raw
         for f in range(N_FEATURES):
             actual_end = sub[i, -1, f]
-            pred_end   = preds[-1, f] * scale[f] + feature_min[f]
+            pred_end   = preds[-1, f]
             if actual_end > 0:
                 if abs(pred_end - actual_end) / actual_end <= 0.10:
                     endpoint_within_10[f] += 1
@@ -220,7 +228,7 @@ def main():
         if has_shuf:
             shuf_preds = rollout(shuffled_model, seed_norm, feature_min, feature_max,
                                  n_steps=n_pred, device=device, doe=doe_raw)
-            shuf_titer = shuf_preds[-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]
+            shuf_titer = shuf_preds[-1, IDX_TITER]
             shuf_err   = abs(shuf_titer - actual_titer) / actual_titer if actual_titer > 0 else float('nan')
             if not np.isnan(shuf_err) and shuf_err <= 0.10:
                 shuf_within_10 += 1
@@ -234,15 +242,18 @@ def main():
     # ------------------------------------------------------------------
     # R², endpoint within 10%, calibration
     # ------------------------------------------------------------------
-    all_preds_norm   = np.array(all_preds_norm)    # (R, T, F)
-    all_actuals_norm = np.array(all_actuals_norm)  # (R, T, F)
-    all_log_vars     = np.array(all_log_vars)      # (R, T, F)
+    all_preds_raw  = np.array(all_preds_norm)    # (R, T, F) raw  -- name kept for compat
+    all_actuals_raw = np.array(all_actuals_norm) # (R, T, F) raw
+    all_log_vars   = np.array(all_log_vars)      # (R, T, F)
 
     print(f'\n{"Feature":<18} {"R²":>6}  {"End 10%":>8}  {"90% Cov":>8}')
     print('-' * 46)
     for f, name in enumerate(FEATURE_NAMES):
-        y_true = all_actuals_norm[:, :, f].flatten()
-        y_pred = all_preds_norm[:, :, f].flatten()
+        # Normalize to [0,1] for R² so features are comparable
+        y_true_raw = all_actuals_raw[:, :, f].flatten()
+        y_pred_raw = all_preds_raw[:, :, f].flatten()
+        y_true = np.clip((y_true_raw - feature_min[f]) / scale[f], 0.0, 1.0)
+        y_pred = np.clip((y_pred_raw - feature_min[f]) / scale[f], 0.0, 1.0)
 
         ss_res = ((y_true - y_pred) ** 2).sum()
         ss_tot = ((y_true - y_true.mean()) ** 2).sum()
@@ -250,10 +261,11 @@ def main():
 
         end_str = f'{endpoint_within_10[f]}/{n_reactors}'
 
-        sigma   = np.exp(0.5 * all_log_vars[:, :, f].flatten())
-        lower   = y_pred - 1.645 * sigma
-        upper   = y_pred + 1.645 * sigma
-        coverage = ((y_true >= lower) & (y_true <= upper)).mean()
+        # Calibration in raw space: sigma is in physical units
+        sigma    = np.exp(0.5 * all_log_vars[:, :, f].flatten())
+        lower    = y_pred_raw - 1.645 * sigma
+        upper    = y_pred_raw + 1.645 * sigma
+        coverage = ((y_true_raw >= lower) & (y_true_raw <= upper)).mean()
 
         print(f'{name:<18} {r2:>6.3f}  {end_str:>8}  {coverage:>7.1%}')
     print()
