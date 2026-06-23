@@ -366,7 +366,7 @@ def build_windows(trajectories, doe_params=None):
     for i in range(N):
         for d in range(T - SEQ_LEN):
             windows.append(sub_norm[i, d : d + SEQ_LEN, :])
-            targets.append(sub_norm[i, d + SEQ_LEN, :])   # normalized [0,1]
+            targets.append(sub[i, d + SEQ_LEN, :])           # raw physical units
             if doe_params is not None:
                 window_doe.append(doe_params[i])
             reactor_indices.append(i)
@@ -524,11 +524,11 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
 
     times_out = np.tile(T_EVAL, (len(trajectories), 1))
 
-    print('\nBuilding sliding windows...')
+    print('\nBuilding sliding windows (extra reactors only; originals reserved for eval)...')
     windows, targets, window_doe, feature_min, feature_max, reactor_idx = build_windows(
-        trajectories, doe_params=doe_params)
+        trajectories[n_original:], doe_params=doe_params[n_original:])
     print(f'  {len(windows)} windows  '
-          f'({len(trajectories)} reactors x {N_DAYS - SEQ_LEN} windows each)')
+          f'({len(trajectories) - n_original} extra reactors x {N_DAYS - SEQ_LEN} windows each)')
 
     n_original = len(reactor_ids)   # number of real-data reactors (always 10)
 

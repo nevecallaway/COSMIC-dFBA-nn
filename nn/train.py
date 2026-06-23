@@ -110,23 +110,28 @@ def main():
     n_doe = window_doe.shape[1]
     model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # Learned per-feature log-scale: balances the raw-unit loss across features
+    # with different physical magnitudes (mg/L vs mmol/L vs E9 cells/L).
+    # Jointly optimized with model weights.
+    log_sigma = torch.zeros(N_FEATURES, device=device, requires_grad=True)
 
-    def criterion(mu, log_var, target):
-        # New loss function!
-        # Gaussian NLL: exp(-log_var) * (mu - y)^2 + log_var
-        # log_var is clamped for stability
-        log_var = torch.clamp(log_var, -10, 10)
-        return (torch.exp(-log_var) * (mu - target) ** 2 + log_var).mean()
+    optimizer = torch.optim.Adam(
+        list(model.parameters()) + [log_sigma], lr=args.lr)
 
-    n_params  = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'Parameters: {n_params:,}')
+    def criterion(pred, target):
+        # Per-feature MSE weighted by learned precision.
+        # Loss = mean_f [ exp(-2*log_sigma_f) * mse_f + log_sigma_f ]
+        per_feat_mse = ((pred - target) ** 2).mean(dim=0)    # (N_FEATURES,)
+        return (torch.exp(-2 * log_sigma) * per_feat_mse + log_sigma).mean()
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'Parameters: {n_params:,} model + {N_FEATURES} log_sigma')
 
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    best_val_loss    = float('inf')
-    patience_count   = 0
+    best_val_loss  = float('inf')
+    patience_count = 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -134,8 +139,8 @@ def main():
         for x, d, y in train_loader:
             x, d, y = x.to(device), d.to(device), y.to(device)
             optimizer.zero_grad()
-            mu, log_var = model(x, d)
-            loss = criterion(mu, log_var, y)
+            pred = model(x, d)
+            loss = criterion(pred, y)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * len(x)
@@ -146,18 +151,21 @@ def main():
         with torch.no_grad():
             for x, d, y in val_loader:
                 x, d, y = x.to(device), d.to(device), y.to(device)
-                mu, log_var = model(x, d)
-                val_loss += criterion(mu, log_var, y).item() * len(x)
+                pred = model(x, d)
+                val_loss += criterion(pred, y).item() * len(x)
         val_loss /= n_val
 
         if epoch % 10 == 0 or epoch == 1:
-            print(f'Epoch {epoch:4d}  train={train_loss:.6f}  val={val_loss:.6f}')
+            sigmas = torch.exp(log_sigma).detach().cpu().numpy()
+            print(f'Epoch {epoch:4d}  train={train_loss:.4f}  val={val_loss:.4f}'
+                  f'  sigma=[{", ".join(f"{s:.3f}" for s in sigmas)}]')
 
         if val_loss < best_val_loss:
             best_val_loss  = val_loss
             patience_count = 0
             torch.save({
                 'model_state': model.state_dict(),
+                'log_sigma':   log_sigma.detach().cpu(),
                 'feature_min': feature_min,
                 'feature_max': feature_max,
                 'doe_min':     doe_min,
@@ -169,7 +177,7 @@ def main():
         else:
             patience_count += 1
             if patience_count >= PATIENCE:
-                print(f'Early stop at epoch {epoch}  best_val={best_val_loss:.6f}')
+                print(f'Early stop at epoch {epoch}  best_val={best_val_loss:.4f}')
                 break
 
     print(f'Saved to {args.output}')

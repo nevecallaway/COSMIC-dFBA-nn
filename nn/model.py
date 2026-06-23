@@ -127,20 +127,18 @@ class NextDayPredictor(nn.Module):
         # Attention: learn a scalar score per time step, softmax -> weighted sum
         self.attn = nn.Linear(hidden, 1)
 
-        # Output head: outputs mu and log_var for each feature (n_features * 2)
+        # Output head: raw prediction per feature
         self.head = nn.Sequential(
             nn.Linear(hidden + n_doe, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, n_features * 2),
+            nn.Linear(hidden, n_features),
         )
 
     def forward(self, x, doe=None):
         """
-        x:   (batch, seq_len, n_features)
+        x:   (batch, seq_len, n_features)   normalized [0, 1] window
         doe: (batch, n_doe) or None
-        returns: (mu, log_var) each (batch, n_features)
-            mu:      predicted mean for each feature (raw units)
-            log_var: predicted log-variance (controls per-feature uncertainty)
+        returns: (batch, n_features)         raw (unnormalized) predictions
         """
         h = self.conv(x.transpose(1, 2))        # (batch, hidden, seq_len)
         h = h.transpose(1, 2)                    # (batch, seq_len, hidden)
@@ -152,7 +150,4 @@ class NextDayPredictor(nn.Module):
         if self.n_doe > 0 and doe is not None:
             context = torch.cat([context, doe], dim=-1)  # (batch, hidden + n_doe)
 
-        out     = self.head(context)                          # (batch, n_features * 2)
-        mu      = out[:, :self.n_features]                    # (batch, n_features)
-        log_var = out[:, self.n_features:]                    # (batch, n_features)
-        return mu, log_var
+        return self.head(context)                         # (batch, n_features)
