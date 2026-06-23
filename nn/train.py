@@ -110,7 +110,13 @@ def main():
     n_doe = window_doe.shape[1]
     model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe).to(device)
 
-    log_sigma = torch.zeros(N_FEATURES, device=device, requires_grad=True)
+    # Initialize primary deliverables with lower sigma (higher weight).
+    # Titer, Cell Density, Cell Size start at sigma=~0.37 vs sigma=1 for others.
+    log_sigma_init = torch.zeros(N_FEATURES)
+    log_sigma_init[0] = -1.0   # Cell Density
+    log_sigma_init[1] = -1.0   # Cell Size
+    log_sigma_init[2] = -1.0   # Titer
+    log_sigma = log_sigma_init.to(device).requires_grad_(True)
 
     optimizer = torch.optim.Adam(
         list(model.parameters()) + [log_sigma], lr=args.lr)
