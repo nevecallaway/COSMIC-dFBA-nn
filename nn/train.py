@@ -28,11 +28,12 @@ from model import NextDayPredictor, WindowDataset, N_FEATURES
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-BATCH_SIZE = 32
-LR         = 1e-3
-EPOCHS     = 200
-PATIENCE   = 20
-VAL_SPLIT  = 0.2
+BATCH_SIZE    = 32
+LR            = 1e-3
+EPOCHS        = 200
+PATIENCE      = 20
+VAL_SPLIT     = 0.2
+SIGMA_WARMUP  = 50   # epochs to train with sigma frozen before unlocking
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,8 @@ def main():
     parser.add_argument('--lr',      type=float, default=LR)
     parser.add_argument('--batch',   type=int,   default=BATCH_SIZE)
     parser.add_argument('--seed',    type=int,   default=42)
+    parser.add_argument('--sigma-warmup', type=int, default=SIGMA_WARMUP,
+                        help='Epochs to train with sigma frozen (default: 50)')
     parser.add_argument('--shuffle', action='store_true',
                         help='Permutation baseline: shuffle targets before training')
     args = parser.parse_args()
@@ -110,10 +113,12 @@ def main():
     n_doe = window_doe.shape[1]
     model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe).to(device)
 
-    log_sigma = torch.zeros(N_FEATURES, device=device, requires_grad=True)
+    # Sigma starts frozen so the model learns to predict all features first.
+    # After sigma_warmup epochs it is unlocked and added to the optimizer.
+    log_sigma = torch.zeros(N_FEATURES, device=device, requires_grad=False)
+    sigma_unlocked = False
 
-    optimizer = torch.optim.Adam(
-        list(model.parameters()) + [log_sigma], lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     def criterion(pred, target):
         # Clamp log_sigma so sigma stays in [~0.1, ~3].
@@ -134,6 +139,12 @@ def main():
     patience_count = 0
 
     for epoch in range(1, args.epochs + 1):
+        if not sigma_unlocked and epoch > args.sigma_warmup:
+            log_sigma.requires_grad_(True)
+            optimizer.add_param_group({'params': [log_sigma]})
+            sigma_unlocked = True
+            print(f'Epoch {epoch:4d}  sigma unlocked')
+
         model.train()
         train_loss = 0.0
         for x, d, y in train_loader:

@@ -48,7 +48,7 @@ T_EVAL  = np.arange(0, N_DAYS, dtype=float)
 # ---------------------------------------------------------------------------
 # Window constants -- must match model.py FEATURE_INDICES / SEQ_LEN
 # ---------------------------------------------------------------------------
-SEQ_LEN = 4   # days per input window
+SEQ_LEN = 6   # days per input window
 WINDOW_FEATURE_INDICES = [
     0,   # Cell Density
     1,   # Cell Size

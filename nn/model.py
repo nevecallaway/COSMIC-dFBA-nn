@@ -45,7 +45,7 @@ FEATURE_INDICES = [
     11,  # Glycine
 ]
 N_FEATURES = len(FEATURE_INDICES)   # 8
-SEQ_LEN    = 4                      # window size (days)
+SEQ_LEN    = 6                      # window size (days)
 
 
 # ---------------------------------------------------------------------------
