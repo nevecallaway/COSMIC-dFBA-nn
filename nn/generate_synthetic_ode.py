@@ -522,6 +522,8 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
         phases_out   = np.concatenate([phases_out, extra_phases], axis=0)
         print(f'Total reactors: {len(trajectories)}')
 
+    n_original = len(reactor_ids)   # number of real-data reactors (always 10)
+
     times_out = np.tile(T_EVAL, (len(trajectories), 1))
 
     print('\nBuilding sliding windows (extra reactors only; originals reserved for eval)...')
@@ -529,8 +531,6 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
         trajectories[n_original:], doe_params=doe_params[n_original:])
     print(f'  {len(windows)} windows  '
           f'({len(trajectories) - n_original} extra reactors x {N_DAYS - SEQ_LEN} windows each)')
-
-    n_original = len(reactor_ids)   # number of real-data reactors (always 10)
 
     doe_min = doe_params.min(axis=0)
     doe_max = doe_params.max(axis=0)
