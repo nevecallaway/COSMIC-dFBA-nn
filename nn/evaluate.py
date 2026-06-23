@@ -51,15 +51,7 @@ PAPER = {
 # ---------------------------------------------------------------------------
 
 def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=None):
-    """Autoregressive rollout. Returns normalized [0,1] predictions.
-
-    Model outputs raw predictions. Each step renormalizes the raw output
-    with training feature_min/feature_max before feeding it as the next
-    window input.
-    """
-    scale  = feature_max - feature_min
-    scale[scale == 0] = 1.0
-
+    """Autoregressive rollout. Returns normalized [0,1] predictions."""
     window = seed_norm.copy()
     doe_t  = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
     preds  = []
@@ -67,9 +59,9 @@ def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=Non
     model.eval()
     with torch.no_grad():
         for _ in range(n_steps):
-            x        = torch.from_numpy(window).unsqueeze(0).float().to(device)
-            pred_raw = model(x, doe_t).squeeze(0).cpu().numpy()  # raw physical units
-            pred_norm = np.clip((pred_raw - feature_min) / scale, 0.0, 1.0)
+            x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
+            mu, _     = model(x, doe_t)
+            pred_norm = np.clip(mu.squeeze(0).cpu().numpy(), 0.0, 1.0)
             preds.append(pred_norm)
             window = np.vstack([window[1:], pred_norm])
 
