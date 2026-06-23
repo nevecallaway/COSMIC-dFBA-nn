@@ -366,7 +366,7 @@ def build_windows(trajectories, doe_params=None):
     for i in range(N):
         for d in range(T - SEQ_LEN):
             windows.append(sub_norm[i, d : d + SEQ_LEN, :])
-            targets.append(sub_norm[i, d + SEQ_LEN, :])       # normalized [0,1]
+            targets.append(sub[i, d + SEQ_LEN, :])           # raw physical units
             if doe_params is not None:
                 window_doe.append(doe_params[i])
             reactor_indices.append(i)
