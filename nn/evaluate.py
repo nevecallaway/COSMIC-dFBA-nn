@@ -234,9 +234,15 @@ def main():
     if has_shuf_preds:
         all_shuf_preds_norm = np.array(all_shuf_preds_norm)
 
+    # Mean trajectory across reactors: what every reactor has in common.
+    # Subtracting it isolates the DoE-driven reactor-to-reactor variation.
+    mean_traj = all_actuals_norm.mean(axis=0, keepdims=True)  # (1, n_pred, N_FEATURES)
+    actual_dev = all_actuals_norm - mean_traj                  # (n_reactors, n_pred, N_FEATURES)
+    pred_dev   = all_preds_norm   - mean_traj                  # deviations predicted vs mean
+
     shuf_header = f'  {"Shuf R²":>7}  {"Shuf E10%":>9}' if has_shuf_preds else ''
-    print(f'\n{"Feature":<18} {"R²":>6}  {"End 10%":>8}{shuf_header}')
-    print('-' * (36 + (20 if has_shuf_preds else 0)))
+    print(f'\n{"Feature":<18} {"R²":>6}  {"DoE R²":>7}  {"End 10%":>8}{shuf_header}')
+    print('-' * (44 + (20 if has_shuf_preds else 0)))
     for f, name in enumerate(FEATURE_NAMES):
         y_true = all_actuals_norm[:, :, f].flatten()
         y_pred = all_preds_norm[:, :, f].flatten()
@@ -244,6 +250,13 @@ def main():
         ss_res = ((y_true - y_pred) ** 2).sum()
         ss_tot = ((y_true - y_true.mean()) ** 2).sum()
         r2     = 1 - ss_res / ss_tot if ss_tot > 0 else float('nan')
+
+        # DoE R²: R² on deviations from mean trajectory
+        d_true   = actual_dev[:, :, f].flatten()
+        d_pred   = pred_dev[:, :, f].flatten()
+        ss_res_d = ((d_true - d_pred) ** 2).sum()
+        ss_tot_d = ((d_true - d_true.mean()) ** 2).sum()
+        r2_doe   = 1 - ss_res_d / ss_tot_d if ss_tot_d > 0 else float('nan')
 
         end_str  = f'{endpoint_within_10[f]}/{n_reactors}'
         shuf_str = ''
@@ -254,7 +267,7 @@ def main():
             shuf_end = f'{shuf_endpoint_within_10[f]}/{n_reactors}'
             shuf_str = f'  {r2_shuf:>7.3f}  {shuf_end:>9}'
 
-        print(f'{name:<18} {r2:>6.3f}  {end_str:>8}{shuf_str}')
+        print(f'{name:<18} {r2:>6.3f}  {r2_doe:>7.3f}  {end_str:>8}{shuf_str}')
 
     # ------------------------------------------------------------------
     # Spearman rank correlation
