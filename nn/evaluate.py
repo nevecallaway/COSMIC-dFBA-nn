@@ -24,6 +24,7 @@ import argparse
 import numpy as np
 import torch
 from pathlib import Path
+from scipy.stats import spearmanr
 
 from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES
 
@@ -262,6 +263,39 @@ def main():
             shuf_str = f'  {r2_shuf:>7.3f}  {shuf_end:>9}'
 
         print(f'{name:<18} {r2:>6.3f}  {end_str:>8}{shuf_str}')
+
+    # ------------------------------------------------------------------
+    # Spearman rank correlation
+    # Two questions:
+    #   1. Across reactors: does the model rank reactors correctly by
+    #      final titer? (useful for DoE optimization)
+    #   2. Within trajectory: does the model capture the temporal shape
+    #      of each feature across all reactors?
+    # ------------------------------------------------------------------
+    print(f'\n--- Spearman rank correlation ---')
+
+    # Across-reactor endpoint ranking (titer)
+    actual_end_titers = sub[:, -1, IDX_TITER]
+    pred_end_titers   = np.array([
+        all_preds_norm[i][-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]
+        for i in range(n_reactors)
+    ])
+    rho_titer, _ = spearmanr(actual_end_titers, pred_end_titers)
+    print(f'  Across-reactor titer ranking: rho = {rho_titer:.3f}')
+
+    # Within-trajectory per feature
+    print(f'\n  {"Feature":<18} {"Traj rho":>9}')
+    print(f'  {"-"*30}')
+    for f, name in enumerate(FEATURE_NAMES):
+        rhos = []
+        for i in range(n_reactors):
+            t = all_actuals_norm[i, :, f]
+            p = all_preds_norm[i, :, f]
+            if t.std() > 1e-8 and p.std() > 1e-8:
+                rho, _ = spearmanr(t, p)
+                rhos.append(rho)
+        mean_rho = np.nanmean(rhos) if rhos else float('nan')
+        print(f'  {name:<18} {mean_rho:>9.3f}')
     print()
 
     print_summary(titer_within_10, n_reactors,
