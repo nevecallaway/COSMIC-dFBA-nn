@@ -121,13 +121,8 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     def criterion(pred, target):
-        # Clamp log_sigma so sigma stays in [~0.1, ~3].
-        # Prevents flat features from collapsing sigma to zero (which
-        # concentrates gradient there) and hard features from growing
-        # sigma to infinity (which lets the model ignore them).
-        ls = torch.clamp(log_sigma, -2.3, 1.1)
         per_feat_mse = ((pred - target) ** 2).mean(dim=0)
-        return (torch.exp(-2 * ls) * per_feat_mse + ls).mean()
+        return (torch.exp(-2 * log_sigma) * per_feat_mse + log_sigma).mean()
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Parameters: {n_params:,} model + {N_FEATURES} log_sigma')
@@ -167,7 +162,7 @@ def main():
         val_loss /= n_val
 
         if epoch % 10 == 0 or epoch == 1:
-            sigmas = torch.exp(torch.clamp(log_sigma, -2.3, 1.1)).detach().cpu().numpy()
+            sigmas = torch.exp(log_sigma).detach().cpu().numpy()
             print(f'Epoch {epoch:4d}  train={train_loss:.4f}  val={val_loss:.4f}'
                   f'  sigma=[{", ".join(f"{s:.3f}" for s in sigmas)}]')
 

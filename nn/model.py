@@ -15,8 +15,8 @@ Features (8 total):
     6  Serine           (mmol/L)
     7  Glycine          (mmol/L)
 
-Normalization: inputs normalized to [0, 1] per feature using training-set
-statistics. Targets are raw (unnormalized). No output normalization needed.
+Normalization: inputs and targets normalized to [0, 1] per feature using
+training-set statistics. Model outputs normalized predictions.
 
 Workflow:
     dataset = WindowDataset(trajectories)        # builds sliding windows
@@ -95,7 +95,7 @@ class NextDayPredictor(nn.Module):
 
     Input:  (batch, SEQ_LEN, N_FEATURES)  -- normalized 6-day window
             (batch, n_doe)                -- DoE coded levels (O2, AAs, Glc)
-    Output: (batch, N_FEATURES)           -- raw next-day values
+    Output: (batch, N_FEATURES)           -- normalized next-day values
 
     Architecture:
         1. Conv1d layers extract local temporal patterns across the 6-day window
@@ -127,7 +127,7 @@ class NextDayPredictor(nn.Module):
         # Attention: learn a scalar score per time step, softmax -> weighted sum
         self.attn = nn.Linear(hidden, 1)
 
-        # Output head: raw prediction per feature
+        # Output head: normalized prediction per feature
         self.head = nn.Sequential(
             nn.Linear(hidden + n_doe, hidden),
             nn.ReLU(),
@@ -138,7 +138,7 @@ class NextDayPredictor(nn.Module):
         """
         x:   (batch, seq_len, n_features)   normalized [0, 1] window
         doe: (batch, n_doe) or None
-        returns: (batch, n_features)         raw (unnormalized) predictions
+        returns: (batch, n_features)         normalized predictions
         """
         h = self.conv(x.transpose(1, 2))        # (batch, hidden, seq_len)
         h = h.transpose(1, 2)                    # (batch, seq_len, hidden)

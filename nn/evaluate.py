@@ -51,15 +51,7 @@ PAPER = {
 # ---------------------------------------------------------------------------
 
 def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=None):
-    """Autoregressive rollout. Returns normalized [0,1] predictions.
-
-    Handles both model variants:
-      - normalized output (mu, log_var): clip mu directly
-      - raw output (single tensor): renormalize with feature_min/feature_max
-    """
-    scale  = feature_max - feature_min
-    scale[scale == 0] = 1.0
-
+    """Autoregressive rollout. Returns normalized predictions (no clipping)."""
     window = seed_norm.copy()
     doe_t  = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
     preds  = []
@@ -67,19 +59,12 @@ def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=Non
     model.eval()
     with torch.no_grad():
         for _ in range(n_steps):
-            x      = torch.from_numpy(window).unsqueeze(0).float().to(device)
-            out    = model(x, doe_t)
-            if isinstance(out, tuple):
-                # normalized output model: (mu, log_var)
-                pred_norm = np.clip(out[0].squeeze(0).cpu().numpy(), 0.0, 1.0)
-            else:
-                # raw output model: renormalize
-                pred_norm = np.clip(
-                    (out.squeeze(0).cpu().numpy() - feature_min) / scale, 0.0, 1.0)
+            x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
+            pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()
             preds.append(pred_norm)
             window = np.vstack([window[1:], pred_norm])
 
-    return np.array(preds)   # (n_steps, N_FEATURES) normalized [0,1]
+    return np.array(preds)   # (n_steps, N_FEATURES) normalized
 
 
 # ---------------------------------------------------------------------------
