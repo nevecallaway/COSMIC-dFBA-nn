@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from pathlib import Path
 from scipy.stats import spearmanr
+from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score
 
 from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES
 
@@ -341,6 +342,75 @@ def main():
     print()
 
     # ------------------------------------------------------------------
+    # High/Low binning: confusion matrix, precision, recall, F1
+    # Threshold: median of actual values per feature (across all
+    # reactors and predicted time steps). Each time point is one sample.
+    # ------------------------------------------------------------------
+    print(f'--- High/Low Classification (threshold = per-feature median) ---')
+    print(f'  {"Feature":<18} {"Prec":>6} {"Recall":>7} {"F1":>6} '
+          f'{"TP":>4} {"FP":>4} {"FN":>4} {"TN":>4}  {"Thresh":>10}')
+    print(f'  {"-"*72}')
+
+    for f, name in enumerate(FEATURE_NAMES):
+        actuals_phys = []
+        preds_phys   = []
+        for i in range(n_reactors):
+            for t in range(all_actuals_norm.shape[1]):
+                a = all_actuals_norm[i, t, f] * scale[f] + feature_min[f]
+                p = all_preds_norm[i, t, f]   * scale[f] + feature_min[f]
+                actuals_phys.append(a)
+                preds_phys.append(p)
+        actuals_phys = np.array(actuals_phys)
+        preds_phys   = np.array(preds_phys)
+
+        if actuals_phys.std() < 1e-10:
+            print(f'  {name:<18}   (no variance)')
+            continue
+
+        thresh = np.median(actuals_phys)
+        y_true = (actuals_phys >= thresh).astype(int)
+        y_pred = (preds_phys   >= thresh).astype(int)
+
+        cm   = confusion_matrix(y_true, y_pred, labels=[0, 1])
+        tn, fp, fn, tp = cm.ravel()
+        prec = precision_score(y_true, y_pred, zero_division=0)
+        rec  = recall_score(y_true, y_pred, zero_division=0)
+        f1   = f1_score(y_true, y_pred, zero_division=0)
+
+        print(f'  {name:<18} {prec:>6.3f} {rec:>7.3f} {f1:>6.3f} '
+              f'{tp:>4} {fp:>4} {fn:>4} {tn:>4}  {thresh:>10.4f}')
+    print()
+
+    # Endpoint-only binning (final day per reactor)
+    print(f'--- Endpoint High/Low (final day only, median threshold) ---')
+    print(f'  {"Feature":<18} {"Prec":>6} {"Recall":>7} {"F1":>6} '
+          f'{"TP":>4} {"FP":>4} {"FN":>4} {"TN":>4}  {"Thresh":>10}')
+    print(f'  {"-"*72}')
+
+    for f, name in enumerate(FEATURE_NAMES):
+        actuals_end = np.array([sub[i, -1, f] for i in range(n_reactors)])
+        preds_end   = np.array([all_preds_norm[i][-1, f] * scale[f] + feature_min[f]
+                                for i in range(n_reactors)])
+
+        if actuals_end.std() < 1e-10:
+            print(f'  {name:<18}   (no variance)')
+            continue
+
+        thresh = np.median(actuals_end)
+        y_true = (actuals_end >= thresh).astype(int)
+        y_pred = (preds_end   >= thresh).astype(int)
+
+        cm   = confusion_matrix(y_true, y_pred, labels=[0, 1])
+        tn, fp, fn, tp = cm.ravel()
+        prec = precision_score(y_true, y_pred, zero_division=0)
+        rec  = recall_score(y_true, y_pred, zero_division=0)
+        f1   = f1_score(y_true, y_pred, zero_division=0)
+
+        print(f'  {name:<18} {prec:>6.3f} {rec:>7.3f} {f1:>6.3f} '
+              f'{tp:>4} {fp:>4} {fn:>4} {tn:>4}  {thresh:>10.4f}')
+    print()
+
+    # ------------------------------------------------------------------
     # Diagnostic plots
     # ------------------------------------------------------------------
     try:
@@ -420,6 +490,40 @@ def main():
         fig.tight_layout()
         fig.savefig(out_dir / 'diag_scatter.png', dpi=150, bbox_inches='tight')
         print(f'Saved {out_dir / "diag_scatter.png"}')
+
+        # 4. Confusion matrix heatmaps (trajectory-level, all time steps)
+        plot_features = [(f, name) for f, name in enumerate(FEATURE_NAMES)
+                         if sub[:, SEQ_LEN:, f].std() > 1e-10]
+        n_plot = len(plot_features)
+        fig, axes = plt.subplots(2, (n_plot + 1) // 2, figsize=(4 * ((n_plot + 1) // 2), 7))
+        axes = axes.flatten()
+        for idx, (f, name) in enumerate(plot_features):
+            ax = axes[idx]
+            actuals_phys = (all_actuals_norm[:, :, f] * scale[f] + feature_min[f]).flatten()
+            preds_phys   = (all_preds_norm[:, :, f]   * scale[f] + feature_min[f]).flatten()
+            thresh = np.median(actuals_phys)
+            y_true = (actuals_phys >= thresh).astype(int)
+            y_pred = (preds_phys   >= thresh).astype(int)
+            cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+            im = ax.imshow(cm, cmap='Blues', aspect='equal')
+            for r in range(2):
+                for c in range(2):
+                    ax.text(c, r, str(cm[r, c]), ha='center', va='center',
+                            fontsize=12, fontweight='bold')
+            ax.set_xticks([0, 1])
+            ax.set_yticks([0, 1])
+            ax.set_xticklabels(['Low', 'High'])
+            ax.set_yticklabels(['Low', 'High'])
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('Actual')
+            f1 = f1_score(y_true, y_pred, zero_division=0)
+            ax.set_title(f'{name}\nF1={f1:.3f}', fontsize=9)
+        for idx in range(len(plot_features), len(axes)):
+            axes[idx].set_visible(False)
+        fig.suptitle('High/Low Confusion Matrices (all time steps, median threshold)', y=1.02)
+        fig.tight_layout()
+        fig.savefig(out_dir / 'diag_confusion.png', dpi=150, bbox_inches='tight')
+        print(f'Saved {out_dir / "diag_confusion.png"}')
 
     except ImportError:
         print('matplotlib not available, skipping plots')
