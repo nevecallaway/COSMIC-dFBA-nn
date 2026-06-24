@@ -114,6 +114,10 @@ def main():
     parser.add_argument('--data',           default=str(here / 'synthetic_ode.npz'))
     parser.add_argument('--n-eval',         type=int, default=None,
                         help='Evaluate only the first N reactors (default: n_original from npz, or all)')
+    parser.add_argument('--val', action='store_true',
+                        help='Evaluate on validation split (held-out training reactors) instead of originals')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed (must match train.py for val split)')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -135,14 +139,30 @@ def main():
     trajectories = npz['trajectories'].astype(np.float32)
     doe_params   = npz['doe_params'].astype(np.float32)   # (N, 3)
 
-    # Limit evaluation to original real-data reactors by default.
-    # n_original is saved by generate_synthetic_ode.py; fall back to all.
     n_original = int(npz['n_original']) if 'n_original' in npz else len(trajectories)
-    n_eval     = args.n_eval if args.n_eval is not None else n_original
-    trajectories = trajectories[:n_eval]
-    doe_params   = doe_params[:n_eval]
+
+    if args.val:
+        # Reproduce the train/val split from train.py
+        reactor_idx  = npz['window_reactor_idx']
+        all_reactors = np.unique(reactor_idx)
+        rng_split    = np.random.default_rng(args.seed)
+        rng_split.shuffle(all_reactors)
+        n_val_reactors = max(1, int(len(all_reactors) * 0.2))
+        val_reactor_ids = sorted(all_reactors[:n_val_reactors].tolist())
+        # Map back to trajectory indices (extra reactors start at n_original)
+        eval_indices = [n_original + r for r in val_reactor_ids]
+        trajectories = trajectories[eval_indices]
+        doe_params   = doe_params[eval_indices]
+        print(f'Evaluating {len(eval_indices)} validation reactors '
+              f'(indices {eval_indices[:5]}...)')
+    else:
+        n_eval     = args.n_eval if args.n_eval is not None else n_original
+        trajectories = trajectories[:n_eval]
+        doe_params   = doe_params[:n_eval]
+        print(f'Evaluating {trajectories.shape[0]} reactors '
+              f'(n_original={n_original}, total in npz={len(npz["trajectories"])})')
+
     n_reactors, n_days, _ = trajectories.shape
-    print(f'Evaluating {n_reactors} reactors (n_original={n_original}, total in npz={len(npz["trajectories"])})')
     sub   = trajectories[:, :, FEATURE_INDICES]
     scale = feature_max - feature_min
     scale[scale == 0] = 1.0
