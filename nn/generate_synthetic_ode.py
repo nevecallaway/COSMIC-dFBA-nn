@@ -532,8 +532,8 @@ def generate_all(data_dir=None, output_file=None, n_extra=50):
     print(f'  {len(windows)} windows  '
           f'({len(trajectories) - n_original} extra reactors x {N_DAYS - SEQ_LEN} windows each)')
 
-    doe_min = doe_params.min(axis=0)
-    doe_max = doe_params.max(axis=0)
+    doe_min = doe_params[n_original:].min(axis=0)
+    doe_max = doe_params[n_original:].max(axis=0)
 
     np.savez(
         output_file,
