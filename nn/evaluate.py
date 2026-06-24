@@ -441,11 +441,13 @@ def main():
         out_dir = here
 
         # 1. Predicted vs actual trajectories per reactor (all features)
-        fig, axes = plt.subplots(n_reactors, N_FEATURES, figsize=(3 * N_FEATURES, 2.5 * n_reactors))
-        if n_reactors == 1:
+        max_plot_reactors = min(n_reactors, 15)
+        fig, axes = plt.subplots(max_plot_reactors, N_FEATURES,
+                                 figsize=(3 * N_FEATURES, 2.5 * max_plot_reactors))
+        if max_plot_reactors == 1:
             axes = axes[np.newaxis, :]
         days_pred = np.arange(SEQ_LEN, n_days)
-        for i in range(n_reactors):
+        for i in range(max_plot_reactors):
             for f in range(N_FEATURES):
                 ax = axes[i, f]
                 actual_raw = sub[i, SEQ_LEN:, f]
@@ -461,7 +463,9 @@ def main():
         fig.suptitle('Predicted vs Actual Trajectories (physical units)', y=1.01)
         fig.tight_layout()
         fig.savefig(out_dir / 'diag_trajectories.png', dpi=150, bbox_inches='tight')
-        print(f'Saved {out_dir / "diag_trajectories.png"}')
+        plt.close(fig)
+        suffix = f' (showing {max_plot_reactors}/{n_reactors})' if max_plot_reactors < n_reactors else ''
+        print(f'Saved {out_dir / "diag_trajectories.png"}{suffix}')
 
         # 2. Endpoint error box plot per feature
         fig, ax = plt.subplots(figsize=(10, 4))
@@ -486,6 +490,7 @@ def main():
         ax.tick_params(axis='x', rotation=30)
         fig.tight_layout()
         fig.savefig(out_dir / 'diag_endpoint_errors.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
         print(f'Saved {out_dir / "diag_endpoint_errors.png"}')
 
         # 3. Predicted vs actual scatter (endpoints, all features)
@@ -509,6 +514,7 @@ def main():
         fig.suptitle('Endpoint: Predicted vs Actual', y=1.01)
         fig.tight_layout()
         fig.savefig(out_dir / 'diag_scatter.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
         print(f'Saved {out_dir / "diag_scatter.png"}')
 
         # 4. Confusion matrix heatmaps (trajectory-level, all time steps)
@@ -543,6 +549,7 @@ def main():
         fig.suptitle('High/Low Confusion Matrices (all time steps, median threshold)', y=1.02)
         fig.tight_layout()
         fig.savefig(out_dir / 'diag_confusion.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
         print(f'Saved {out_dir / "diag_confusion.png"}')
 
     except ImportError:
