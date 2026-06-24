@@ -305,6 +305,125 @@ def main():
     print_summary(titer_within_10, n_reactors,
                   shuffled_within_10=shuf_within_10 if has_shuf else None)
 
+    # ------------------------------------------------------------------
+    # Learned sigmas
+    # ------------------------------------------------------------------
+    if 'log_sigma' in ckpt:
+        ls = ckpt['log_sigma'].numpy()
+        sigmas = np.exp(ls)
+        weights = np.exp(-2 * ls)
+        print(f'--- Learned sigmas (from checkpoint) ---')
+        print(f'  {"Feature":<18} {"sigma":>8} {"weight":>8}')
+        print(f'  {"-"*36}')
+        for f, name in enumerate(FEATURE_NAMES):
+            print(f'  {name:<18} {sigmas[f]:>8.4f} {weights[f]:>8.4f}')
+        print()
+
+    # ------------------------------------------------------------------
+    # Per-feature endpoint error distribution
+    # ------------------------------------------------------------------
+    print(f'--- Per-feature endpoint errors (%) ---')
+    print(f'  {"Feature":<18} {"Mean":>8} {"Std":>8} {"Min":>8} {"Max":>8}')
+    print(f'  {"-"*44}')
+    for f, name in enumerate(FEATURE_NAMES):
+        errs = []
+        for i in range(n_reactors):
+            actual_end = sub[i, -1, f]
+            pred_end   = all_preds_norm[i][-1, f] * scale[f] + feature_min[f]
+            if actual_end > 0:
+                errs.append(abs(pred_end - actual_end) / actual_end * 100)
+        if errs:
+            errs = np.array(errs)
+            print(f'  {name:<18} {errs.mean():>7.1f}% {errs.std():>7.1f}% '
+                  f'{errs.min():>7.1f}% {errs.max():>7.1f}%')
+        else:
+            print(f'  {name:<18}      N/A')
+    print()
+
+    # ------------------------------------------------------------------
+    # Diagnostic plots
+    # ------------------------------------------------------------------
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        out_dir = here
+
+        # 1. Predicted vs actual trajectories per reactor (all features)
+        fig, axes = plt.subplots(n_reactors, N_FEATURES, figsize=(3 * N_FEATURES, 2.5 * n_reactors))
+        if n_reactors == 1:
+            axes = axes[np.newaxis, :]
+        days_pred = np.arange(SEQ_LEN, n_days)
+        for i in range(n_reactors):
+            for f in range(N_FEATURES):
+                ax = axes[i, f]
+                actual_raw = sub[i, SEQ_LEN:, f]
+                pred_raw   = all_preds_norm[i][:, f] * scale[f] + feature_min[f]
+                ax.plot(days_pred, actual_raw, 'k-', lw=1.2, label='Actual')
+                ax.plot(days_pred, pred_raw, 'r--', lw=1.2, label='Predicted')
+                if i == 0:
+                    ax.set_title(FEATURE_NAMES[f], fontsize=8)
+                if f == 0:
+                    ax.set_ylabel(f'R{i:04d}', fontsize=8)
+                ax.tick_params(labelsize=6)
+        axes[0, -1].legend(fontsize=6)
+        fig.suptitle('Predicted vs Actual Trajectories (physical units)', y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / 'diag_trajectories.png', dpi=150, bbox_inches='tight')
+        print(f'Saved {out_dir / "diag_trajectories.png"}')
+
+        # 2. Endpoint error box plot per feature
+        fig, ax = plt.subplots(figsize=(10, 4))
+        err_data = []
+        labels = []
+        for f, name in enumerate(FEATURE_NAMES):
+            errs = []
+            for i in range(n_reactors):
+                actual_end = sub[i, -1, f]
+                pred_end   = all_preds_norm[i][-1, f] * scale[f] + feature_min[f]
+                if actual_end > 0:
+                    errs.append((pred_end - actual_end) / actual_end * 100)
+            if errs:
+                err_data.append(errs)
+                labels.append(name)
+        ax.boxplot(err_data, labels=labels)
+        ax.axhline(0, color='k', lw=0.5, ls=':')
+        ax.axhline(10, color='r', lw=0.5, ls='--', alpha=0.5)
+        ax.axhline(-10, color='r', lw=0.5, ls='--', alpha=0.5)
+        ax.set_ylabel('Endpoint Error (%)')
+        ax.set_title('Per-feature Endpoint Error Distribution')
+        ax.tick_params(axis='x', rotation=30)
+        fig.tight_layout()
+        fig.savefig(out_dir / 'diag_endpoint_errors.png', dpi=150, bbox_inches='tight')
+        print(f'Saved {out_dir / "diag_endpoint_errors.png"}')
+
+        # 3. Predicted vs actual scatter (endpoints, all features)
+        fig, axes = plt.subplots(2, 4, figsize=(14, 6))
+        axes = axes.flatten()
+        for f, name in enumerate(FEATURE_NAMES):
+            ax = axes[f]
+            actuals = [sub[i, -1, f] for i in range(n_reactors)]
+            preds   = [all_preds_norm[i][-1, f] * scale[f] + feature_min[f]
+                       for i in range(n_reactors)]
+            ax.scatter(actuals, preds, s=30, alpha=0.8)
+            lo = min(min(actuals), min(preds))
+            hi = max(max(actuals), max(preds))
+            margin = (hi - lo) * 0.1 if hi > lo else 1.0
+            ax.plot([lo - margin, hi + margin], [lo - margin, hi + margin],
+                    'k--', lw=0.8, alpha=0.5)
+            ax.set_title(name, fontsize=9)
+            ax.set_xlabel('Actual', fontsize=7)
+            ax.set_ylabel('Predicted', fontsize=7)
+            ax.tick_params(labelsize=6)
+        fig.suptitle('Endpoint: Predicted vs Actual', y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / 'diag_scatter.png', dpi=150, bbox_inches='tight')
+        print(f'Saved {out_dir / "diag_scatter.png"}')
+
+    except ImportError:
+        print('matplotlib not available, skipping plots')
+
 
 if __name__ == '__main__':
     main()

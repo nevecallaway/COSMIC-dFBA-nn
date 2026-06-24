@@ -7,8 +7,7 @@ from synthetic ODE data. Predicts the next day's values for 8 bioprocess
 features: cell density, cell size, titer, glucose, glutamine, asparagine,
 serine, glycine.
 
-Normalization: inputs normalized to [0,1] per feature (training stats).
-               targets are raw (unnormalized).
+Normalization: inputs and targets normalized to [0,1] per feature (training stats).
 
 Usage:
     !python train.py                              # default settings
@@ -17,6 +16,7 @@ Usage:
 """
 
 import argparse
+import csv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -71,7 +71,7 @@ def main():
     # ------------------------------------------------------------------
     npz         = np.load(args.data, allow_pickle=True)
     windows     = npz['windows']      # (n_obs, SEQ_LEN, N_FEATURES)  normalized
-    targets     = npz['targets']      # (n_obs, N_FEATURES)            raw
+    targets     = npz['targets']      # (n_obs, N_FEATURES)            normalized
     feature_min = npz['feature_min']
     feature_max = npz['feature_max']
 
@@ -133,6 +133,16 @@ def main():
     best_val_loss  = float('inf')
     patience_count = 0
 
+    feature_names = ['CellDensity', 'CellSize', 'Titer',
+                     'Glucose', 'Glutamine', 'Asparagine', 'Serine', 'Glycine']
+    log_path = Path(args.output).with_suffix('.csv')
+    log_file = open(log_path, 'w', newline='')
+    log_writer = csv.writer(log_file)
+    log_writer.writerow(
+        ['epoch', 'train_loss', 'val_loss']
+        + [f'sigma_{n}' for n in feature_names]
+        + [f'mse_{n}' for n in feature_names])
+
     for epoch in range(1, args.epochs + 1):
         if not sigma_unlocked and epoch > args.sigma_warmup:
             log_sigma.requires_grad_(True)
@@ -142,6 +152,7 @@ def main():
 
         model.train()
         train_loss = 0.0
+        feat_mse_accum = np.zeros(N_FEATURES)
         for x, d, y in train_loader:
             x, d, y = x.to(device), d.to(device), y.to(device)
             optimizer.zero_grad()
@@ -150,7 +161,10 @@ def main():
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * len(x)
+            with torch.no_grad():
+                feat_mse_accum += ((pred - y) ** 2).mean(dim=0).cpu().numpy() * len(x)
         train_loss /= n_train
+        feat_mse = feat_mse_accum / n_train
 
         model.eval()
         val_loss = 0.0
@@ -161,8 +175,13 @@ def main():
                 val_loss += criterion(pred, y).item() * len(x)
         val_loss /= n_val
 
+        sigmas = torch.exp(log_sigma).detach().cpu().numpy()
+        log_writer.writerow(
+            [epoch, f'{train_loss:.6f}', f'{val_loss:.6f}']
+            + [f'{s:.6f}' for s in sigmas]
+            + [f'{m:.6f}' for m in feat_mse])
+
         if epoch % 10 == 0 or epoch == 1:
-            sigmas = torch.exp(log_sigma).detach().cpu().numpy()
             print(f'Epoch {epoch:4d}  train={train_loss:.4f}  val={val_loss:.4f}'
                   f'  sigma=[{", ".join(f"{s:.3f}" for s in sigmas)}]')
 
@@ -186,7 +205,9 @@ def main():
                 print(f'Early stop at epoch {epoch}  best_val={best_val_loss:.4f}')
                 break
 
+    log_file.close()
     print(f'Saved to {args.output}')
+    print(f'Training log: {log_path}')
 
 
 if __name__ == '__main__':
