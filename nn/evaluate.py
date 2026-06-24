@@ -25,7 +25,8 @@ import numpy as np
 import torch
 from pathlib import Path
 from scipy.stats import spearmanr
-from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score
+from sklearn.metrics import (confusion_matrix, precision_score, recall_score,
+                             f1_score, roc_curve, auc)
 
 from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES
 
@@ -551,6 +552,54 @@ def main():
         fig.savefig(out_dir / 'diag_confusion.png', dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f'Saved {out_dir / "diag_confusion.png"}')
+
+        # 5. ROC curves per feature
+        fig, axes = plt.subplots(2, (len(plot_features) + 1) // 2,
+                                 figsize=(4 * ((len(plot_features) + 1) // 2), 7))
+        axes = axes.flatten()
+        for idx, (f, name) in enumerate(plot_features):
+            ax = axes[idx]
+            actuals_phys = (all_actuals_norm[:, :, f] * scale[f] + feature_min[f]).flatten()
+            preds_phys   = (all_preds_norm[:, :, f]   * scale[f] + feature_min[f]).flatten()
+            thresh = np.median(actuals_phys)
+            y_true = (actuals_phys >= thresh).astype(int)
+            fpr, tpr, _ = roc_curve(y_true, preds_phys)
+            roc_auc = auc(fpr, tpr)
+            ax.plot(fpr, tpr, lw=2, label=f'AUC = {roc_auc:.3f}')
+            ax.plot([0, 1], [0, 1], 'k--', lw=0.8, alpha=0.5)
+            ax.set_xlabel('FPR')
+            ax.set_ylabel('TPR')
+            ax.set_title(name, fontsize=9)
+            ax.legend(fontsize=8)
+        for idx in range(len(plot_features), len(axes)):
+            axes[idx].set_visible(False)
+        fig.suptitle('ROC Curves (High/Low, median threshold)', y=1.02)
+        fig.tight_layout()
+        fig.savefig(out_dir / 'diag_roc.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Saved {out_dir / "diag_roc.png"}')
+
+        # 6. Distribution comparison: predicted vs actual per feature
+        fig, axes = plt.subplots(2, 4, figsize=(16, 7))
+        axes = axes.flatten()
+        for f, name in enumerate(FEATURE_NAMES):
+            ax = axes[f]
+            actuals_phys = (all_actuals_norm[:, :, f] * scale[f] + feature_min[f]).flatten()
+            preds_phys   = (all_preds_norm[:, :, f]   * scale[f] + feature_min[f]).flatten()
+            bins = 30
+            lo = min(actuals_phys.min(), preds_phys.min())
+            hi = max(actuals_phys.max(), preds_phys.max())
+            bin_edges = np.linspace(lo, hi, bins + 1)
+            ax.hist(actuals_phys, bins=bin_edges, alpha=0.5, label='Actual', density=True)
+            ax.hist(preds_phys,   bins=bin_edges, alpha=0.5, label='Predicted', density=True)
+            ax.set_title(name, fontsize=9)
+            ax.legend(fontsize=7)
+            ax.tick_params(labelsize=6)
+        fig.suptitle('Distribution: Predicted vs Actual (all time steps)', y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / 'diag_distributions.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Saved {out_dir / "diag_distributions.png"}')
 
     except ImportError:
         print('matplotlib not available, skipping plots')
