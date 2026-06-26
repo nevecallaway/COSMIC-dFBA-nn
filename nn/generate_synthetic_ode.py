@@ -387,16 +387,15 @@ def build_windows(trajectories, doe_params=None):
 # ---------------------------------------------------------------------------
 
 def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
-                   seed=0, sample_rates=False):
+                   seed=0, sample_rates=False, rate_mix=0.0, rate_scale=1.0):
     """
     Generate n_extra additional synthetic reactors with randomly sampled DoE.
 
-    If sample_rates=False (default, legacy behavior):
-      - Rates copied from a random existing reactor
-    If sample_rates=True:
-      - Rates sampled from a multivariate Gaussian fitted to the 10 reactors,
-        preserving cross-component correlations
-    Phase fractions are always borrowed from a random donor.
+    Rate generation modes:
+      - sample_rates=False, rate_mix=0: all donor-copied (legacy)
+      - sample_rates=True, rate_mix=0:  all sampled from Gaussian
+      - rate_mix=0.5: 50% donor-copied, 50% sampled from Gaussian
+    rate_scale: multiplier on covariance (0.25 = tighter, 1.0 = full variance)
 
     Returns:
         trajectories: np.ndarray (n_extra, N_DAYS, N_COMPONENTS)
@@ -405,16 +404,15 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
     rng = np.random.default_rng(seed)
     trajs, does = [], []
 
-    # Fit multivariate Gaussian to the 10 reactors' rate vectors
-    if sample_rates:
-        g_matrix = np.array([rates_growth[r] for r in reactor_ids])  # (10, 25)
-        p_matrix = np.array([rates_prod[r] for r in reactor_ids])    # (10, 25)
+    use_sampling = sample_rates or rate_mix > 0
+    if use_sampling:
+        g_matrix = np.array([rates_growth[r] for r in reactor_ids])
+        p_matrix = np.array([rates_prod[r] for r in reactor_ids])
         g_mean, g_cov = g_matrix.mean(axis=0), np.cov(g_matrix, rowvar=False)
         p_mean, p_cov = p_matrix.mean(axis=0), np.cov(p_matrix, rowvar=False)
-        # Regularize covariance for numerical stability
-        g_cov += np.eye(N_COMPONENTS) * 1e-8
-        p_cov += np.eye(N_COMPONENTS) * 1e-8
-        print(f'  Rate sampling: multivariate Gaussian from {len(reactor_ids)} reactors')
+        g_cov = g_cov * rate_scale + np.eye(N_COMPONENTS) * 1e-8
+        p_cov = p_cov * rate_scale + np.eye(N_COMPONENTS) * 1e-8
+        print(f'  Rate sampling: scale={rate_scale}, mix={rate_mix}')
 
     n_reject = 0
     k = 0
@@ -430,7 +428,8 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
         donor = reactor_ids[rng.integers(len(reactor_ids))]
 
-        if sample_rates:
+        do_sample = sample_rates or (rate_mix > 0 and rng.random() < rate_mix)
+        if do_sample:
             v_growth = rng.multivariate_normal(g_mean, g_cov)
             v_prod   = rng.multivariate_normal(p_mean, p_cov)
         else:
@@ -469,7 +468,8 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 # Main generation
 # ---------------------------------------------------------------------------
 
-def generate_all(data_dir=None, output_file=None, n_extra=50, sample_rates=False):
+def generate_all(data_dir=None, output_file=None, n_extra=50,
+                 sample_rates=False, rate_mix=0.0, rate_scale=1.0):
     """
     Generate unnormalized trajectories for all 10 reactors plus n_extra
     synthetic reactors with randomly sampled DoE conditions.
@@ -553,7 +553,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50, sample_rates=False
         print(f'\nGenerating {n_extra} extra reactors ({mode})...')
         extra_trajs, extra_doe = generate_extra(
             n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
-            sample_rates=sample_rates)
+            sample_rates=sample_rates, rate_mix=rate_mix, rate_scale=rate_scale)
         # Dummy phases for extras: repeat last phase value from first reactor
         extra_phases = np.tile(phases_out[0], (n_extra, 1))
         trajectories = np.concatenate([trajectories, extra_trajs], axis=0)
@@ -690,11 +690,16 @@ if __name__ == '__main__':
     parser.add_argument('--n-extra', type=int, default=50,
                         help='Number of extra reactors with random DoE (default: 50)')
     parser.add_argument('--sample-rates', action='store_true',
-                        help='Sample rates from multivariate Gaussian instead of copying donors')
+                        help='Sample ALL rates from multivariate Gaussian')
+    parser.add_argument('--rate-mix', type=float, default=0.0,
+                        help='Fraction of reactors with sampled rates (0.5 = 50%% sampled, 50%% donor)')
+    parser.add_argument('--rate-scale', type=float, default=1.0,
+                        help='Scale factor on covariance (0.25 = tighter sampling)')
     args = parser.parse_args()
 
     trajs, times, phases, doe_params, component_names = generate_all(
-        n_extra=args.n_extra, sample_rates=args.sample_rates)
+        n_extra=args.n_extra, sample_rates=args.sample_rates,
+        rate_mix=args.rate_mix, rate_scale=args.rate_scale)
     reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
                    'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
     plot_comparison(trajs[:10], reactor_ids, component_names)
