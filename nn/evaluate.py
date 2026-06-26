@@ -563,6 +563,11 @@ def main():
             preds_phys   = (all_preds_norm[:, :, f]   * scale[f] + feature_min[f]).flatten()
             thresh = np.median(actuals_phys)
             y_true = (actuals_phys >= thresh).astype(int)
+            if y_true.sum() == 0 or y_true.sum() == len(y_true):
+                ax.text(0.5, 0.5, 'Single class\n(no split)', ha='center',
+                        va='center', transform=ax.transAxes)
+                ax.set_title(name, fontsize=9)
+                continue
             fpr, tpr, _ = roc_curve(y_true, preds_phys)
             roc_auc = auc(fpr, tpr)
             ax.plot(fpr, tpr, lw=2, label=f'AUC = {roc_auc:.3f}')
