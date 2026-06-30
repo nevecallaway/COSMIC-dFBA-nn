@@ -341,32 +341,28 @@ def build_windows(trajectories, doe_params=None):
     Build sliding windows from trajectories for next-day prediction.
 
     For each reactor and each starting day d in [0, N_DAYS - SEQ_LEN):
-        x:   days [d, d+SEQ_LEN)  normalized to [0, 1] per feature
-        y:   day  d+SEQ_LEN       normalized [0, 1]
+        x:   days [d, d+SEQ_LEN)  raw physical units
+        y:   day  d+SEQ_LEN       raw physical units
         doe: DoE vector for that reactor (O2 coded, Glc mmol/L, AAs mmol/L)
 
+    Normalization is NOT applied here. train.py fits a MinMaxScaler on
+    training-only windows and applies it there so the scaler is never
+    contaminated with validation data.
+
     Returns:
-        windows:          np.ndarray (n_obs, SEQ_LEN, N_WINDOW_FEATURES)  normalized
-        targets:          np.ndarray (n_obs, N_WINDOW_FEATURES)            normalized
+        windows:          np.ndarray (n_obs, SEQ_LEN, N_WINDOW_FEATURES)  raw
+        targets:          np.ndarray (n_obs, N_WINDOW_FEATURES)            raw
         window_doe:       np.ndarray (n_obs, 3) or None
-        feature_min:      np.ndarray (N_WINDOW_FEATURES,)
-        feature_max:      np.ndarray (N_WINDOW_FEATURES,)
         reactor_indices:  np.ndarray (n_obs,)  which reactor each window came from
     """
     sub = trajectories[:, :, WINDOW_FEATURE_INDICES].astype(np.float32)
-
-    feature_min = sub.reshape(-1, N_WINDOW_FEATURES).min(axis=0)
-    feature_max = sub.reshape(-1, N_WINDOW_FEATURES).max(axis=0)
-    scale       = feature_max - feature_min
-    scale[scale == 0] = 1.0
-    sub_norm = (sub - feature_min) / scale
 
     windows, targets, window_doe, reactor_indices = [], [], [], []
     N, T, _ = sub.shape
     for i in range(N):
         for d in range(T - SEQ_LEN):
-            windows.append(sub_norm[i, d : d + SEQ_LEN, :])
-            targets.append(sub_norm[i, d + SEQ_LEN, :])       # normalized [0,1]
+            windows.append(sub[i, d : d + SEQ_LEN, :])
+            targets.append(sub[i, d + SEQ_LEN, :])
             if doe_params is not None:
                 window_doe.append(doe_params[i])
             reactor_indices.append(i)
@@ -377,8 +373,6 @@ def build_windows(trajectories, doe_params=None):
         np.array(windows, dtype=np.float32),
         np.array(targets, dtype=np.float32),
         doe_arr,
-        feature_min,
-        feature_max,
         np.array(reactor_indices, dtype=np.int32),
     )
 
@@ -566,7 +560,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
     times_out = np.tile(T_EVAL, (len(trajectories), 1))
 
     print('\nBuilding sliding windows (extra reactors only; originals reserved for eval)...')
-    windows, targets, window_doe, feature_min, feature_max, reactor_idx = build_windows(
+    windows, targets, window_doe, reactor_idx = build_windows(
         trajectories[n_original:], doe_params=doe_params[n_original:])
     print(f'  {len(windows)} windows  '
           f'({len(trajectories) - n_original} extra reactors x {N_DAYS - SEQ_LEN} windows each)')
@@ -589,11 +583,9 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         targets=targets,
         window_doe=window_doe,
         window_reactor_idx=reactor_idx,
-        feature_min=feature_min,
-        feature_max=feature_max,
         n_original=np.array(n_original),
     )
-    print(f'\nSaved {trajectories.shape} array + {len(windows)} windows')
+    print(f'\nSaved {trajectories.shape} array + {len(windows)} raw windows (unnormalized)')
     print(f'Output: {output_file}')
 
     # Excel export -- one sheet per reactor

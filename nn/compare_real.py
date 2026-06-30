@@ -64,11 +64,19 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load model
-    ckpt        = torch.load(args.model, map_location=device, weights_only=False)
-    feature_min = ckpt['feature_min']
-    feature_max = ckpt['feature_max']
-    doe_min     = ckpt.get('doe_min', None)
-    doe_max     = ckpt.get('doe_max', None)
+    ckpt    = torch.load(args.model, map_location=device, weights_only=False)
+    doe_min = ckpt.get('doe_min', None)
+    doe_max = ckpt.get('doe_max', None)
+
+    if 'scaler' in ckpt:
+        scaler      = ckpt['scaler']
+        feature_min = scaler.data_min_.astype(np.float32)
+        scale       = scaler.data_range_.astype(np.float32)
+    else:
+        feature_min = ckpt['feature_min']
+        scale       = ckpt['feature_max'] - feature_min
+    scale[scale == 0] = 1.0
+
     model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
                              n_doe=ckpt.get('n_doe', 0)).to(device)
     model.load_state_dict(ckpt['model_state'])
@@ -84,9 +92,6 @@ def main():
     ode_sub   = ode_trajs[:, :, FEATURE_INDICES]
     n_reactors, n_days, _ = ode_trajs.shape
 
-    scale = feature_max - feature_min
-    scale[scale == 0] = 1.0
-
     # Load real data
     real = load_data2(here / 'data')
 
@@ -100,7 +105,7 @@ def main():
             doe_sc = doe_max - doe_min
             doe_sc[doe_sc == 0] = 1.0
             doe_raw = (doe_raw - doe_min) / doe_sc
-        preds = rollout(model, seed_norm, feature_min, feature_max,
+        preds = rollout(model, seed_norm,
                         n_steps=n_days - SEQ_LEN, device=device, doe=doe_raw)
         model_preds.append(preds)
 

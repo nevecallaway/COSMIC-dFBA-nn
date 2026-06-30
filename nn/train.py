@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from pathlib import Path
+from sklearn.preprocessing import MinMaxScaler
 
 from model import NextDayPredictor, WindowDataset, N_FEATURES
 
@@ -69,13 +70,11 @@ def main():
     # ------------------------------------------------------------------
     # Data
     # ------------------------------------------------------------------
-    npz         = np.load(args.data, allow_pickle=True)
-    windows     = npz['windows']      # (n_obs, SEQ_LEN, N_FEATURES)  normalized
-    targets     = npz['targets']      # (n_obs, N_FEATURES)            normalized
-    feature_min = npz['feature_min']
-    feature_max = npz['feature_max']
+    npz     = np.load(args.data, allow_pickle=True)
+    windows = npz['windows'].astype(np.float32)   # (n_obs, SEQ_LEN, N_FEATURES)  raw
+    targets = npz['targets'].astype(np.float32)   # (n_obs, N_FEATURES)            raw
 
-    # Normalize DoE inputs to [0, 1] using per-column min/max
+    # Normalize DoE inputs to [0, 1] using per-column min/max from extra reactors
     doe_min    = npz['doe_min'].astype(np.float32)
     doe_max    = npz['doe_max'].astype(np.float32)
     doe_scale  = doe_max - doe_min
@@ -98,8 +97,28 @@ def main():
         rng     = np.random.default_rng(args.seed)
         targets = targets[rng.permutation(len(targets))]
 
-    train_ds = WindowDataset(windows[train_mask], targets[train_mask], doe=window_doe[train_mask])
-    val_ds   = WindowDataset(windows[val_mask],   targets[val_mask],   doe=window_doe[val_mask])
+    # Fit scaler on training data only (windows + targets combined so the
+    # scaler sees the full per-feature range present in training trajectories)
+    train_flat = np.vstack([
+        windows[train_mask].reshape(-1, N_FEATURES),
+        targets[train_mask],
+    ])
+    scaler = MinMaxScaler()
+    scaler.fit(train_flat)
+    print(f'Scaler fitted on {len(train_flat)} training samples '
+          f'(train windows + targets; val excluded)')
+
+    def _norm_windows(w):
+        n, s, f = w.shape
+        return scaler.transform(w.reshape(-1, f)).reshape(n, s, f).astype(np.float32)
+
+    windows_tr = _norm_windows(windows[train_mask])
+    targets_tr = scaler.transform(targets[train_mask]).astype(np.float32)
+    windows_vl = _norm_windows(windows[val_mask])
+    targets_vl = scaler.transform(targets[val_mask]).astype(np.float32)
+
+    train_ds = WindowDataset(windows_tr, targets_tr, doe=window_doe[train_mask])
+    val_ds   = WindowDataset(windows_vl, targets_vl, doe=window_doe[val_mask])
     n_train, n_val = len(train_ds), len(val_ds)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True)
@@ -191,8 +210,7 @@ def main():
             torch.save({
                 'model_state': model.state_dict(),
                 'log_sigma':   log_sigma.detach().cpu(),
-                'feature_min': feature_min,
-                'feature_max': feature_max,
+                'scaler':      scaler,
                 'doe_min':     doe_min,
                 'doe_max':     doe_max,
                 'hidden':      args.hidden,

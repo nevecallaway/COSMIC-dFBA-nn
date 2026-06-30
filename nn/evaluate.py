@@ -52,7 +52,7 @@ PAPER = {
 # Rollout
 # ---------------------------------------------------------------------------
 
-def rollout(model, seed_norm, feature_min, feature_max, n_steps, device, doe=None):
+def rollout(model, seed_norm, n_steps, device, doe=None):
     """Autoregressive rollout. Returns normalized predictions (no clipping)."""
     window = seed_norm.copy()
     doe_t  = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
@@ -124,11 +124,18 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
 
-    ckpt        = torch.load(args.model, map_location=device, weights_only=False)
-    feature_min = ckpt['feature_min']
-    feature_max = ckpt['feature_max']
-    doe_min     = ckpt.get('doe_min', None)
-    doe_max     = ckpt.get('doe_max', None)
+    ckpt    = torch.load(args.model, map_location=device, weights_only=False)
+    doe_min = ckpt.get('doe_min', None)
+    doe_max = ckpt.get('doe_max', None)
+
+    if 'scaler' in ckpt:
+        scaler      = ckpt['scaler']
+        feature_min = scaler.data_min_.astype(np.float32)
+        scale       = scaler.data_range_.astype(np.float32)
+    else:
+        feature_min = ckpt['feature_min']
+        scale       = ckpt['feature_max'] - feature_min
+    scale[scale == 0] = 1.0
 
     model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
                              n_doe=ckpt.get('n_doe', 0)).to(device)
@@ -164,9 +171,7 @@ def main():
               f'(n_original={n_original}, total in npz={len(npz["trajectories"])})')
 
     n_reactors, n_days, _ = trajectories.shape
-    sub   = trajectories[:, :, FEATURE_INDICES]
-    scale = feature_max - feature_min
-    scale[scale == 0] = 1.0
+    sub = trajectories[:, :, FEATURE_INDICES]
 
     # Load shuffled model if provided
     shuffled_model = None
@@ -203,8 +208,7 @@ def main():
             doe_scale = doe_max - doe_min
             doe_scale[doe_scale == 0] = 1.0
             doe_raw = (doe_raw - doe_min) / doe_scale
-        preds = rollout(model, seed_norm, feature_min, feature_max,
-                        n_steps=n_pred, device=device, doe=doe_raw)
+        preds = rollout(model, seed_norm, n_steps=n_pred, device=device, doe=doe_raw)
 
         actual_norm = np.clip((sub[i, SEQ_LEN:, :] - feature_min) / scale, 0.0, 1.0)
         all_preds_norm.append(preds)
@@ -227,7 +231,7 @@ def main():
 
         shuf_str = ''
         if has_shuf:
-            shuf_preds = rollout(shuffled_model, seed_norm, feature_min, feature_max,
+            shuf_preds = rollout(shuffled_model, seed_norm,
                                  n_steps=n_pred, device=device, doe=doe_raw)
             all_shuf_preds_norm.append(shuf_preds)
             shuf_titer = shuf_preds[-1, IDX_TITER] * scale[IDX_TITER] + feature_min[IDX_TITER]
