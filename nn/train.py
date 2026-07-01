@@ -36,6 +36,12 @@ PATIENCE      = 20
 VAL_SPLIT     = 0.2
 SIGMA_WARMUP  = 50   # epochs to train with sigma frozen before unlocking
 
+# Asparagine (5) and Serine (6) are flat in ODE data (initial concentrations
+# too low relative to consumption rates). Pin their log_sigma high so the loss
+# treats them as low-confidence and stops pulling gradient away from titer.
+FROZEN_SIGMA_IDX = [5, 6]
+FROZEN_LOG_SIGMA = 2.0   # sigma≈7.4, weight≈0.018
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -134,7 +140,9 @@ def main():
 
     # Sigma starts frozen so the model learns to predict all features first.
     # After sigma_warmup epochs it is unlocked and added to the optimizer.
+    # Asparagine and Serine sigmas are permanently frozen at FROZEN_LOG_SIGMA.
     log_sigma = torch.zeros(N_FEATURES, device=device, requires_grad=False)
+    log_sigma[FROZEN_SIGMA_IDX] = FROZEN_LOG_SIGMA
     sigma_unlocked = False
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -167,7 +175,9 @@ def main():
             log_sigma.requires_grad_(True)
             optimizer.add_param_group({'params': [log_sigma]})
             sigma_unlocked = True
-            print(f'Epoch {epoch:4d}  sigma unlocked')
+            free_names  = [feature_names[i] for i in range(N_FEATURES)
+                           if i not in FROZEN_SIGMA_IDX]
+            print(f'Epoch {epoch:4d}  sigma unlocked for: {free_names}')
 
         model.train()
         train_loss = 0.0
@@ -178,9 +188,12 @@ def main():
             pred = model(x, d)
             loss = criterion(pred, y)
             loss.backward()
+            if sigma_unlocked and log_sigma.grad is not None:
+                log_sigma.grad[FROZEN_SIGMA_IDX] = 0.0
             optimizer.step()
             train_loss += loss.item() * len(x)
             with torch.no_grad():
+                log_sigma[FROZEN_SIGMA_IDX] = FROZEN_LOG_SIGMA
                 feat_mse_accum += ((pred - y) ** 2).mean(dim=0).cpu().numpy() * len(x)
         train_loss /= n_train
         feat_mse = feat_mse_accum / n_train
