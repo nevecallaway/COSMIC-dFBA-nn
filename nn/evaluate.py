@@ -28,7 +28,7 @@ from scipy.stats import spearmanr
 from sklearn.metrics import (confusion_matrix, precision_score, recall_score,
                              f1_score, roc_curve, auc)
 
-from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES
+from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES, N_DAYS
 
 IDX_TITER = 2   # index of titer within the 8-feature vector
 
@@ -53,18 +53,30 @@ PAPER = {
 # ---------------------------------------------------------------------------
 
 def rollout(model, seed_norm, n_steps, device, doe=None):
-    """Autoregressive rollout. Returns normalized predictions (no clipping)."""
-    window = seed_norm.copy()
-    doe_t  = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
-    preds  = []
+    """
+    Autoregressive rollout. Returns normalized predictions (no clipping).
+
+    seed_norm: (SEQ_LEN, N_FEATURES) or (SEQ_LEN, N_FEATURES+1) if time-aware.
+    If the seed has a time column (last column), it is propagated forward by
+    incrementing 1/(N_DAYS-1) per step. Output is always (n_steps, N_FEATURES).
+    """
+    window   = seed_norm.copy()
+    has_time = seed_norm.shape[1] > N_FEATURES
+    doe_t    = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
+    preds    = []
 
     model.eval()
     with torch.no_grad():
         for _ in range(n_steps):
             x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
-            pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()
+            pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()   # (N_FEATURES,)
             preds.append(pred_norm)
-            window = np.vstack([window[1:], pred_norm])
+            if has_time:
+                next_time = window[-1, N_FEATURES] + 1.0 / (N_DAYS - 1)
+                next_row  = np.append(pred_norm, next_time)
+            else:
+                next_row = pred_norm
+            window = np.vstack([window[1:], next_row])
 
     return np.array(preds)   # (n_steps, N_FEATURES) normalized
 
@@ -137,8 +149,12 @@ def main():
         scale       = ckpt['feature_max'] - feature_min
     scale[scale == 0] = 1.0
 
+    n_input_features = ckpt.get('n_input_features', N_FEATURES)
+    use_time         = n_input_features > N_FEATURES
+
     model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
-                             n_doe=ckpt.get('n_doe', 0)).to(device)
+                             n_doe=ckpt.get('n_doe', 0),
+                             n_input_features=n_input_features).to(device)
     model.load_state_dict(ckpt['model_state'])
     model.eval()
     print(f'Loaded {args.model}')
@@ -201,8 +217,13 @@ def main():
     print('-' * (48 + (23 if has_shuf else 0)))
 
     for i in range(n_reactors):
-        seed_raw  = sub[i, :SEQ_LEN, :]
-        seed_norm = np.clip((seed_raw - feature_min) / scale, 0.0, 1.0)
+        seed_raw   = sub[i, :SEQ_LEN, :]
+        seed_feats = np.clip((seed_raw - feature_min) / scale, 0.0, 1.0)
+        if use_time:
+            time_col  = (np.arange(SEQ_LEN, dtype=np.float32) / (N_DAYS - 1))[:, None]
+            seed_norm = np.concatenate([seed_feats, time_col], axis=1)
+        else:
+            seed_norm = seed_feats
         doe_raw   = doe_params[i]
         if doe_min is not None:
             doe_scale = doe_max - doe_min

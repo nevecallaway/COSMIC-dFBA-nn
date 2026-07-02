@@ -349,19 +349,26 @@ def build_windows(trajectories, doe_params=None):
     training-only windows and applies it there so the scaler is never
     contaminated with validation data.
 
+    The last column of each window step is the normalized day index
+    (day / (N_DAYS - 1)), already in [0, 1]. train.py keeps this column
+    out of the MinMaxScaler and passes it through as-is.
+
     Returns:
-        windows:          np.ndarray (n_obs, SEQ_LEN, N_WINDOW_FEATURES)  raw
-        targets:          np.ndarray (n_obs, N_WINDOW_FEATURES)            raw
+        windows:          np.ndarray (n_obs, SEQ_LEN, N_WINDOW_FEATURES+1)  raw feats + time
+        targets:          np.ndarray (n_obs, N_WINDOW_FEATURES)              raw (no time)
         window_doe:       np.ndarray (n_obs, 3) or None
         reactor_indices:  np.ndarray (n_obs,)  which reactor each window came from
     """
     sub = trajectories[:, :, WINDOW_FEATURE_INDICES].astype(np.float32)
+    N, T, _ = sub.shape
+    n_days_total = T  # should be N_DAYS = 13
 
     windows, targets, window_doe, reactor_indices = [], [], [], []
-    N, T, _ = sub.shape
     for i in range(N):
         for d in range(T - SEQ_LEN):
-            windows.append(sub[i, d : d + SEQ_LEN, :])
+            feats = sub[i, d : d + SEQ_LEN, :]
+            time_col = (np.arange(d, d + SEQ_LEN, dtype=np.float32) / (n_days_total - 1))[:, None]
+            windows.append(np.concatenate([feats, time_col], axis=1))
             targets.append(sub[i, d + SEQ_LEN, :])
             if doe_params is not None:
                 window_doe.append(doe_params[i])

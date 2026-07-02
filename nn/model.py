@@ -44,8 +44,10 @@ FEATURE_INDICES = [
     10,  # Serine
     11,  # Glycine
 ]
-N_FEATURES = len(FEATURE_INDICES)   # 8
-SEQ_LEN    = 6                      # window size (days)
+N_FEATURES      = len(FEATURE_INDICES)   # 8  (output features)
+N_INPUT_FEATURES = N_FEATURES + 1        # 9  (features + normalized day index)
+SEQ_LEN          = 6                     # window size (days)
+N_DAYS           = 13                    # day 0 through day 12
 
 
 # ---------------------------------------------------------------------------
@@ -104,15 +106,16 @@ class NextDayPredictor(nn.Module):
         4. Linear head maps context+DoE to next-day prediction
     """
 
-    def __init__(self, n_features=N_FEATURES, seq_len=SEQ_LEN,
-                 hidden=64, n_conv_layers=3, dropout=0.1, n_doe=3):
+    def __init__(self, n_features=N_FEATURES, n_input_features=N_INPUT_FEATURES,
+                 seq_len=SEQ_LEN, hidden=64, n_conv_layers=3, dropout=0.1, n_doe=3):
         super().__init__()
-        self.n_doe      = n_doe
-        self.n_features = n_features
+        self.n_doe            = n_doe
+        self.n_features       = n_features
+        self.n_input_features = n_input_features
 
-        # Conv stack: (batch, n_features, seq_len) -> (batch, hidden, seq_len)
+        # Conv stack: (batch, n_input_features, seq_len) -> (batch, hidden, seq_len)
         conv_layers = [
-            nn.Conv1d(n_features, hidden, kernel_size=3, padding=1),
+            nn.Conv1d(n_input_features, hidden, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Dropout(dropout),
         ]

@@ -24,12 +24,12 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 
-from model import NextDayPredictor, WindowDataset, N_FEATURES
+from model import NextDayPredictor, WindowDataset, N_FEATURES, N_INPUT_FEATURES
 
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-BATCH_SIZE    = 32
+BATCH_SIZE    = 8
 LR            = 1e-3
 EPOCHS        = 200
 PATIENCE      = 20
@@ -103,10 +103,13 @@ def main():
         rng     = np.random.default_rng(args.seed)
         targets = targets[rng.permutation(len(targets))]
 
-    # Fit scaler on training data only (windows + targets combined so the
-    # scaler sees the full per-feature range present in training trajectories)
+    # Separate feature columns from the time column (last column, already [0,1])
+    win_feats = windows[:, :, :N_FEATURES]   # (n_obs, SEQ_LEN, N_FEATURES)  raw
+    win_time  = windows[:, :, N_FEATURES:]   # (n_obs, SEQ_LEN, 1)           normalized day
+
+    # Fit scaler on training features only (time column excluded)
     train_flat = np.vstack([
-        windows[train_mask].reshape(-1, N_FEATURES),
+        win_feats[train_mask].reshape(-1, N_FEATURES),
         targets[train_mask],
     ])
     scaler = MinMaxScaler()
@@ -114,13 +117,14 @@ def main():
     print(f'Scaler fitted on {len(train_flat)} training samples '
           f'(train windows + targets; val excluded)')
 
-    def _norm_windows(w):
-        n, s, f = w.shape
-        return scaler.transform(w.reshape(-1, f)).reshape(n, s, f).astype(np.float32)
+    def _norm_windows(wf, wt):
+        n, s, f = wf.shape
+        scaled = scaler.transform(wf.reshape(-1, f)).reshape(n, s, f).astype(np.float32)
+        return np.concatenate([scaled, wt], axis=2)  # (n, SEQ_LEN, N_INPUT_FEATURES)
 
-    windows_tr = _norm_windows(windows[train_mask])
+    windows_tr = _norm_windows(win_feats[train_mask], win_time[train_mask])
     targets_tr = scaler.transform(targets[train_mask]).astype(np.float32)
-    windows_vl = _norm_windows(windows[val_mask])
+    windows_vl = _norm_windows(win_feats[val_mask],   win_time[val_mask])
     targets_vl = scaler.transform(targets[val_mask]).astype(np.float32)
 
     train_ds = WindowDataset(windows_tr, targets_tr, doe=window_doe[train_mask])
@@ -136,7 +140,8 @@ def main():
     # Model
     # ------------------------------------------------------------------
     n_doe = window_doe.shape[1]
-    model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe).to(device)
+    model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe,
+                             n_input_features=N_INPUT_FEATURES).to(device)
 
     # Sigma starts frozen so the model learns to predict all features first.
     # After sigma_warmup epochs it is unlocked and added to the optimizer.
@@ -221,14 +226,15 @@ def main():
             best_val_loss  = val_loss
             patience_count = 0
             torch.save({
-                'model_state': model.state_dict(),
-                'log_sigma':   log_sigma.detach().cpu(),
-                'scaler':      scaler,
-                'doe_min':     doe_min,
-                'doe_max':     doe_max,
-                'hidden':      args.hidden,
-                'n_features':  N_FEATURES,
-                'n_doe':       n_doe,
+                'model_state':     model.state_dict(),
+                'log_sigma':       log_sigma.detach().cpu(),
+                'scaler':          scaler,
+                'doe_min':         doe_min,
+                'doe_max':         doe_max,
+                'hidden':          args.hidden,
+                'n_features':      N_FEATURES,
+                'n_input_features': N_INPUT_FEATURES,
+                'n_doe':           n_doe,
             }, args.output)
         else:
             patience_count += 1

@@ -22,7 +22,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES
+from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES, N_DAYS
 from evaluate import rollout
 
 FEATURE_NAMES = [
@@ -77,8 +77,12 @@ def main():
         scale       = ckpt['feature_max'] - feature_min
     scale[scale == 0] = 1.0
 
+    n_input_features = ckpt.get('n_input_features', N_FEATURES)
+    use_time         = n_input_features > N_FEATURES
+
     model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
-                             n_doe=ckpt.get('n_doe', 0)).to(device)
+                             n_doe=ckpt.get('n_doe', 0),
+                             n_input_features=n_input_features).to(device)
     model.load_state_dict(ckpt['model_state'])
     model.eval()
 
@@ -98,8 +102,13 @@ def main():
     # Run model rollouts
     model_preds = []
     for i in range(n_reactors):
-        seed_raw  = ode_sub[i, :SEQ_LEN, :]
-        seed_norm = (seed_raw - feature_min) / scale
+        seed_raw   = ode_sub[i, :SEQ_LEN, :]
+        seed_feats = (seed_raw - feature_min) / scale
+        if use_time:
+            time_col  = (np.arange(SEQ_LEN, dtype=np.float32) / (N_DAYS - 1))[:, None]
+            seed_norm = np.concatenate([seed_feats, time_col], axis=1)
+        else:
+            seed_norm = seed_feats
         doe_raw   = doe_params[i]
         if doe_min is not None:
             doe_sc = doe_max - doe_min
