@@ -54,7 +54,7 @@ PAPER = {
 
 def rollout(model, seed_norm, n_steps, device, doe=None):
     """
-    Autoregressive rollout. Returns normalized predictions (no clipping).
+    Autoregressive rollout. Returns normalized predictions (lower-bounded at 0).
 
     seed_norm: (SEQ_LEN, N_FEATURES) or (SEQ_LEN, N_FEATURES+1) if time-aware.
     If the seed has a time column (last column), it is propagated forward by
@@ -70,6 +70,7 @@ def rollout(model, seed_norm, n_steps, device, doe=None):
         for _ in range(n_steps):
             x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
             pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()   # (N_FEATURES,)
+            pred_norm = np.maximum(pred_norm, 0.0)                 # concentrations >= 0
             preds.append(pred_norm)
             if has_time:
                 next_time = window[-1, N_FEATURES] + 1.0 / (N_DAYS - 1)
