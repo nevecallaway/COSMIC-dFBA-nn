@@ -233,7 +233,7 @@ def main():
             doe_raw = (doe_raw - doe_min) / doe_scale
         preds = rollout(model, seed_norm, n_steps=n_pred, device=device, doe=doe_raw)
 
-        actual_norm = np.clip((sub[i, SEQ_LEN:, :] - feature_min) / scale, 0.0, 1.0)
+        actual_norm = np.clip((sub[i, seq_len:, :] - feature_min) / scale, 0.0, 1.0)
         all_preds_norm.append(preds)
         all_actuals_norm.append(actual_norm)
 
@@ -478,7 +478,7 @@ def main():
         for i in range(max_plot_reactors):
             for f in range(N_FEATURES):
                 ax = axes[i, f]
-                actual_raw = sub[i, SEQ_LEN:, f]
+                actual_raw = sub[i, seq_len:, f]
                 pred_raw   = all_preds_norm[i][:, f] * scale[f] + feature_min[f]
                 ax.plot(days_pred, actual_raw, 'k-', lw=1.2, label='Actual')
                 ax.plot(days_pred, pred_raw, 'r--', lw=1.2, label='Predicted')
