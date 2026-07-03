@@ -79,6 +79,7 @@ def main():
 
     n_input_features = ckpt.get('n_input_features', N_FEATURES)
     use_time         = n_input_features > N_FEATURES
+    seq_len          = ckpt.get('seq_len', SEQ_LEN)
 
     model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
                              n_doe=ckpt.get('n_doe', 0),
@@ -102,10 +103,10 @@ def main():
     # Run model rollouts
     model_preds = []
     for i in range(n_reactors):
-        seed_raw   = ode_sub[i, :SEQ_LEN, :]
+        seed_raw   = ode_sub[i, :seq_len, :]
         seed_feats = (seed_raw - feature_min) / scale
         if use_time:
-            time_col  = (np.arange(SEQ_LEN, dtype=np.float32) / (N_DAYS - 1))[:, None]
+            time_col  = (np.arange(seq_len, dtype=np.float32) / (N_DAYS - 1))[:, None]
             seed_norm = np.concatenate([seed_feats, time_col], axis=1)
         else:
             seed_norm = seed_feats
@@ -115,14 +116,14 @@ def main():
             doe_sc[doe_sc == 0] = 1.0
             doe_raw = (doe_raw - doe_min) / doe_sc
         preds = rollout(model, seed_norm,
-                        n_steps=n_days - SEQ_LEN, device=device, doe=doe_raw)
+                        n_steps=n_days - seq_len, device=device, doe=doe_raw)
         model_preds.append(preds)
 
     # Plot: one row per reactor, one column per feature
     fig, axes = plt.subplots(n_reactors, N_FEATURES,
                              figsize=(3 * N_FEATURES, 2.5 * n_reactors))
     days_all  = np.arange(n_days)
-    days_pred = np.arange(SEQ_LEN, n_days)
+    days_pred = np.arange(seq_len, n_days)
 
     for i, reactor_id in enumerate(REACTOR_IDS):
         for f in range(N_FEATURES):

@@ -336,13 +336,13 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
 # Window building
 # ---------------------------------------------------------------------------
 
-def build_windows(trajectories, doe_params=None):
+def build_windows(trajectories, doe_params=None, seq_len=SEQ_LEN):
     """
     Build sliding windows from trajectories for next-day prediction.
 
-    For each reactor and each starting day d in [0, N_DAYS - SEQ_LEN):
-        x:   days [d, d+SEQ_LEN)  raw physical units
-        y:   day  d+SEQ_LEN       raw physical units
+    For each reactor and each starting day d in [0, N_DAYS - seq_len):
+        x:   days [d, d+seq_len)  raw physical units
+        y:   day  d+seq_len       raw physical units
         doe: DoE vector for that reactor (O2 coded, Glc mmol/L, AAs mmol/L)
 
     Normalization is NOT applied here. train.py fits a MinMaxScaler on
@@ -354,7 +354,7 @@ def build_windows(trajectories, doe_params=None):
     out of the MinMaxScaler and passes it through as-is.
 
     Returns:
-        windows:          np.ndarray (n_obs, SEQ_LEN, N_WINDOW_FEATURES+1)  raw feats + time
+        windows:          np.ndarray (n_obs, seq_len, N_WINDOW_FEATURES+1)  raw feats + time
         targets:          np.ndarray (n_obs, N_WINDOW_FEATURES)              raw (no time)
         window_doe:       np.ndarray (n_obs, 3) or None
         reactor_indices:  np.ndarray (n_obs,)  which reactor each window came from
@@ -365,11 +365,11 @@ def build_windows(trajectories, doe_params=None):
 
     windows, targets, window_doe, reactor_indices = [], [], [], []
     for i in range(N):
-        for d in range(T - SEQ_LEN):
-            feats = sub[i, d : d + SEQ_LEN, :]
-            time_col = (np.arange(d, d + SEQ_LEN, dtype=np.float32) / (n_days_total - 1))[:, None]
+        for d in range(T - seq_len):
+            feats = sub[i, d : d + seq_len, :]
+            time_col = (np.arange(d, d + seq_len, dtype=np.float32) / (n_days_total - 1))[:, None]
             windows.append(np.concatenate([feats, time_col], axis=1))
-            targets.append(sub[i, d + SEQ_LEN, :])
+            targets.append(sub[i, d + seq_len, :])
             if doe_params is not None:
                 window_doe.append(doe_params[i])
             reactor_indices.append(i)
@@ -470,7 +470,8 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 # ---------------------------------------------------------------------------
 
 def generate_all(data_dir=None, output_file=None, n_extra=50,
-                 sample_rates=False, rate_mix=0.0, rate_scale=1.0):
+                 sample_rates=False, rate_mix=0.0, rate_scale=1.0,
+                 seq_len=SEQ_LEN):
     """
     Generate unnormalized trajectories for all 10 reactors plus n_extra
     synthetic reactors with randomly sampled DoE conditions.
@@ -568,9 +569,9 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
 
     print('\nBuilding sliding windows (extra reactors only; originals reserved for eval)...')
     windows, targets, window_doe, reactor_idx = build_windows(
-        trajectories[n_original:], doe_params=doe_params[n_original:])
+        trajectories[n_original:], doe_params=doe_params[n_original:], seq_len=seq_len)
     print(f'  {len(windows)} windows  '
-          f'({len(trajectories) - n_original} extra reactors x {N_DAYS - SEQ_LEN} windows each)')
+          f'({len(trajectories) - n_original} extra reactors x {N_DAYS - seq_len} windows each)')
 
     doe_min = doe_params[n_original:].min(axis=0)
     doe_max = doe_params[n_original:].max(axis=0)
@@ -591,6 +592,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         window_doe=window_doe,
         window_reactor_idx=reactor_idx,
         n_original=np.array(n_original),
+        seq_len=np.array(seq_len),
     )
     print(f'\nSaved {trajectories.shape} array + {len(windows)} raw windows (unnormalized)')
     print(f'Output: {output_file}')
@@ -694,11 +696,14 @@ if __name__ == '__main__':
                         help='Fraction of reactors with sampled rates (0.5 = 50%% sampled, 50%% donor)')
     parser.add_argument('--rate-scale', type=float, default=1.0,
                         help='Scale factor on covariance (0.25 = tighter sampling)')
+    parser.add_argument('--seq-len', type=int, default=SEQ_LEN,
+                        help=f'Window size in days (default: {SEQ_LEN})')
     args = parser.parse_args()
 
     trajs, times, phases, doe_params, component_names = generate_all(
         n_extra=args.n_extra, sample_rates=args.sample_rates,
-        rate_mix=args.rate_mix, rate_scale=args.rate_scale)
+        rate_mix=args.rate_mix, rate_scale=args.rate_scale,
+        seq_len=args.seq_len)
     reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
                    'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
     plot_comparison(trajs[:10], reactor_ids, component_names)

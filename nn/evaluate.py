@@ -152,6 +152,7 @@ def main():
 
     n_input_features = ckpt.get('n_input_features', N_FEATURES)
     use_time         = n_input_features > N_FEATURES
+    seq_len          = ckpt.get('seq_len', SEQ_LEN)
 
     model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
                              n_doe=ckpt.get('n_doe', 0),
@@ -172,7 +173,7 @@ def main():
         all_reactors = np.unique(reactor_idx)
         rng_split    = np.random.default_rng(args.seed)
         rng_split.shuffle(all_reactors)
-        n_val_reactors = max(1, int(len(all_reactors) * 0.2))
+        n_val_reactors  = max(1, int(len(all_reactors) * 0.2))
         val_reactor_ids = sorted(all_reactors[:n_val_reactors].tolist())
         # Map back to trajectory indices (extra reactors start at n_original)
         eval_indices = [n_original + r for r in val_reactor_ids]
@@ -200,7 +201,7 @@ def main():
         shuffled_model.eval()
         print(f'Loaded shuffled baseline from {args.shuffled_model}')
 
-    n_pred          = n_days - SEQ_LEN
+    n_pred          = n_days - seq_len
     titer_within_10 = 0
     shuf_within_10  = 0
     errors          = []
@@ -218,10 +219,10 @@ def main():
     print('-' * (48 + (23 if has_shuf else 0)))
 
     for i in range(n_reactors):
-        seed_raw   = sub[i, :SEQ_LEN, :]
+        seed_raw   = sub[i, :seq_len, :]
         seed_feats = np.clip((seed_raw - feature_min) / scale, 0.0, 1.0)
         if use_time:
-            time_col  = (np.arange(SEQ_LEN, dtype=np.float32) / (N_DAYS - 1))[:, None]
+            time_col  = (np.arange(seq_len, dtype=np.float32) / (N_DAYS - 1))[:, None]
             seed_norm = np.concatenate([seed_feats, time_col], axis=1)
         else:
             seed_norm = seed_feats
@@ -473,7 +474,7 @@ def main():
                                  figsize=(3 * N_FEATURES, 2.5 * max_plot_reactors))
         if max_plot_reactors == 1:
             axes = axes[np.newaxis, :]
-        days_pred = np.arange(SEQ_LEN, n_days)
+        days_pred = np.arange(seq_len, n_days)
         for i in range(max_plot_reactors):
             for f in range(N_FEATURES):
                 ax = axes[i, f]

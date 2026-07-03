@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 
-from model import NextDayPredictor, WindowDataset, N_FEATURES, N_INPUT_FEATURES
+from model import NextDayPredictor, WindowDataset, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -77,8 +77,10 @@ def main():
     # Data
     # ------------------------------------------------------------------
     npz     = np.load(args.data, allow_pickle=True)
-    windows = npz['windows'].astype(np.float32)   # (n_obs, SEQ_LEN, N_FEATURES)  raw
+    windows = npz['windows'].astype(np.float32)   # (n_obs, seq_len, N_FEATURES)  raw
     targets = npz['targets'].astype(np.float32)   # (n_obs, N_FEATURES)            raw
+    seq_len = int(npz['seq_len']) if 'seq_len' in npz else SEQ_LEN
+    print(f'seq_len: {seq_len}')
 
     # Normalize DoE inputs to [0, 1] using per-column min/max from extra reactors
     doe_min    = npz['doe_min'].astype(np.float32)
@@ -234,6 +236,7 @@ def main():
                 'hidden':          args.hidden,
                 'n_features':      N_FEATURES,
                 'n_input_features': N_INPUT_FEATURES,
+                'seq_len':         seq_len,
                 'n_doe':           n_doe,
             }, args.output)
         else:
