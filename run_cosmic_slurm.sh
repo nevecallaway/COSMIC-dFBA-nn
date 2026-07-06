@@ -45,18 +45,26 @@ cd "$REPO_DIR"
 
 # ── Step 1: Generate synthetic training data ──────────────────────────────────
 log "Generating synthetic training data..."
-$PYTHON generate_synthetic_training.py
+$PYTHON generate_synthetic_ode.py --n-extra 3000 --rate-mix 0.2 --rate-scale 0.1
 log "Synthetic data generation complete."
 
 # ── Step 2: Train the model ───────────────────────────────────────────────────
 log "Starting training..."
-$PYTHON train.py
+$PYTHON train.py --output model_v2.pt
 log "Training complete."
+
+# ── Step 3: Evaluate ──────────────────────────────────────────────────────────
+log "Evaluating on original 10 reactors..."
+$PYTHON evaluate.py --model model_v2.pt
+
+log "Evaluating on val set..."
+$PYTHON evaluate.py --model model_v2.pt --val
 
 # ── Copy outputs to a timestamped results directory ──────────────────────────
 RESULTS_DIR="$REPO_DIR/results/job_${SLURM_JOB_ID}"
 mkdir -p "$RESULTS_DIR"
-cp nn/improved_model.pt "$RESULTS_DIR/" 2>/dev/null || true
+cp model_v2.pt "$RESULTS_DIR/" 2>/dev/null || true
+cp model_v2.csv "$RESULTS_DIR/" 2>/dev/null || true
 cp logs/cosmic_${SLURM_JOB_ID}.log "$RESULTS_DIR/" 2>/dev/null || true
 
 log "Outputs saved to $RESULTS_DIR"

@@ -13,9 +13,9 @@ From: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
 # Transfer to cluster:
 #   scp cosmic.sif <user>@<cluster>:~/cosmic-dfba/
 #
-# Run (see run_cosmic_apptainer.sh for the full SLURM script):
+# Run (see run_cosmic_slurm.sh for the full SLURM script):
 #   apptainer exec --nv --bind $WORK_DIR:/workspace cosmic.sif \
-#       bash -c "cd /workspace && python generate_synthetic_training.py && python train.py"
+#       bash -c "cd /workspace && python generate_synthetic_ode.py && python train.py"
 # =============================================================================
 
 %post
@@ -30,6 +30,7 @@ From: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
         scikit-learn \
         scipy \
         matplotlib \
+        openpyxl \
         umap-learn
 
     # Confirm GPU is accessible at build time (informational only)
@@ -45,17 +46,18 @@ From: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
 
 %help
     COSMIC-dFBA surrogate model training environment.
-    Includes: PyTorch 2.2, CUDA 12.1, pandas, scikit-learn, scipy, matplotlib.
+    Includes: PyTorch 2.2, CUDA 12.1, pandas, scikit-learn, scipy, matplotlib, openpyxl.
 
     Minimal files needed on the cluster (bind-mounted at /workspace):
-      train.py
       model.py
-      utils.py
-      generate_synthetic_training.py
+      generate_synthetic_ode.py
+      train.py
+      evaluate.py
+      compare_real.py
       data/data_1.csv
       data/data_2.csv
       data/data_3.csv
 
     Full run:
-      apptainer exec --nv --bind /path/to/files:/workspace cosmic.sif \
-          bash -c "cd /workspace && python generate_synthetic_training.py && python train.py"
+      apptainer exec --nv --bind /path/to/nn:/workspace cosmic.sif \
+          bash -c "cd /workspace && python generate_synthetic_ode.py && python train.py && python evaluate.py"

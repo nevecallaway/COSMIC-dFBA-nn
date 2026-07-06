@@ -52,25 +52,41 @@ PAPER = {
 # Rollout
 # ---------------------------------------------------------------------------
 
-def rollout(model, seed_norm, n_steps, device, doe=None):
+FEATURE_NAMES_SHORT = [
+    'CellDensity', 'CellSize', 'Titer',
+    'Glucose', 'Glutamine', 'Asparagine', 'Serine', 'Glycine',
+]
+
+
+def rollout(model, seed_norm, n_steps, device, doe=None, reactor_id=None, log_negatives=False):
     """
-    Autoregressive rollout. Returns normalized predictions (lower-bounded at 0).
+    Autoregressive rollout. Returns normalized predictions.
 
     seed_norm: (SEQ_LEN, N_FEATURES) or (SEQ_LEN, N_FEATURES+1) if time-aware.
     If the seed has a time column (last column), it is propagated forward by
     incrementing 1/(N_DAYS-1) per step. Output is always (n_steps, N_FEATURES).
+
+    log_negatives: if True, print a warning when any prediction goes below 0
+                   without clipping so the caller can identify the root cause.
     """
     window   = seed_norm.copy()
     has_time = seed_norm.shape[1] > N_FEATURES
     doe_t    = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
     preds    = []
+    seq_len  = seed_norm.shape[0]
 
     model.eval()
     with torch.no_grad():
-        for _ in range(n_steps):
+        for step in range(n_steps):
             x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
             pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()   # (N_FEATURES,)
-            pred_norm = np.maximum(pred_norm, 0.0)                 # concentrations >= 0
+            if log_negatives:
+                for f, val in enumerate(pred_norm):
+                    if val < 0.0:
+                        day = seq_len + step
+                        rid = reactor_id or '?'
+                        print(f'  [NEG] reactor={rid}  day={day}  '
+                              f'feature={FEATURE_NAMES_SHORT[f]}  value={val:.4f}')
             preds.append(pred_norm)
             if has_time:
                 next_time = window[-1, N_FEATURES] + 1.0 / (N_DAYS - 1)
@@ -132,6 +148,8 @@ def main():
                         help='Evaluate on validation split (held-out training reactors) instead of originals')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (must match train.py for val split)')
+    parser.add_argument('--log-negatives', action='store_true',
+                        help='Print a warning for each negative prediction (no clip applied)')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -231,7 +249,8 @@ def main():
             doe_scale = doe_max - doe_min
             doe_scale[doe_scale == 0] = 1.0
             doe_raw = (doe_raw - doe_min) / doe_scale
-        preds = rollout(model, seed_norm, n_steps=n_pred, device=device, doe=doe_raw)
+        preds = rollout(model, seed_norm, n_steps=n_pred, device=device, doe=doe_raw,
+                        reactor_id=f'R{i:04d}', log_negatives=args.log_negatives)
 
         actual_norm = np.clip((sub[i, seq_len:, :] - feature_min) / scale, 0.0, 1.0)
         all_preds_norm.append(preds)
@@ -358,7 +377,7 @@ def main():
     # Learned sigmas
     # ------------------------------------------------------------------
     if 'log_sigma' in ckpt:
-        ls = ckpt['log_sigma'].numpy()
+        ls = ckpt['log_sigma'].cpu().numpy()
         sigmas = np.exp(ls)
         weights = np.exp(-2 * ls)
         print(f'--- Learned sigmas (from checkpoint) ---')
