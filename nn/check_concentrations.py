@@ -117,12 +117,21 @@ def main():
     check(C_NOMINAL[IDX_ASN], C_NOMINAL[IDX_SER], results)
 
     if not args.sweep:
-        # Show the actual min values per feature across all conditions
+        # Show the actual min values per reactor per DoE condition
         print('\nMinimum concentrations reached (current C_NOMINAL):')
-        for idx, name in FEATURE_NAMES.items():
-            all_mins = [mins[idx] for mins in results.values()]
-            print(f'  {name}: min={min(all_mins):.6f}  '
-                  f'mean_min={np.mean(all_mins):.6f} mmol/L')
+        print(f'  {"Reactor":<10} {"AA_doe":>6}  ', end='')
+        for name in FEATURE_NAMES.values():
+            print(f'{name:>14}', end='')
+        print()
+        print('  ' + '-' * (18 + 14 * len(FEATURE_NAMES)))
+        for (reactor, aa_level), mins in sorted(results.items()):
+            print(f'  {reactor:<10} {aa_level:>+6}  ', end='')
+            for idx in FEATURE_NAMES:
+                v = mins[idx]
+                flag = ' *' if v < MIN_THRESHOLD else '  '
+                print(f'{v:>12.4f}{flag}', end='')
+            print()
+        print(f'\n  (* = below threshold {MIN_THRESHOLD} mmol/L)')
         print('\nRun with --sweep to find minimum safe C_NOMINAL values.')
         return
 
