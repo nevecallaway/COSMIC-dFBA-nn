@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Diagnostic: find minimum C_NOMINAL for asparagine and serine such that
-concentrations never go negative under nominal, high AA (+1), and low AA (-1)
-DoE conditions, across all 10 real reactors.
+Diagnostic: find minimum uniform scale factor on all amino acid concentrations
+(applied to both initial conditions and feed) such that no concentration goes
+negative, across all 10 real reactors and all 3 AA DoE levels (-1, 0, +1).
 
 Usage:
-    python check_concentrations.py
-    python check_concentrations.py --asn 0.5 --ser 1.0   # test specific values
-    python check_concentrations.py --sweep                 # sweep a range
+    python check_concentrations.py              # show current min values
+    python check_concentrations.py --sweep      # sweep scale factors
+    python check_concentrations.py --scale 5.0  # test a specific scale factor
 """
 
 import argparse
@@ -16,32 +16,34 @@ from pathlib import Path
 
 from generate_synthetic_ode import (
     load_rates, load_phase_fractions, load_doe,
-    generate_reactor, make_cin,
-    C_NOMINAL, IDX_ASN, IDX_SER,
+    generate_reactor, C_NOMINAL, AAS_INDICES,
 )
 
-FEATURE_NAMES = {IDX_ASN: 'Asparagine', IDX_SER: 'Serine'}
 AA_DOE_LEVELS = [-1, 0, 1]
 
+COMPONENT_NAMES = [
+    'Cell Density', 'Cell Volume', 'Glucose', 'Lactate', 'NH4', 'Titer',
+    'Glutamine', 'Glutamate', 'L-Asparagine', 'L-Aspartic acid',
+    'L-Serine', 'Glycine', 'L-Alanine', 'L-Proline', 'L-Threonine',
+    'L-Histidine', 'L-Lysine', 'L-Valine', 'L-Methionine', 'L-Arginine',
+    'L-Tyrosine', 'L-Isoleucine', 'L-Leucine', 'L-Phenylalanine',
+    'L-Tryptophan',
+]
 
-MIN_THRESHOLD = 0.01  # concentrations must stay above this (mmol/L)
 
-
-def run_reactors(asn_conc, ser_conc, rates_growth, rates_prod, reactor_ids,
-                 pm_dict, doe_dict):
+def run_reactors(scale, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict):
     """
-    Run all reactors at each AA DoE level with the given initial concentrations.
-    Returns a dict: {(reactor, doe_level): {feature_idx: min_value}}.
+    Run all reactors at each AA DoE level with amino acid concentrations
+    scaled uniformly in both C_NOMINAL (initial) and CIN_NOMINAL (feed).
+    Returns {(reactor, doe_level): trajectory array}.
     """
     import generate_synthetic_ode as _g
 
-    c_nom = _g.C_NOMINAL.copy()
-    c_nom[IDX_ASN] = asn_conc
-    c_nom[IDX_SER] = ser_conc
-
-    # Patch only C_NOMINAL (initial conditions); feed (CIN_NOMINAL) stays unchanged
     orig_nom = _g.C_NOMINAL.copy()
-    _g.C_NOMINAL[:] = c_nom
+    orig_cin = _g.CIN_NOMINAL.copy()
+
+    _g.C_NOMINAL[AAS_INDICES]   = orig_nom[AAS_INDICES] * scale
+    _g.CIN_NOMINAL[AAS_INDICES] = orig_cin[AAS_INDICES] * scale
 
     results = {}
     for reactor in reactor_ids:
@@ -53,38 +55,40 @@ def run_reactors(asn_conc, ser_conc, rates_growth, rates_prod, reactor_ids,
             doe = {**base_doe, 'AAs': float(aa_level)}
             traj, _ = generate_reactor(reactor, rates_growth[reactor],
                                        rates_prod[reactor], pm_days, doe)
-            mins = {idx: traj[:, idx].min() for idx in FEATURE_NAMES}
-            results[(reactor, aa_level)] = mins
+            results[(reactor, aa_level)] = traj
 
-    _g.C_NOMINAL[:] = orig_nom
+    _g.C_NOMINAL[:]   = orig_nom
+    _g.CIN_NOMINAL[:] = orig_cin
 
     return results
 
 
-def check(asn_conc, ser_conc, results, verbose=True):
-    """Return True if all concentrations stay above MIN_THRESHOLD."""
-    any_low = False
-    for (reactor, aa_level), mins in results.items():
-        for idx, name in FEATURE_NAMES.items():
-            v = mins[idx]
-            if v < MIN_THRESHOLD:
-                if verbose:
-                    print(f'  LOW  reactor={reactor}  AA_doe={aa_level:+d}  '
-                          f'{name}  min={v:.6f} mmol/L')
-                any_low = True
-    return not any_low
+def check(results, verbose=True):
+    """
+    Return True if no concentration goes negative across all reactors and conditions.
+    Prints the worst offenders when verbose=True.
+    """
+    any_neg = False
+    for (reactor, aa_level), traj in results.items():
+        neg = traj < 0
+        if neg.any():
+            any_neg = True
+            if verbose:
+                for idx in np.where(neg.any(axis=0))[0]:
+                    worst = traj[:, idx].min()
+                    print(f'  NEG  reactor={reactor}  AA_doe={aa_level:+d}  '
+                          f'{COMPONENT_NAMES[idx]}  min={worst:.4f} mmol/L')
+    return not any_neg
 
 
 def main():
     here = Path(__file__).parent
     parser = argparse.ArgumentParser()
     parser.add_argument('--data',  default=str(here / 'data'))
-    parser.add_argument('--asn',   type=float, default=None,
-                        help='Test a specific asparagine C_NOMINAL (mmol/L)')
-    parser.add_argument('--ser',   type=float, default=None,
-                        help='Test a specific serine C_NOMINAL (mmol/L)')
+    parser.add_argument('--scale', type=float, default=None,
+                        help='Test a specific uniform AA scale factor')
     parser.add_argument('--sweep', action='store_true',
-                        help='Sweep concentrations to find minimum non-negative values')
+                        help='Sweep scale factors to find minimum non-negative value')
     args = parser.parse_args()
 
     data_dir = Path(args.data)
@@ -93,66 +97,51 @@ def main():
     doe_dict = load_doe(data_dir / 'data_1.csv')
 
     print(f'Reactors: {reactor_ids}')
-    print(f'Current C_NOMINAL: Asparagine={C_NOMINAL[IDX_ASN]:.4f}  '
-          f'Serine={C_NOMINAL[IDX_SER]:.4f} mmol/L\n')
+    print('Current AA concentrations (DMEM base, mmol/L):')
+    for idx in AAS_INDICES:
+        print(f'  [{idx:2d}] {COMPONENT_NAMES[idx]:<20} {C_NOMINAL[idx]:.4f}')
+    print()
 
-    if args.asn is not None or args.ser is not None:
-        asn = args.asn if args.asn is not None else C_NOMINAL[IDX_ASN]
-        ser = args.ser if args.ser is not None else C_NOMINAL[IDX_SER]
-        print(f'Testing: Asparagine={asn:.4f}  Serine={ser:.4f} mmol/L')
-        results = run_reactors(asn, ser, rates_growth, rates_prod,
+    if args.scale is not None:
+        print(f'Testing scale={args.scale:.2f}x ...')
+        results = run_reactors(args.scale, rates_growth, rates_prod,
                                reactor_ids, pm_dict, doe_dict)
-        ok = check(asn, ser, results)
+        ok = check(results)
         print('  All non-negative.' if ok else '  Negatives found.')
         return
 
-    # Always show current values first
-    print('--- Current values ---')
-    results = run_reactors(C_NOMINAL[IDX_ASN], C_NOMINAL[IDX_SER],
-                           rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict)
-    check(C_NOMINAL[IDX_ASN], C_NOMINAL[IDX_SER], results)
+    # Always show current (scale=1) first
+    print('--- Current values (scale=1.0) ---')
+    results = run_reactors(1.0, rates_growth, rates_prod,
+                           reactor_ids, pm_dict, doe_dict)
+    check(results, verbose=True)
 
     if not args.sweep:
-        # Show the actual min values per reactor per DoE condition
-        print('\nMinimum concentrations reached (current C_NOMINAL):')
-        print(f'  {"Reactor":<10} {"AA_doe":>6}  ', end='')
-        for name in FEATURE_NAMES.values():
-            print(f'{name:>14}', end='')
-        print()
-        print('  ' + '-' * (18 + 14 * len(FEATURE_NAMES)))
-        for (reactor, aa_level), mins in sorted(results.items()):
-            print(f'  {reactor:<10} {aa_level:>+6}  ', end='')
-            for idx in FEATURE_NAMES:
-                v = mins[idx]
-                flag = ' *' if v < MIN_THRESHOLD else '  '
-                print(f'{v:>12.4f}{flag}', end='')
-            print()
-        print(f'\n  (* = below threshold {MIN_THRESHOLD} mmol/L)')
-        print('\nRun with --sweep to find minimum safe C_NOMINAL values.')
+        print('\nRun with --sweep to find minimum safe scale factor.')
         return
 
-    # Sweep: for each (asn, ser) pair report pass/fail and which reactors still fail
-    print('\n--- Sweeping concentrations ---')
-    candidates = [0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]
-    for asn in candidates:
-        for ser in candidates:
-            results = run_reactors(asn, ser, rates_growth, rates_prod,
-                                   reactor_ids, pm_dict, doe_dict)
-            failing = set()
-            for (reactor, aa_level), mins in results.items():
-                for idx in FEATURE_NAMES:
-                    if mins[idx] < MIN_THRESHOLD:
-                        failing.add(reactor)
-            n_fail = len(failing)
-            status = 'OK' if n_fail == 0 else f'{n_fail} reactors fail'
-            fail_str = f'  -> {sorted(failing)}' if 0 < n_fail <= 5 else ''
-            print(f'  Asparagine={asn:.2f}  Serine={ser:.2f}  [{status}]{fail_str}')
-            if n_fail == 0:
-                print(f'\nSmallest safe values: '
-                      f'Asparagine={asn:.2f}  Serine={ser:.2f} mmol/L')
-                return
+    # Sweep uniform scale factors
+    print('\n--- Sweeping AA scale factor (applied to initial + feed) ---')
+    candidates = [1, 2, 5, 10, 20, 50, 100, 200]
+    for scale in candidates:
+        results = run_reactors(scale, rates_growth, rates_prod,
+                               reactor_ids, pm_dict, doe_dict)
+        failing = set()
+        for (reactor, aa_level), traj in results.items():
+            if (traj < 0).any():
+                failing.add(reactor)
+        n_fail = len(failing)
+        status = 'OK' if n_fail == 0 else f'{n_fail} reactors fail'
+        fail_str = f'  -> {sorted(failing)}' if 0 < n_fail <= 5 else ''
+        print(f'  scale={scale:>4}x  [{status}]{fail_str}')
+        if n_fail == 0:
+            print(f'\nMinimum safe scale factor: {scale}x')
+            print('Scaled AA concentrations (mmol/L):')
+            for idx in AAS_INDICES:
+                print(f'  {COMPONENT_NAMES[idx]:<20} {C_NOMINAL[idx] * scale:.4f}')
+            return
 
-    print('\nNo fully safe values found. Some reactors deplete regardless of concentration.')
+    print('\nNo safe scale factor found within tested range.')
 
 
 if __name__ == '__main__':
