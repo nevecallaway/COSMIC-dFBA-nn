@@ -39,12 +39,9 @@ def run_reactors(asn_conc, ser_conc, rates_growth, rates_prod, reactor_ids,
     c_nom[IDX_ASN] = asn_conc
     c_nom[IDX_SER] = ser_conc
 
-    # Patch both C_NOMINAL (initial conditions) and CIN_NOMINAL (feed)
+    # Patch only C_NOMINAL (initial conditions); feed (CIN_NOMINAL) stays unchanged
     orig_nom = _g.C_NOMINAL.copy()
-    orig_cin = _g.CIN_NOMINAL.copy()
     _g.C_NOMINAL[:] = c_nom
-    _g.CIN_NOMINAL[IDX_ASN] = asn_conc
-    _g.CIN_NOMINAL[IDX_SER] = ser_conc
 
     results = {}
     for reactor in reactor_ids:
@@ -60,7 +57,6 @@ def run_reactors(asn_conc, ser_conc, rates_growth, rates_prod, reactor_ids,
             results[(reactor, aa_level)] = mins
 
     _g.C_NOMINAL[:] = orig_nom
-    _g.CIN_NOMINAL[:] = orig_cin
 
     return results
 
