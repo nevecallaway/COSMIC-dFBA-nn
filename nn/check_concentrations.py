@@ -135,23 +135,28 @@ def main():
         print('\nRun with --sweep to find minimum safe C_NOMINAL values.')
         return
 
-    # Sweep: find minimum C_NOMINAL that avoids negatives
+    # Sweep: for each (asn, ser) pair report pass/fail and which reactors still fail
     print('\n--- Sweeping concentrations ---')
-    candidates = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0]
+    candidates = [0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]
     for asn in candidates:
         for ser in candidates:
             results = run_reactors(asn, ser, rates_growth, rates_prod,
                                    reactor_ids, pm_dict, doe_dict)
-            ok = check(asn, ser, results, verbose=False)
-            status = 'OK' if ok else 'LOW'
-            print(f'  [{status}]  Asparagine={asn:.2f}  Serine={ser:.2f}')
-            if ok:
-                print(f'\nSmallest safe values found: '
+            failing = set()
+            for (reactor, aa_level), mins in results.items():
+                for idx in FEATURE_NAMES:
+                    if mins[idx] < MIN_THRESHOLD:
+                        failing.add(reactor)
+            n_fail = len(failing)
+            status = 'OK' if n_fail == 0 else f'{n_fail} reactors fail'
+            fail_str = f'  -> {sorted(failing)}' if 0 < n_fail <= 5 else ''
+            print(f'  Asparagine={asn:.2f}  Serine={ser:.2f}  [{status}]{fail_str}')
+            if n_fail == 0:
+                print(f'\nSmallest safe values: '
                       f'Asparagine={asn:.2f}  Serine={ser:.2f} mmol/L')
                 return
 
-    print('\nNo safe values found in sweep range. '
-          'Check consumption rates in data_3.csv.')
+    print('\nNo fully safe values found. Some reactors deplete regardless of concentration.')
 
 
 if __name__ == '__main__':
