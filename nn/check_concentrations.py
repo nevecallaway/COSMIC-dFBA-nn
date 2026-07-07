@@ -24,15 +24,27 @@ FEATURE_NAMES = {IDX_ASN: 'Asparagine', IDX_SER: 'Serine'}
 AA_DOE_LEVELS = [-1, 0, 1]
 
 
+MIN_THRESHOLD = 0.01  # concentrations must stay above this (mmol/L)
+
+
 def run_reactors(asn_conc, ser_conc, rates_growth, rates_prod, reactor_ids,
                  pm_dict, doe_dict):
     """
     Run all reactors at each AA DoE level with the given initial concentrations.
     Returns a dict: {(reactor, doe_level): {feature_idx: min_value}}.
     """
-    c_nom = C_NOMINAL.copy()
+    import generate_synthetic_ode as _g
+
+    c_nom = _g.C_NOMINAL.copy()
     c_nom[IDX_ASN] = asn_conc
     c_nom[IDX_SER] = ser_conc
+
+    # Patch both C_NOMINAL (initial conditions) and CIN_NOMINAL (feed)
+    orig_nom = _g.C_NOMINAL.copy()
+    orig_cin = _g.CIN_NOMINAL.copy()
+    _g.C_NOMINAL[:] = c_nom
+    _g.CIN_NOMINAL[IDX_ASN] = asn_conc
+    _g.CIN_NOMINAL[IDX_SER] = ser_conc
 
     results = {}
     for reactor in reactor_ids:
@@ -42,32 +54,29 @@ def run_reactors(asn_conc, ser_conc, rates_growth, rates_prod, reactor_ids,
             continue
         for aa_level in AA_DOE_LEVELS:
             doe = {**base_doe, 'AAs': float(aa_level)}
-
-            # Temporarily patch C_NOMINAL by overriding make_cin via monkey-patch
-            import generate_synthetic_ode as _g
-            orig = _g.C_NOMINAL.copy()
-            _g.C_NOMINAL[:] = c_nom
-
             traj, _ = generate_reactor(reactor, rates_growth[reactor],
                                        rates_prod[reactor], pm_days, doe)
-            _g.C_NOMINAL[:] = orig
-
             mins = {idx: traj[:, idx].min() for idx in FEATURE_NAMES}
             results[(reactor, aa_level)] = mins
+
+    _g.C_NOMINAL[:] = orig_nom
+    _g.CIN_NOMINAL[:] = orig_cin
+
     return results
 
 
-def check(asn_conc, ser_conc, results):
-    """Return True if no negatives found."""
-    any_neg = False
+def check(asn_conc, ser_conc, results, verbose=True):
+    """Return True if all concentrations stay above MIN_THRESHOLD."""
+    any_low = False
     for (reactor, aa_level), mins in results.items():
         for idx, name in FEATURE_NAMES.items():
             v = mins[idx]
-            if v < 0:
-                print(f'  NEG  reactor={reactor}  AA_doe={aa_level:+d}  '
-                      f'{name}  min={v:.6f} mmol/L')
-                any_neg = True
-    return not any_neg
+            if v < MIN_THRESHOLD:
+                if verbose:
+                    print(f'  LOW  reactor={reactor}  AA_doe={aa_level:+d}  '
+                          f'{name}  min={v:.6f} mmol/L')
+                any_low = True
+    return not any_low
 
 
 def main():
@@ -124,8 +133,8 @@ def main():
         for ser in candidates:
             results = run_reactors(asn, ser, rates_growth, rates_prod,
                                    reactor_ids, pm_dict, doe_dict)
-            ok = check(asn, ser, results)
-            status = 'OK' if ok else 'NEG'
+            ok = check(asn, ser, results, verbose=False)
+            status = 'OK' if ok else 'LOW'
             print(f'  [{status}]  Asparagine={asn:.2f}  Serine={ser:.2f}')
             if ok:
                 print(f'\nSmallest safe values found: '
