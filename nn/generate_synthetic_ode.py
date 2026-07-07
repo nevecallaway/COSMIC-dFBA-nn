@@ -325,7 +325,11 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
         else:
             C_next = sol.y[:, -1].copy()
 
-        C_next = np.clip(C_next, 0.0, None)
+        neg_mask = C_next < 0
+        if neg_mask.any():
+            for idx in np.where(neg_mask)[0]:
+                print(f'  [ODE NEG] {reactor_id} day={d+1} '
+                      f'component={idx} val={C_next[idx]:.6f}')
         trajectory.append(C_next)
         C = C_next
 
