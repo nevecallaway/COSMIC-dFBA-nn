@@ -118,6 +118,16 @@ def main():
 
     if not args.sweep:
         print('\nRun with --sweep to find minimum safe scale factor.')
+        print('\nDiagnostic: cell density and first-failure day for scale=1.0:')
+        for (reactor, aa_level), traj in sorted(results.items()):
+            cd_max = traj[:, 0].max()
+            neg_mask = traj < 0
+            if neg_mask.any():
+                first_day = int(np.argmax(neg_mask.any(axis=1)))
+                first_comp = int(np.argmax(neg_mask[first_day]))
+                print(f'  {reactor}  AA_doe={aa_level:+d}  '
+                      f'CD_max={cd_max:.3f} E9/L  '
+                      f'first_neg: day={first_day} {COMPONENT_NAMES[first_comp]}={traj[first_day, first_comp]:.4f}')
         return
 
     # Sweep uniform scale factors
@@ -142,6 +152,19 @@ def main():
             return
 
     print('\nNo safe scale factor found within tested range.')
+    print('\nDiagnostic at scale=200: cell density and first-failure day for failing reactors:')
+    results_200 = run_reactors(200, rates_growth, rates_prod,
+                               reactor_ids, pm_dict, doe_dict)
+    for (reactor, aa_level), traj in sorted(results_200.items()):
+        neg_mask = traj < 0
+        if not neg_mask.any():
+            continue
+        cd_max = traj[:, 0].max()
+        first_day = int(np.argmax(neg_mask.any(axis=1)))
+        first_comp = int(np.argmax(neg_mask[first_day]))
+        print(f'  {reactor}  AA_doe={aa_level:+d}  '
+              f'CD_max={cd_max:.3f} E9/L  '
+              f'first_neg: day={first_day} {COMPONENT_NAMES[first_comp]}={traj[first_day, first_comp]:.4f}')
 
 
 if __name__ == '__main__':
