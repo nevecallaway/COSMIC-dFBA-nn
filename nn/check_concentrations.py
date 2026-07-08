@@ -31,10 +31,12 @@ COMPONENT_NAMES = [
 ]
 
 
-def run_reactors(scale, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict):
+def run_reactors(scale, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
+                 nh4_feed=None):
     """
     Run all reactors at each AA DoE level with amino acid concentrations
     scaled uniformly in both C_NOMINAL (initial) and CIN_NOMINAL (feed).
+    Optionally override CIN_NOMINAL[NH4] with nh4_feed (mmol/L).
     Returns {(reactor, doe_level): trajectory array}.
     """
     import generate_synthetic_ode as _g
@@ -44,6 +46,9 @@ def run_reactors(scale, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict
 
     _g.C_NOMINAL[AAS_INDICES]   = orig_nom[AAS_INDICES] * scale
     _g.CIN_NOMINAL[AAS_INDICES] = orig_cin[AAS_INDICES] * scale
+
+    if nh4_feed is not None:
+        _g.CIN_NOMINAL[4] = nh4_feed  # IDX_NH4 = 4
 
     results = {}
     for reactor in reactor_ids:
@@ -87,6 +92,8 @@ def main():
     parser.add_argument('--data',  default=str(here / 'data'))
     parser.add_argument('--scale', type=float, default=None,
                         help='Test a specific uniform AA scale factor')
+    parser.add_argument('--nh4', type=float, default=None,
+                        help='Override CIN[NH4] feed concentration (mmol/L)')
     parser.add_argument('--sweep', action='store_true',
                         help='Sweep scale factors to find minimum non-negative value')
     args = parser.parse_args()
@@ -102,10 +109,14 @@ def main():
         print(f'  [{idx:2d}] {COMPONENT_NAMES[idx]:<20} {C_NOMINAL[idx]:.4f}')
     print()
 
+    nh4 = args.nh4
+    if nh4 is not None:
+        print(f'NH4 feed override: {nh4} mmol/L')
+
     if args.scale is not None:
         print(f'Testing scale={args.scale:.2f}x ...')
         results = run_reactors(args.scale, rates_growth, rates_prod,
-                               reactor_ids, pm_dict, doe_dict)
+                               reactor_ids, pm_dict, doe_dict, nh4_feed=nh4)
         ok = check(results)
         print('  All non-negative.' if ok else '  Negatives found.')
         return
@@ -113,7 +124,7 @@ def main():
     # Always show current (scale=1) first
     print('--- Current values (scale=1.0) ---')
     results = run_reactors(1.0, rates_growth, rates_prod,
-                           reactor_ids, pm_dict, doe_dict)
+                           reactor_ids, pm_dict, doe_dict, nh4_feed=nh4)
     check(results, verbose=True)
 
     if not args.sweep:
@@ -135,7 +146,7 @@ def main():
     candidates = [1, 2, 5, 10, 20, 50, 100, 200]
     for scale in candidates:
         results = run_reactors(scale, rates_growth, rates_prod,
-                               reactor_ids, pm_dict, doe_dict)
+                               reactor_ids, pm_dict, doe_dict, nh4_feed=nh4)
         failing = set()
         for (reactor, aa_level), traj in results.items():
             if (traj < 0).any():
@@ -154,7 +165,7 @@ def main():
     print('\nNo safe scale factor found within tested range.')
     print('\nDiagnostic at scale=200: cell density and first-failure day for failing reactors:')
     results_200 = run_reactors(200, rates_growth, rates_prod,
-                               reactor_ids, pm_dict, doe_dict)
+                               reactor_ids, pm_dict, doe_dict, nh4_feed=nh4)
     for (reactor, aa_level), traj in sorted(results_200.items()):
         neg_mask = traj < 0
         if not neg_mask.any():
