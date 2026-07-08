@@ -29,6 +29,7 @@ from sklearn.metrics import (confusion_matrix, precision_score, recall_score,
                              f1_score, roc_curve, auc)
 
 from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES, N_DAYS
+from model_sample import FluxDecoder
 
 IDX_TITER = 2   # index of titer within the 8-feature vector
 
@@ -58,7 +59,8 @@ FEATURE_NAMES_SHORT = [
 ]
 
 
-def rollout(model, seed_norm, n_steps, device, doe=None, reactor_id=None, log_negatives=False):
+def rollout(model, seed_norm, n_steps, device, doe=None, reactor_id=None,
+            log_negatives=False, cin=None, is_decoder=False):
     """
     Autoregressive rollout. Returns normalized predictions.
 
@@ -68,10 +70,16 @@ def rollout(model, seed_norm, n_steps, device, doe=None, reactor_id=None, log_ne
 
     log_negatives: if True, print a warning when any prediction goes below 0
                    without clipping so the caller can identify the root cause.
+
+    cin/is_decoder: for the flux decoder (FluxDecoder), pass the reactor's
+                    physical feed vector (cin) and is_decoder=True. The decoder's
+                    forward returns (C_next_norm, v); the fluxes are collected and
+                    returned alongside the predictions.
     """
     window   = seed_norm.copy()
     has_time = seed_norm.shape[1] > N_FEATURES
     doe_t    = torch.from_numpy(doe).unsqueeze(0).float().to(device) if doe is not None else None
+    cin_t    = torch.from_numpy(cin).unsqueeze(0).float().to(device) if cin is not None else None
     preds    = []
     seq_len  = seed_norm.shape[0]
 
@@ -79,7 +87,11 @@ def rollout(model, seed_norm, n_steps, device, doe=None, reactor_id=None, log_ne
     with torch.no_grad():
         for step in range(n_steps):
             x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
-            pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()   # (N_FEATURES,)
+            if is_decoder:
+                out, _    = model(x, doe_t, cin_t)
+                pred_norm = out.squeeze(0).cpu().numpy()
+            else:
+                pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()   # (N_FEATURES,)
             if log_negatives:
                 for f, val in enumerate(pred_norm):
                     if val < 0.0:
@@ -172,16 +184,30 @@ def main():
     use_time         = n_input_features > N_FEATURES
     seq_len          = ckpt.get('seq_len', SEQ_LEN)
 
-    model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
-                             n_doe=ckpt.get('n_doe', 0),
-                             n_input_features=n_input_features).to(device)
-    model.load_state_dict(ckpt['model_state'])
+    # Flux decoder checkpoints carry 'n_substeps'; pure-NN ones do not.
+    is_decoder = 'n_substeps' in ckpt
+    if is_decoder:
+        model = FluxDecoder(hidden=ckpt.get('hidden', 64),
+                            n_doe=ckpt.get('n_doe', 0),
+                            n_input_features=n_input_features,
+                            n_substeps=int(ckpt['n_substeps'])).to(device)
+        model.load_state_dict(ckpt['model_state'])   # restores scaler buffers too
+        print(f'Loaded flux decoder {args.model} (substeps={int(ckpt["n_substeps"])})')
+    else:
+        model = NextDayPredictor(hidden=ckpt.get('hidden', 64),
+                                 n_doe=ckpt.get('n_doe', 0),
+                                 n_input_features=n_input_features).to(device)
+        model.load_state_dict(ckpt['model_state'])
+        print(f'Loaded {args.model}')
     model.eval()
-    print(f'Loaded {args.model}')
 
     npz          = np.load(args.data, allow_pickle=True)
     trajectories = npz['trajectories'].astype(np.float32)
     doe_params   = npz['doe_params'].astype(np.float32)   # (N, 3)
+    cin_params   = npz['cin_params'].astype(np.float32) if 'cin_params' in npz else None
+    if is_decoder and cin_params is None:
+        raise SystemExit('cin_params missing from npz: regenerate synthetic_ode.npz '
+                         'with the updated generate_synthetic_ode.py.')
 
     n_original = int(npz['n_original']) if 'n_original' in npz else len(trajectories)
 
@@ -197,12 +223,16 @@ def main():
         eval_indices = [n_original + r for r in val_reactor_ids]
         trajectories = trajectories[eval_indices]
         doe_params   = doe_params[eval_indices]
+        if cin_params is not None:
+            cin_params = cin_params[eval_indices]
         print(f'Evaluating {len(eval_indices)} validation reactors '
               f'(indices {eval_indices[:5]}...)')
     else:
         n_eval     = args.n_eval if args.n_eval is not None else n_original
         trajectories = trajectories[:n_eval]
         doe_params   = doe_params[:n_eval]
+        if cin_params is not None:
+            cin_params = cin_params[:n_eval]
         print(f'Evaluating {trajectories.shape[0]} reactors '
               f'(n_original={n_original}, total in npz={len(npz["trajectories"])})')
 
@@ -249,8 +279,10 @@ def main():
             doe_scale = doe_max - doe_min
             doe_scale[doe_scale == 0] = 1.0
             doe_raw = (doe_raw - doe_min) / doe_scale
+        cin_i = cin_params[i] if (is_decoder and cin_params is not None) else None
         preds = rollout(model, seed_norm, n_steps=n_pred, device=device, doe=doe_raw,
-                        reactor_id=f'R{i:04d}', log_negatives=args.log_negatives)
+                        reactor_id=f'R{i:04d}', log_negatives=args.log_negatives,
+                        cin=cin_i, is_decoder=is_decoder)
 
         actual_norm = np.clip((sub[i, seq_len:, :] - feature_min) / scale, 0.0, 1.0)
         all_preds_norm.append(preds)
