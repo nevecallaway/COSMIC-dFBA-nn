@@ -349,7 +349,7 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
 # Window building
 # ---------------------------------------------------------------------------
 
-def build_windows(trajectories, doe_params=None, seq_len=SEQ_LEN):
+def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LEN):
     """
     Build sliding windows from trajectories for next-day prediction.
 
@@ -370,13 +370,14 @@ def build_windows(trajectories, doe_params=None, seq_len=SEQ_LEN):
         windows:          np.ndarray (n_obs, seq_len, N_WINDOW_FEATURES+1)  raw feats + time
         targets:          np.ndarray (n_obs, N_WINDOW_FEATURES)              raw (no time)
         window_doe:       np.ndarray (n_obs, 3) or None
+        window_cin:       np.ndarray (n_obs, N_WINDOW_FEATURES) or None  physical feed
         reactor_indices:  np.ndarray (n_obs,)  which reactor each window came from
     """
     sub = trajectories[:, :, WINDOW_FEATURE_INDICES].astype(np.float32)
     N, T, _ = sub.shape
     n_days_total = T  # should be N_DAYS = 13
 
-    windows, targets, window_doe, reactor_indices = [], [], [], []
+    windows, targets, window_doe, window_cin, reactor_indices = [], [], [], [], []
     for i in range(N):
         for d in range(T - seq_len):
             feats = sub[i, d : d + seq_len, :]
@@ -385,14 +386,18 @@ def build_windows(trajectories, doe_params=None, seq_len=SEQ_LEN):
             targets.append(sub[i, d + seq_len, :])
             if doe_params is not None:
                 window_doe.append(doe_params[i])
+            if cin_params is not None:
+                window_cin.append(cin_params[i])
             reactor_indices.append(i)
 
     doe_arr = np.array(window_doe, dtype=np.float32) if window_doe else None
+    cin_arr = np.array(window_cin, dtype=np.float32) if window_cin else None
 
     return (
         np.array(windows, dtype=np.float32),
         np.array(targets, dtype=np.float32),
         doe_arr,
+        cin_arr,
         np.array(reactor_indices, dtype=np.int32),
     )
 
@@ -414,11 +419,12 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
     Returns:
         trajectories: np.ndarray (n_extra, N_DAYS, N_COMPONENTS)
         doe_params:   np.ndarray (n_extra, 3)
+        cin_params:   np.ndarray (n_extra, N_WINDOW_FEATURES)  physical feed per reactor
     """
     from rate_envelope import build_envelope_from_rates, in_envelope
 
     rng = np.random.default_rng(seed)
-    trajs, does = [], []
+    trajs, does, cins = [], [], []
 
     use_sampling = sample_rates or rate_mix > 0
     if use_sampling:
@@ -480,6 +486,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
         trajs.append(traj)
         does.append([doe['O2'], glc_conc, aas_conc])
+        cins.append(cin[WINDOW_FEATURE_INDICES])
         k += 1
         if k % 10 == 0:
             print(f'  Generated {k}/{n_extra} extra reactors'
@@ -488,7 +495,8 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
     if n_reject:
         print(f'  Total rejected: {n_reject}')
 
-    return np.array(trajs), np.array(does, dtype=np.float32)
+    return (np.array(trajs), np.array(does, dtype=np.float32),
+            np.array(cins, dtype=np.float32))
 
 
 # Main generation
@@ -538,6 +546,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
     trajectories = []
     phases_out   = []
     doe_params   = []
+    cin_params   = []
 
     print('\nIntegrating ODEs...')
     for reactor in reactor_ids:
@@ -565,6 +574,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         trajectories.append(traj)
         phases_out.append(pm_vals)
         doe_params.append([doe['O2'], glc_conc, aas_conc])
+        cin_params.append(cin[WINDOW_FEATURE_INDICES])
 
         print(f'  {reactor} (O2={doe["O2"]:+.0f} Glc={glc_conc:.1f} mmol/L '
               f'AAs={aas_conc:.2f} mmol/L):  '
@@ -574,17 +584,19 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
     trajectories = np.array(trajectories)
     phases_out   = np.array(phases_out)
     doe_params   = np.array(doe_params)
+    cin_params   = np.array(cin_params)
 
     if n_extra > 0:
         mode = 'sampled rates' if sample_rates else 'donor rates'
         print(f'\nGenerating {n_extra} extra reactors ({mode})...')
-        extra_trajs, extra_doe = generate_extra(
+        extra_trajs, extra_doe, extra_cin = generate_extra(
             n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
             sample_rates=sample_rates, rate_mix=rate_mix, rate_scale=rate_scale)
         # Dummy phases for extras: repeat last phase value from first reactor
         extra_phases = np.tile(phases_out[0], (n_extra, 1))
         trajectories = np.concatenate([trajectories, extra_trajs], axis=0)
         doe_params   = np.concatenate([doe_params, extra_doe], axis=0)
+        cin_params   = np.concatenate([cin_params, extra_cin], axis=0)
         phases_out   = np.concatenate([phases_out, extra_phases], axis=0)
         print(f'Total reactors: {len(trajectories)}')
 
@@ -593,8 +605,9 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
     times_out = np.tile(T_EVAL, (len(trajectories), 1))
 
     print('\nBuilding sliding windows (extra reactors only; originals reserved for eval)...')
-    windows, targets, window_doe, reactor_idx = build_windows(
-        trajectories[n_original:], doe_params=doe_params[n_original:], seq_len=seq_len)
+    windows, targets, window_doe, window_cin, reactor_idx = build_windows(
+        trajectories[n_original:], doe_params=doe_params[n_original:],
+        cin_params=cin_params[n_original:], seq_len=seq_len)
     print(f'  {len(windows)} windows  '
           f'({len(trajectories) - n_original} extra reactors x {N_DAYS - seq_len} windows each)')
 
@@ -615,6 +628,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         windows=windows,
         targets=targets,
         window_doe=window_doe,
+        window_cin=window_cin,
         window_reactor_idx=reactor_idx,
         n_original=np.array(n_original),
         seq_len=np.array(seq_len),

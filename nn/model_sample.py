@@ -48,7 +48,8 @@ MET_SLICE = slice(3, 8)   # Glucose, Glutamine, Asparagine, Serine, Glycine
 N_FEATURES       = 8
 N_INPUT_FEATURES = N_FEATURES + 1   # + normalized day-index column
 SEQ_LEN          = 6
-N_SUBSTEPS       = 10               # Euler sub-steps per 1-day interval
+N_SUBSTEPS       = 50               # Euler sub-steps per 1-day interval
+                                    # (50 -> ~0.5% vs generator RK45; scales 1/n)
 F_PERFUSION      = 1.0              # bioreactor volumes/day (paper: F = 1)
 
 
