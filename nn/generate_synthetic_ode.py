@@ -138,6 +138,15 @@ CIN_NOMINAL[IDX_LAC] = 0.0
 CIN_NOMINAL[IDX_NH4] = 0.0
 CIN_NOMINAL[IDX_TIT] = 0.0
 
+# Concentration fix (Sarat-approved, confirmed non-negative via check_concentrations
+# sweep): the real proprietary media is richer than DMEM. Amino acids 210x DMEM in
+# both initial and feed; NH4 feed 1.1 mmol/L (low-nitrogen reactors consume it);
+# glucose feed 25 mmol/L (prevents late-phase depletion in high-CD reactors).
+C_NOMINAL[AAS_INDICES]   *= 210.0
+CIN_NOMINAL[AAS_INDICES] *= 210.0
+CIN_NOMINAL[IDX_NH4]      = 1.1
+CIN_NOMINAL[IDX_GLC]      = 25.0
+
 
 # ---------------------------------------------------------------------------
 # Data loading
