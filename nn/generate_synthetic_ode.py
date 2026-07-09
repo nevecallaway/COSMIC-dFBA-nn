@@ -515,10 +515,15 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
 def generate_all(data_dir=None, output_file=None, n_extra=50,
                  sample_rates=False, rate_mix=0.0, rate_scale=1.0,
-                 seq_len=SEQ_LEN):
+                 seq_len=SEQ_LEN, holdout=None):
     """
     Generate unnormalized trajectories for all 10 reactors plus n_extra
     synthetic reactors with randomly sampled DoE conditions.
+
+    holdout: index of a real reactor to EXCLUDE from the donor/sampling pool
+    for the extra reactors (its rates are unseen in training). All 10 real
+    trajectories are still saved so the held-out reactor can be evaluated.
+    Used for leave-one-reactor-out generalization testing.
 
     Outputs synthetic_ode.npz and synthetic_ode.xlsx in the same directory.
     Run by Sarat to verify before using for model training.
@@ -598,10 +603,15 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
     cin_params   = np.array(cin_params)
 
     if n_extra > 0:
+        donor_ids = reactor_ids
+        if holdout is not None:
+            donor_ids = [r for k, r in enumerate(reactor_ids) if k != holdout]
+            print(f'\nLORO: excluding {reactor_ids[holdout]} (index {holdout}) '
+                  f'from donor/sampling pool')
         mode = 'sampled rates' if sample_rates else 'donor rates'
         print(f'\nGenerating {n_extra} extra reactors ({mode})...')
         extra_trajs, extra_doe, extra_cin = generate_extra(
-            n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
+            n_extra, rates_growth, rates_prod, donor_ids, pm_dict, doe_dict,
             sample_rates=sample_rates, rate_mix=rate_mix, rate_scale=rate_scale)
         # Dummy phases for extras: repeat last phase value from first reactor
         extra_phases = np.tile(phases_out[0], (n_extra, 1))
@@ -749,12 +759,16 @@ if __name__ == '__main__':
                         help='Scale factor on covariance (0.25 = tighter sampling)')
     parser.add_argument('--seq-len', type=int, default=SEQ_LEN,
                         help=f'Window size in days (default: {SEQ_LEN})')
+    parser.add_argument('--holdout', type=int, default=None,
+                        help='Reactor index to exclude from donor/sampling pool (LORO test)')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output npz path (default: synthetic_ode.npz)')
     args = parser.parse_args()
 
     trajs, times, phases, doe_params, component_names = generate_all(
         n_extra=args.n_extra, sample_rates=args.sample_rates,
         rate_mix=args.rate_mix, rate_scale=args.rate_scale,
-        seq_len=args.seq_len)
+        seq_len=args.seq_len, holdout=args.holdout, output_file=args.output)
     reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
                    'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
     plot_comparison(trajs[:10], reactor_ids, component_names)

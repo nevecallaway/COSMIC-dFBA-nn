@@ -156,12 +156,16 @@ def main():
     parser.add_argument('--data',           default=str(here / 'synthetic_ode.npz'))
     parser.add_argument('--n-eval',         type=int, default=None,
                         help='Evaluate only the first N reactors (default: n_original from npz, or all)')
+    parser.add_argument('--eval-reactor',   type=int, default=None,
+                        help='Evaluate a single reactor by index (for leave-one-reactor-out)')
     parser.add_argument('--val', action='store_true',
                         help='Evaluate on validation split (held-out training reactors) instead of originals')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (must match train.py for val split)')
     parser.add_argument('--log-negatives', action='store_true',
                         help='Print a warning for each negative prediction (no clip applied)')
+    parser.add_argument('--no-plots', action='store_true',
+                        help='Skip diagnostic plots (useful for single-reactor LORO runs)')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -228,6 +232,13 @@ def main():
             cin_params = cin_params[eval_indices]
         print(f'Evaluating {len(eval_indices)} validation reactors '
               f'(indices {eval_indices[:5]}...)')
+    elif args.eval_reactor is not None:
+        sel = [args.eval_reactor]
+        trajectories = trajectories[sel]
+        doe_params   = doe_params[sel]
+        if cin_params is not None:
+            cin_params = cin_params[sel]
+        print(f'Evaluating single held-out reactor index {args.eval_reactor}')
     else:
         n_eval     = args.n_eval if args.n_eval is not None else n_original
         trajectories = trajectories[:n_eval]
@@ -513,6 +524,8 @@ def main():
     # ------------------------------------------------------------------
     # Diagnostic plots
     # ------------------------------------------------------------------
+    if args.no_plots:
+        return
     try:
         import matplotlib
         matplotlib.use('Agg')
