@@ -218,6 +218,7 @@ def main():
                 'seq_len':          seq_len,
                 'n_doe':            n_doe,
                 'n_substeps':       args.substeps,
+                'integrator':       model.integrator,
             }, args.output)
         else:
             patience_count += 1

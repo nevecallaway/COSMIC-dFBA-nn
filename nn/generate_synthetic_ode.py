@@ -138,12 +138,23 @@ CIN_NOMINAL[IDX_LAC] = 0.0
 CIN_NOMINAL[IDX_NH4] = 0.0
 CIN_NOMINAL[IDX_TIT] = 0.0
 
-# Concentration fix (Sarat-approved, confirmed non-negative via check_concentrations
-# sweep): the real proprietary media is richer than DMEM. Amino acids 210x DMEM in
-# both initial and feed; NH4 feed 1.1 mmol/L (low-nitrogen reactors consume it);
+# Concentration fix: the real proprietary media is richer than DMEM. Each amino
+# acid is enriched by a per-AA factor (compute_aa_scales.py, saved to
+# data/aa_scales.npy) raised only as much as it needs to stay non-negative,
+# rather than a uniform 210x that over-supplied the non-bottleneck AAs (e.g.
+# glutamine to an unphysical 525 mmol/L). Falls back to uniform 210x if the
+# per-AA file is absent. NH4 feed 1.1 mmol/L (low-nitrogen reactors consume it);
 # glucose feed 25 mmol/L (prevents late-phase depletion in high-CD reactors).
-C_NOMINAL[AAS_INDICES]   *= 210.0
-CIN_NOMINAL[AAS_INDICES] *= 210.0
+DMEM_AA = C_NOMINAL[AAS_INDICES].copy()   # raw DMEM AA levels, before enrichment
+
+_scale_path = Path(__file__).parent / 'data' / 'aa_scales.npy'
+if _scale_path.exists():
+    AA_SCALES = np.load(_scale_path).astype(float)
+else:
+    AA_SCALES = np.full(len(AAS_INDICES), 210.0)
+
+C_NOMINAL[AAS_INDICES]   = DMEM_AA * AA_SCALES
+CIN_NOMINAL[AAS_INDICES] = DMEM_AA * AA_SCALES
 CIN_NOMINAL[IDX_NH4]      = 1.1
 CIN_NOMINAL[IDX_GLC]      = 25.0
 

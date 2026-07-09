@@ -87,6 +87,45 @@ def ode_step(C_phys, v, cin_phys, n_substeps=N_SUBSTEPS, F=F_PERFUSION):
     return C
 
 
+def _expm1_over_x(x, eps=1e-6):
+    """(exp(x) - 1) / x, numerically stable near 0 (limit -> 1)."""
+    small  = x.abs() < eps
+    safe_x = torch.where(small, torch.ones_like(x), x)
+    return torch.where(small, 1.0 + 0.5 * x, torch.expm1(x) / safe_x)
+
+
+def closed_form_step(C_phys, v, cin_phys, F=F_PERFUSION):
+    """
+    Exact one-day advance. With v and cin constant over the day, X(t) = X0*e^{vX t}
+    and every equation has a closed-form solution, so no Euler sub-steps are needed
+    (faster than ode_step and exact modulo the generator's own RK45 tolerance).
+
+        cell density : X0 * e^{vX}
+        cell size    : CV0 + v_CV*X0 * (e^{vX}-1)/vX
+        titer        : Tit0*e^{-F} + v_tit*X0*e^{-F} * (e^{vX+F}-1)/(vX+F)
+        metabolite   : C0*e^{-F} + cin*(1-e^{-F}) + v*X0*e^{-F} * (e^{vX+F}-1)/(vX+F)
+
+    The (e^{·}-1)/· factors use _expm1_over_x, which handles the degenerate cases
+    vX -> 0 (cell size) and vX -> -F (titer/metabolite).
+    """
+    X0  = C_phys[:, IDX_CD:IDX_CD + 1]
+    vX  = v[:, IDX_CD:IDX_CD + 1]
+    emF = float(np.exp(-F))
+
+    g_vXF = _expm1_over_x(vX + F)   # (e^{vX+F} - 1)/(vX+F); metabolite/titer factor
+
+    cd    = X0 * torch.exp(vX)
+    size  = (C_phys[:, IDX_SIZE:IDX_SIZE + 1]
+             + v[:, IDX_SIZE:IDX_SIZE + 1] * X0 * _expm1_over_x(vX))
+    titer = (C_phys[:, IDX_TITER:IDX_TITER + 1] * emF
+             + v[:, IDX_TITER:IDX_TITER + 1] * X0 * emF * g_vXF)
+    met   = (C_phys[:, MET_SLICE] * emF
+             + cin_phys[:, MET_SLICE] * (1.0 - emF)
+             + v[:, MET_SLICE] * X0 * emF * g_vXF)
+
+    return torch.cat([cd, size, titer, met], dim=1)
+
+
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
@@ -106,11 +145,12 @@ class FluxDecoder(nn.Module):
 
     def __init__(self, n_features=N_FEATURES, n_input_features=N_INPUT_FEATURES,
                  hidden=64, n_conv_layers=3, dropout=0.1, n_doe=3,
-                 n_substeps=N_SUBSTEPS):
+                 n_substeps=N_SUBSTEPS, integrator='closed'):
         super().__init__()
         self.n_features = n_features
         self.n_doe      = n_doe
         self.n_substeps = n_substeps
+        self.integrator = integrator   # 'closed' (exact, fast) or 'euler'
 
         conv_layers = [
             nn.Conv1d(n_input_features, hidden, kernel_size=3, padding=1),
@@ -160,7 +200,10 @@ class FluxDecoder(nn.Module):
         C_last_norm = x[:, -1, :self.n_features]
         C_phys = C_last_norm * self.feat_scale + self.feat_min
 
-        C_next_phys = ode_step(C_phys, v, cin_phys, self.n_substeps)
+        if self.integrator == 'closed':
+            C_next_phys = closed_form_step(C_phys, v, cin_phys)
+        else:
+            C_next_phys = ode_step(C_phys, v, cin_phys, self.n_substeps)
 
         C_next_norm = (C_next_phys - self.feat_min) / self.feat_scale
         return C_next_norm, v

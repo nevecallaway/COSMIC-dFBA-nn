@@ -190,7 +190,8 @@ def main():
         model = FluxDecoder(hidden=ckpt.get('hidden', 64),
                             n_doe=ckpt.get('n_doe', 0),
                             n_input_features=n_input_features,
-                            n_substeps=int(ckpt['n_substeps'])).to(device)
+                            n_substeps=int(ckpt['n_substeps']),
+                            integrator=ckpt.get('integrator', 'closed')).to(device)
         model.load_state_dict(ckpt['model_state'])   # restores scaler buffers too
         print(f'Loaded flux decoder {args.model} (substeps={int(ckpt["n_substeps"])})')
     else:

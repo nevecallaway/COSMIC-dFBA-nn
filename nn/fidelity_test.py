@@ -35,7 +35,7 @@ from generate_synthetic_ode import (
     generate_reactor, make_cin, N_DAYS,
 )
 from model import FEATURE_INDICES
-from model_sample import ode_step
+from model_sample import ode_step, closed_form_step
 
 FEATURE_NAMES = ['CellDensity', 'CellSize', 'Titer', 'Glucose',
                  'Glutamine', 'Asparagine', 'Serine', 'Glycine']
@@ -46,6 +46,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', default=str(here / 'data'))
     parser.add_argument('--substeps', type=int, default=10)
+    parser.add_argument('--closed', action='store_true',
+                        help='Test the exact closed-form step instead of Euler substeps')
     args = parser.parse_args()
 
     data_dir = Path(args.data)
@@ -74,19 +76,21 @@ def main():
             C_curr8      = traj[d,     fidx]
             C_true_next8 = traj[d + 1, fidx]
 
-            C_pred = ode_step(
-                torch.tensor(C_curr8[None], dtype=torch.float64),
-                torch.tensor(v_net[fidx][None], dtype=torch.float64),
-                torch.tensor(cin8[None], dtype=torch.float64),
-                n_substeps=args.substeps,
-            ).numpy()[0]
+            C_curr_t = torch.tensor(C_curr8[None], dtype=torch.float64)
+            v_t      = torch.tensor(v_net[fidx][None], dtype=torch.float64)
+            cin_t    = torch.tensor(cin8[None], dtype=torch.float64)
+            if args.closed:
+                C_pred = closed_form_step(C_curr_t, v_t, cin_t).numpy()[0]
+            else:
+                C_pred = ode_step(C_curr_t, v_t, cin_t, n_substeps=args.substeps).numpy()[0]
 
             denom = np.maximum(np.abs(C_true_next8), 1e-6)
             rel = np.abs(C_pred - C_true_next8) / denom
             per_feat_max = np.maximum(per_feat_max, rel)
             overall_max  = max(overall_max, rel.max())
 
-    print(f'Fidelity test: ode_step vs generator, {args.substeps} Euler substeps\n')
+    method = 'closed-form step' if args.closed else f'{args.substeps} Euler substeps'
+    print(f'Fidelity test: {method} vs generator\n')
     print(f'  {"Feature":<14} {"max rel err":>12}')
     print('  ' + '-' * 28)
     for name, e in zip(FEATURE_NAMES, per_feat_max):
