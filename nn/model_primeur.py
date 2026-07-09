@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-COSMIC dFBA Surrogate: flux-prediction ODE decoder (hybrid mechanistic model).
+EN PRIMEUR: Efficient Neural Predictor Recursively Integrating Mechanistic
+Equations for Uptake Rates.
+
+Flux-prediction ODE decoder (hybrid mechanistic surrogate), part of the
+CHOteau project.
 
 Difference from model.py (pure NN):
     model.py       window --NN--> next-day concentrations   (physics-free)
-    model_sample   window --NN--> fluxes v --ODE step--> next-day concentrations
+    model_primeur  window --NN--> fluxes v --ODE step--> next-day concentrations
 
 The network predicts the per-cell fluxes v_i. A fixed, parameter-free ODE-step
 layer then applies the paper's mass balance (eq. 2) to produce the next-day

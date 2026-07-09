@@ -2,7 +2,7 @@
 """
 Training script for the flux-decoder (hybrid mechanistic) surrogate.
 
-Same data pipeline as train.py, but the model is FluxDecoder (model_sample.py):
+Same data pipeline as train.py, but the model is FluxDecoder (model_primeur.py):
 the network predicts fluxes, a fixed ODE-step layer turns them into next-day
 concentrations. Loss is on the predicted concentrations, so mass balance is
 enforced by construction, not by a penalty term.
@@ -29,7 +29,7 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 
-from model_sample import FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN, N_SUBSTEPS
+from model_primeur import FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN, N_SUBSTEPS
 
 BATCH_SIZE   = 8
 LR           = 1e-3

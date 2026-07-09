@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fidelity test for the flux-decoder ODE step (model_sample.ode_step).
+Fidelity test for the flux-decoder ODE step (model_primeur.ode_step).
 
 Before training the decoder, confirm its ODE-step layer reproduces the
 generator's trajectory when given the TRUE per-cell fluxes. If this fails, the
@@ -35,7 +35,7 @@ from generate_synthetic_ode import (
     generate_reactor, make_cin, N_DAYS,
 )
 from model import FEATURE_INDICES
-from model_sample import ode_step, closed_form_step
+from model_primeur import ode_step, closed_form_step
 
 FEATURE_NAMES = ['CellDensity', 'CellSize', 'Titer', 'Glucose',
                  'Glutamine', 'Asparagine', 'Serine', 'Glycine']

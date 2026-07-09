@@ -29,7 +29,7 @@ from sklearn.metrics import (confusion_matrix, precision_score, recall_score,
                              f1_score, roc_curve, auc)
 
 from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES, N_DAYS
-from model_sample import FluxDecoder
+from model_primeur import FluxDecoder
 
 IDX_TITER = 2   # index of titer within the 8-feature vector
 
