@@ -43,6 +43,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--folds', type=int, nargs='*', default=list(range(10)))
     ap.add_argument('--n-extra', type=int, default=3000)
+    ap.add_argument('--rate-mix', type=float, default=0.2,
+                    help='Fraction sampled vs donor-copied (1.0 = no memorizable copies)')
+    ap.add_argument('--rate-scale', type=float, default=0.1,
+                    help='Covariance multiplier for sampled rates (higher = more varied)')
     args = ap.parse_args()
 
     py = sys.executable
@@ -52,7 +56,7 @@ def main():
         pt  = here / f'loro_{h}.pt'
         run([py, here / 'generate_synthetic_ode.py', '--holdout', h,
              '--output', npz, '--n-extra', args.n_extra,
-             '--rate-mix', 0.2, '--rate-scale', 0.1])
+             '--rate-mix', args.rate_mix, '--rate-scale', args.rate_scale])
         run([py, here / 'train_sample.py', '--data', npz, '--output', pt])
         out = run([py, here / 'evaluate.py', '--model', pt, '--data', npz,
                    '--eval-reactor', h, '--no-plots'])
