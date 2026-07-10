@@ -17,6 +17,7 @@ Usage:
     python plot_titer_check.py
 """
 
+import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -25,6 +26,14 @@ from generate_synthetic_ode import (
     load_rates, load_phase_fractions, load_doe, generate_reactor,
     N_COMPONENTS, T_EVAL, IDX_TIT,
 )
+
+COMPONENT_NAMES = [
+    'CellDensity', 'CellVolume', 'Glucose', 'Lactate', 'NH4', 'Titer',
+    'Glutamine', 'Glutamate', 'Asparagine', 'AsparticAcid', 'Serine', 'Glycine',
+    'Alanine', 'Proline', 'Threonine', 'Histidine', 'Lysine', 'Valine',
+    'Methionine', 'Arginine', 'Tyrosine', 'Isoleucine', 'Leucine',
+    'Phenylalanine', 'Tryptophan',
+]
 
 
 def shape_desc(days, vals):
@@ -45,6 +54,13 @@ def shape_desc(days, vals):
 
 def main():
     here = Path(__file__).parent
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--component', type=int, default=IDX_TIT,
+                        help=f'Component index to check (default {IDX_TIT}=Titer; 0=CellDensity)')
+    args = parser.parse_args()
+    comp = args.component
+    cname = COMPONENT_NAMES[comp]
+
     data_dir = here / 'data'
     rg, rp, reactor_ids = load_rates(data_dir / 'data_3.csv')
     pm_dict  = load_phase_fractions(data_dir / 'data_2.csv')
@@ -56,7 +72,7 @@ def main():
     df2['Time'] = pd.to_numeric(df2['Time'], errors='coerce')
     df2 = df2.dropna(subset=['Time'])
 
-    print('Titer shape: SYNTHETIC (eta=1 washout) vs REAL (data_2)\n')
+    print(f'{cname} shape: SYNTHETIC (our ODE) vs REAL (data_2)\n')
     print(f'  {"reactor":<8} {"synthetic shape":<40} {"real shape":<40}')
     print('  ' + '-' * 88)
 
@@ -64,23 +80,23 @@ def main():
     for r in reactor_ids:
         doe = doe_dict.get(r, {'O2': 0, 'AAs': 0, 'Glc': 0})
         traj, _ = generate_reactor(r, rg[r], rp[r], pm_dict[r], doe)
-        syn_titer = traj[:, IDX_TIT]
-        syn_days  = T_EVAL
+        syn_v    = traj[:, comp]
+        syn_days = T_EVAL
 
         rdf = df2[df2['Vessel'] == r].sort_values('Time')
-        real_titer = rdf['C5'].to_numpy(dtype=float)
-        real_days  = rdf['Time'].to_numpy(dtype=float)
+        real_v    = rdf[f'C{comp}'].to_numpy(dtype=float)
+        real_days = rdf['Time'].to_numpy(dtype=float)
 
-        syn_all.append(shape_desc(syn_days, syn_titer))
-        real_all.append(shape_desc(real_days, real_titer))
+        syn_all.append(shape_desc(syn_days, syn_v))
+        real_all.append(shape_desc(real_days, real_v))
         print(f'  {r:<8} {syn_all[-1]:<40} {real_all[-1]:<40}')
 
     n_syn_decline  = sum('declines' in s for s in syn_all)
-    n_real_mono    = sum('monotonic' in s for s in real_all)
-    print(f'\n  Synthetic titer declines after peak: {n_syn_decline}/{len(reactor_ids)}')
-    print(f'  Real titer monotonic-ish (ends near peak): {n_real_mono}/{len(reactor_ids)}')
-    print('\n  If synthetic declines but real is monotonic, the eta=1 washout is '
-          'wrong: the antibody is retained and titer should accumulate (eta~0).')
+    n_real_decline = sum('declines' in s for s in real_all)
+    print(f'\n  Synthetic {cname} declines after peak: {n_syn_decline}/{len(reactor_ids)}')
+    print(f'  Real {cname} declines after peak:      {n_real_decline}/{len(reactor_ids)}')
+    print('\n  If real declines but synthetic does not, our ODE misses the '
+          'post-day-7 dynamics (harvest washout and/or cell-density crash).')
 
     try:
         import matplotlib
@@ -91,19 +107,19 @@ def main():
         for i, r in enumerate(reactor_ids):
             doe = doe_dict.get(r, {'O2': 0, 'AAs': 0, 'Glc': 0})
             traj, _ = generate_reactor(r, rg[r], rp[r], pm_dict[r], doe)
-            syn = traj[:, IDX_TIT]
+            syn = traj[:, comp]
             syn = syn / syn.max() if syn.max() > 0 else syn
             rdf = df2[df2['Vessel'] == r].sort_values('Time')
             ax = axes[i]
-            ax.plot(T_EVAL, syn, 'r-', lw=1.8, label='synthetic (eta=1)')
-            ax.plot(rdf['Time'], rdf['C5'], 'k--', lw=1.8, label='real (data_2)')
+            ax.plot(T_EVAL, syn, 'r-', lw=1.8, label='synthetic')
+            ax.plot(rdf['Time'], rdf[f'C{comp}'], 'k--', lw=1.8, label='real (data_2)')
             ax.set_title(r, fontsize=9)
             ax.set_ylim(-0.05, 1.15)
             if i == 0:
                 ax.legend(fontsize=7)
-        fig.suptitle('Titer shape: synthetic (eta=1 washout) vs real', y=1.02)
+        fig.suptitle(f'{cname} shape: synthetic vs real (data_2)', y=1.02)
         fig.tight_layout()
-        out = here / 'titer_check.png'
+        out = here / f'shape_check_{cname}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight')
         print(f'\n  Saved {out}')
     except ImportError:
