@@ -29,35 +29,46 @@ def main():
     here = Path(__file__).parent
     rg, rp, reactor_ids = load_rates(here / 'data' / 'data_3.csv')
 
-    # Each reactor -> concatenated growth+production rate vector.
-    X = np.array([np.concatenate([rg[r], rp[r]]) for r in reactor_ids])  # (10, 50)
+    IDX_CD, IDX_TIT = 0, 5   # cell-density and titer component indices
 
-    # Z-score each rate dimension across reactors (guard zero-variance dims).
-    mu, sd = X.mean(0), X.std(0)
-    sd[sd == 0] = 1.0
-    Z = (X - mu) / sd
+    # Full 50-dim rate vector, and the titer-relevant subspace (growth+prod of
+    # cell density and titer), which is what actually drives titer error.
+    X = np.array([np.concatenate([rg[r], rp[r]]) for r in reactor_ids])   # (10, 50)
+    tit_dims = [IDX_CD, IDX_TIT, 25 + IDX_CD, 25 + IDX_TIT]               # in the 50-vec
+    Xt = X[:, tit_dims]                                                    # (10, 4)
 
-    print(f'{"idx":>3} {"reactor":<8} {"LOO dist":>9} {"LORO err":>9}')
-    print('-' * 34)
-    dists = []
+    def loo_distances(M):
+        mu, sd = M.mean(0), M.std(0)
+        sd[sd == 0] = 1.0
+        Z = (M - mu) / sd
+        d = np.zeros(len(M))
+        for i in range(len(M)):
+            d[i] = np.linalg.norm(Z[i] - np.delete(Z, i, axis=0).mean(0))
+        return d
+
+    d_all = loo_distances(X)
+    d_tit = loo_distances(Xt)
+
+    print(f'{"idx":>3} {"reactor":<8} {"all dist":>9} {"titer dist":>11} '
+          f'{"titer_prod":>11} {"LORO err":>9}')
+    print('-' * 56)
     for i, r in enumerate(reactor_ids):
-        others = np.delete(Z, i, axis=0).mean(0)       # centroid of the other 9
-        dist   = np.linalg.norm(Z[i] - others)          # distance from that centroid
-        dists.append(dist)
         err = LORO_ERR.get(i)
         err_s = f'{err:>8.1f}%' if err is not None else f'{"-":>9}'
-        print(f'{i:>3} {r:<8} {dist:>9.2f} {err_s}')
+        print(f'{i:>3} {r:<8} {d_all[i]:>9.2f} {d_tit[i]:>11.2f} '
+              f'{rp[r][IDX_TIT]:>11.2f} {err_s}')
 
-    dists = np.array(dists)
-    # Rank correlation between outlierness and LORO error, where both known.
+    from scipy.stats import spearmanr
     idx = [i for i in LORO_ERR if i < len(reactor_ids)]
     if len(idx) >= 3:
-        from scipy.stats import spearmanr
-        rho, p = spearmanr([dists[i] for i in idx], [LORO_ERR[i] for i in idx])
-        print(f'\nSpearman(outlier distance, LORO error) over {len(idx)} folds: '
-              f'rho={rho:.2f} (p={p:.2f})')
-        print('High positive rho -> outliers drive the failures (data-coverage '
-              'problem).')
+        errs = [LORO_ERR[i] for i in idx]
+        rho_a, _ = spearmanr([d_all[i] for i in idx], errs)
+        rho_t, _ = spearmanr([d_tit[i] for i in idx], errs)
+        print(f'\nSpearman with LORO error over {len(idx)} folds:')
+        print(f'  all-dim distance:            rho = {rho_a:+.2f}')
+        print(f'  titer-relevant distance:     rho = {rho_t:+.2f}')
+        print('Positive titer-relevant rho -> failures are extrapolation beyond '
+              'the observed titer/growth range (coverage in the dims that matter).')
 
 
 if __name__ == '__main__':
