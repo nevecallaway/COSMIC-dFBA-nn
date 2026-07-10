@@ -47,6 +47,8 @@ def main():
                     help='Fraction sampled vs donor-copied (1.0 = no memorizable copies)')
     ap.add_argument('--rate-scale', type=float, default=0.1,
                     help='Covariance multiplier for sampled rates (higher = more varied)')
+    ap.add_argument('--extend-prod', type=float, default=0.0,
+                    help='Extend productivity sampling range by this fraction (covers LORO extremes)')
     args = ap.parse_args()
 
     py = sys.executable
@@ -56,7 +58,8 @@ def main():
         pt  = here / f'loro_{h}.pt'
         run([py, here / 'generate_synthetic_ode.py', '--holdout', h,
              '--output', npz, '--n-extra', args.n_extra,
-             '--rate-mix', args.rate_mix, '--rate-scale', args.rate_scale])
+             '--rate-mix', args.rate_mix, '--rate-scale', args.rate_scale,
+             '--extend-prod', args.extend_prod])
         run([py, here / 'train_sample.py', '--data', npz, '--output', pt])
         out = run([py, here / 'evaluate.py', '--model', pt, '--data', npz,
                    '--eval-reactor', h, '--no-plots'])

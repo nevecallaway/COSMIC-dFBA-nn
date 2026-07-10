@@ -417,7 +417,8 @@ def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LE
 # ---------------------------------------------------------------------------
 
 def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
-                   seed=0, sample_rates=False, rate_mix=0.0, rate_scale=1.0):
+                   seed=0, sample_rates=False, rate_mix=0.0, rate_scale=1.0,
+                   extend_prod=0.0):
     """
     Generate n_extra additional synthetic reactors with randomly sampled DoE.
 
@@ -426,6 +427,14 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
       - sample_rates=True, rate_mix=0:  all sampled from Gaussian
       - rate_mix=0.5: 50% donor-copied, 50% sampled from Gaussian
     rate_scale: multiplier on covariance (0.25 = tighter, 1.0 = full variance)
+
+    extend_prod: if > 0, extend the sampled range of the PRODUCTIVITY dimensions
+    (cell-density and titer rates, growth and production) by this fraction beyond
+    the observed min/max, and widen the envelope to allow it. This covers
+    reactors more/less productive than any real one, turning leave-one-reactor-out
+    on the productivity extremes from extrapolation into interpolation. Only
+    meaningful with rate_mix=1.0 (all sampled). E.g. extend_prod=0.5 extends each
+    productivity range 50% past its observed span on each side.
 
     Returns:
         trajectories: np.ndarray (n_extra, N_DAYS, N_COMPONENTS)
@@ -436,6 +445,8 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
     rng = np.random.default_rng(seed)
     trajs, does, cins = [], [], []
+
+    PROD_DIMS = [IDX_CD, IDX_TIT]   # productivity/growth dims to extend
 
     use_sampling = sample_rates or rate_mix > 0
     if use_sampling:
@@ -448,6 +459,25 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
         env_lo, env_hi = build_envelope_from_rates(rates_growth, rates_prod)
         print(f'  Rate sampling: scale={rate_scale}, mix={rate_mix}')
         print(f'  Physiological rate envelope active (data_3 bounds, +10% margin)')
+
+        if extend_prod > 0:
+            # Extended uniform ranges for the productivity dims, and widen the
+            # envelope so the extended draws are not rejected.
+            g_lo, g_hi = g_matrix.min(axis=0), g_matrix.max(axis=0)
+            p_lo, p_hi = p_matrix.min(axis=0), p_matrix.max(axis=0)
+            g_ext_lo = g_lo - extend_prod * (g_hi - g_lo)
+            g_ext_hi = g_hi + extend_prod * (g_hi - g_lo)
+            p_ext_lo = p_lo - extend_prod * (p_hi - p_lo)
+            p_ext_hi = p_hi + extend_prod * (p_hi - p_lo)
+            # Titer production cannot be negative; floor its extended lower bound.
+            g_ext_lo[IDX_TIT] = max(0.0, g_ext_lo[IDX_TIT])
+            p_ext_lo[IDX_TIT] = max(0.0, p_ext_lo[IDX_TIT])
+            for d in PROD_DIMS:
+                env_lo[d] = min(env_lo[d], g_ext_lo[d], p_ext_lo[d])
+                env_hi[d] = max(env_hi[d], g_ext_hi[d], p_ext_hi[d])
+            names = {IDX_CD: 'CellDensity', IDX_TIT: 'Titer'}
+            print(f'  Productivity extension {extend_prod:.0%} on '
+                  f'{[names[d] for d in PROD_DIMS]} (growth+prod)')
 
     n_reject = 0
     k = 0
@@ -467,6 +497,12 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
         if do_sample:
             v_growth = rng.multivariate_normal(g_mean, g_cov)
             v_prod   = rng.multivariate_normal(p_mean, p_cov)
+            if extend_prod > 0:
+                # Replace productivity dims with draws over the extended range
+                # so training covers reactors beyond the observed extremes.
+                for d in PROD_DIMS:
+                    v_growth[d] = rng.uniform(g_ext_lo[d], g_ext_hi[d])
+                    v_prod[d]   = rng.uniform(p_ext_lo[d], p_ext_hi[d])
             # Reject rate samples outside the physiological envelope (data_3 bounds)
             if not (in_envelope(v_growth, env_lo, env_hi)
                     and in_envelope(v_prod, env_lo, env_hi)):
@@ -515,7 +551,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
 def generate_all(data_dir=None, output_file=None, n_extra=50,
                  sample_rates=False, rate_mix=0.0, rate_scale=1.0,
-                 seq_len=SEQ_LEN, holdout=None):
+                 seq_len=SEQ_LEN, holdout=None, extend_prod=0.0):
     """
     Generate unnormalized trajectories for all 10 reactors plus n_extra
     synthetic reactors with randomly sampled DoE conditions.
@@ -612,7 +648,8 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         print(f'\nGenerating {n_extra} extra reactors ({mode})...')
         extra_trajs, extra_doe, extra_cin = generate_extra(
             n_extra, rates_growth, rates_prod, donor_ids, pm_dict, doe_dict,
-            sample_rates=sample_rates, rate_mix=rate_mix, rate_scale=rate_scale)
+            sample_rates=sample_rates, rate_mix=rate_mix, rate_scale=rate_scale,
+            extend_prod=extend_prod)
         # Dummy phases for extras: repeat last phase value from first reactor
         extra_phases = np.tile(phases_out[0], (n_extra, 1))
         trajectories = np.concatenate([trajectories, extra_trajs], axis=0)
@@ -761,6 +798,8 @@ if __name__ == '__main__':
                         help=f'Window size in days (default: {SEQ_LEN})')
     parser.add_argument('--holdout', type=int, default=None,
                         help='Reactor index to exclude from donor/sampling pool (LORO test)')
+    parser.add_argument('--extend-prod', type=float, default=0.0,
+                        help='Extend productivity (cell-density+titer) sampling range by this fraction')
     parser.add_argument('--output', type=str, default=None,
                         help='Output npz path (default: synthetic_ode.npz)')
     args = parser.parse_args()
@@ -768,7 +807,8 @@ if __name__ == '__main__':
     trajs, times, phases, doe_params, component_names = generate_all(
         n_extra=args.n_extra, sample_rates=args.sample_rates,
         rate_mix=args.rate_mix, rate_scale=args.rate_scale,
-        seq_len=args.seq_len, holdout=args.holdout, output_file=args.output)
+        seq_len=args.seq_len, holdout=args.holdout, output_file=args.output,
+        extend_prod=args.extend_prod)
     reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
                    'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
     plot_comparison(trajs[:10], reactor_ids, component_names)

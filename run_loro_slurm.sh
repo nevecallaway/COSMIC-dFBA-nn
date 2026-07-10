@@ -43,9 +43,11 @@ $PYTHON compute_aa_scales.py
 log "LORO BASELINE (tight: rate-mix 0.2, rate-scale 0.1)  folds=[$FOLDS]"
 $PYTHON loro_eval.py --folds $FOLDS --rate-mix 0.2 --rate-scale 0.1 --n-extra $N_EXTRA
 
-# Experiment: broad sampling (no donor copies). Tests whether removing the
-# memorization target and widening the rate spread recovers generalization.
-log "LORO EXPERIMENT (broad: rate-mix 1.0, rate-scale 0.5)  folds=[$FOLDS]"
-$PYTHON loro_eval.py --folds $FOLDS --rate-mix 1.0 --rate-scale 0.5 --n-extra $N_EXTRA
+# Experiment: broad sampling + productivity extension. Covers reactors more/less
+# productive than any real one, so the LORO productivity extremes (R0004 low,
+# R0005 high) become interpolation instead of extrapolation.
+log "LORO EXPERIMENT (broad + extend-prod 0.5)  folds=[$FOLDS]"
+$PYTHON loro_eval.py --folds $FOLDS --rate-mix 1.0 --rate-scale 0.5 \
+    --extend-prod 0.5 --n-extra $N_EXTRA
 
 log "Done. Two summaries (BASELINE then EXPERIMENT) at the end of the log."
