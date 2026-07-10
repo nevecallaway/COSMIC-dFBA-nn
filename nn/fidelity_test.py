@@ -32,7 +32,7 @@ from pathlib import Path
 
 from generate_synthetic_ode import (
     load_rates, load_phase_fractions, load_doe,
-    generate_reactor, make_cin, N_DAYS,
+    generate_reactor, make_cin, N_DAYS, ETA_SWITCH_DAY,
 )
 from model import FEATURE_INDICES
 from model_primeur import ode_step, closed_form_step
@@ -79,10 +79,12 @@ def main():
             C_curr_t = torch.tensor(C_curr8[None], dtype=torch.float64)
             v_t      = torch.tensor(v_net[fidx][None], dtype=torch.float64)
             cin_t    = torch.tensor(cin8[None], dtype=torch.float64)
+            eta_t    = 0.0 if d < ETA_SWITCH_DAY else 1.0   # match generator's day-8 switch
             if args.closed:
-                C_pred = closed_form_step(C_curr_t, v_t, cin_t).numpy()[0]
+                C_pred = closed_form_step(C_curr_t, v_t, cin_t, eta_titer=eta_t).numpy()[0]
             else:
-                C_pred = ode_step(C_curr_t, v_t, cin_t, n_substeps=args.substeps).numpy()[0]
+                C_pred = ode_step(C_curr_t, v_t, cin_t, eta_titer=eta_t,
+                                  n_substeps=args.substeps).numpy()[0]
 
             denom = np.maximum(np.abs(C_true_next8), 1e-6)
             rel = np.abs(C_pred - C_true_next8) / denom

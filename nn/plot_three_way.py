@@ -74,17 +74,36 @@ def main():
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     axes = axes.flatten()
 
+    from collections import defaultdict
+    doe_scale = doe_max - doe_min; doe_scale[doe_scale == 0] = 1.0
+
+    def ensemble_predict(i):
+        """Predict each future day from every seed window that reaches it.
+        Overlapping windows -> multiple predictions per day; returns per-day
+        mean/min/max (physical) for the selected feature."""
+        doe_n = (doe_params[i] - doe_min) / doe_scale
+        per_day = defaultdict(list)
+        for s in range(0, N_DAYS - seq_len):
+            seed_feats = np.clip((sub[i, s:s + seq_len, :] - feature_min) / scale, 0.0, 1.0)
+            time_col = (np.arange(s, s + seq_len, dtype=np.float32) / (N_DAYS - 1))[:, None]
+            seed_norm = np.concatenate([seed_feats, time_col], axis=1)
+            n_steps = N_DAYS - (s + seq_len)
+            if n_steps <= 0:
+                continue
+            preds = rollout(model, seed_norm, n_steps=n_steps, device=device,
+                            doe=doe_n, cin=cin_params[i], is_decoder=True)
+            preds_phys = preds[:, feat] * scale[feat] + feature_min[feat]
+            for k in range(n_steps):
+                per_day[s + seq_len + k].append(preds_phys[k])
+        days = sorted(per_day)
+        mean = np.array([np.mean(per_day[d]) for d in days])
+        lo   = np.array([np.min(per_day[d])  for d in days])
+        hi   = np.array([np.max(per_day[d])  for d in days])
+        return np.array(days), mean, lo, hi
+
     sub = trajectories[:, :, FEATURE_INDICES]   # (N, days, 8)
     for i in range(min(n_original, 10)):
-        # rollout prediction (days seq_len..N_DAYS-1)
-        seed_feats = np.clip((sub[i, :seq_len, :] - feature_min) / scale, 0.0, 1.0)
-        time_col = (np.arange(seq_len, dtype=np.float32) / (N_DAYS - 1))[:, None]
-        seed_norm = np.concatenate([seed_feats, time_col], axis=1)
-        doe_scale = doe_max - doe_min; doe_scale[doe_scale == 0] = 1.0
-        doe_n = (doe_params[i] - doe_min) / doe_scale
-        preds = rollout(model, seed_norm, n_steps=N_DAYS - seq_len, device=device,
-                        doe=doe_n, cin=cin_params[i], is_decoder=True)      # (7, 8) norm
-        pred_phys = preds[:, feat] * scale[feat] + feature_min[feat]
+        p_days, p_mean, p_lo, p_hi = ensemble_predict(i)
 
         synth = sub[i, :, feat]                                # (13,) physical
         smax  = synth.max() if synth.max() > 0 else 1.0
@@ -96,8 +115,9 @@ def main():
 
         ax = axes[i]
         ax.plot(np.arange(N_DAYS), synth / smax, 'b-', lw=1.8, label='synthetic (ODE)')
-        ax.plot(np.arange(seq_len, N_DAYS), pred_phys / smax, 'r--', lw=2,
-                label='predicted (model)')
+        # overlapping-window ensemble: mean line + min/max band
+        ax.fill_between(p_days, p_lo / smax, p_hi / smax, color='red', alpha=0.2, lw=0)
+        ax.plot(p_days, p_mean / smax, 'r--', lw=2, label='predicted (mean of windows)')
         ax.plot(real_days, real / rmax, 'k:', lw=1.8, label='real (data_2)')
         ax.axvline(seq_len, color='gray', lw=0.6, ls=':')
         ax.set_title(REACTOR_IDS[i], fontsize=9)

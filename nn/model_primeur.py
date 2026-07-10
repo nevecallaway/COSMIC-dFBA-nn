@@ -52,16 +52,19 @@ MET_SLICE = slice(3, 8)   # Glucose, Glutamine, Asparagine, Serine, Glycine
 N_FEATURES       = 8
 N_INPUT_FEATURES = N_FEATURES + 1   # + normalized day-index column
 SEQ_LEN          = 6
+N_DAYS           = 13               # day 0..12 (for reconstructing the day index)
 N_SUBSTEPS       = 50               # Euler sub-steps per 1-day interval
                                     # (50 -> ~0.5% vs generator RK45; scales 1/n)
 F_PERFUSION      = 1.0              # bioreactor volumes/day (paper: F = 1)
+ETA_SWITCH_DAY   = 8                # titer washout (eta) is 0 before this day, 1 after
+                                    # (paper: antibody retained then harvested at day 8)
 
 
 # ---------------------------------------------------------------------------
 # ODE-step layer (no parameters)
 # ---------------------------------------------------------------------------
 
-def ode_step(C_phys, v, cin_phys, n_substeps=N_SUBSTEPS, F=F_PERFUSION):
+def ode_step(C_phys, v, cin_phys, eta_titer=1.0, n_substeps=N_SUBSTEPS, F=F_PERFUSION):
     """
     Advance the physical state one day using the paper's mass balance, with v
     held constant over the day (matches the generator's per-interval scheme).
@@ -70,6 +73,8 @@ def ode_step(C_phys, v, cin_phys, n_substeps=N_SUBSTEPS, F=F_PERFUSION):
         C_phys:   (B, 8) current physical concentrations (last day of window)
         v:        (B, 8) per-cell fluxes predicted by the network
         cin_phys: (B, 8) physical feed concentrations (only MET_SLICE used)
+        eta_titer: titer removal fraction (0 = retained/accumulating, 1 = washed
+                   out). Scalar or (B,1); the day-8 switch is applied by the caller.
         n_substeps: Euler sub-steps within the day
         F:        perfusion rate
 
@@ -83,7 +88,8 @@ def ode_step(C_phys, v, cin_phys, n_substeps=N_SUBSTEPS, F=F_PERFUSION):
 
         d_cd    = v[:, IDX_CD:IDX_CD + 1] * X
         d_size  = v[:, IDX_SIZE:IDX_SIZE + 1] * X
-        d_titer = v[:, IDX_TITER:IDX_TITER + 1] * X - F * C[:, IDX_TITER:IDX_TITER + 1]
+        d_titer = (v[:, IDX_TITER:IDX_TITER + 1] * X
+                   - eta_titer * F * C[:, IDX_TITER:IDX_TITER + 1])
         d_met   = F * (cin_phys[:, MET_SLICE] - C[:, MET_SLICE]) + v[:, MET_SLICE] * X
 
         dC = torch.cat([d_cd, d_size, d_titer, d_met], dim=1)
@@ -98,7 +104,7 @@ def _expm1_over_x(x, eps=1e-6):
     return torch.where(small, 1.0 + 0.5 * x, torch.expm1(x) / safe_x)
 
 
-def closed_form_step(C_phys, v, cin_phys, F=F_PERFUSION):
+def closed_form_step(C_phys, v, cin_phys, eta_titer=1.0, F=F_PERFUSION):
     """
     Exact one-day advance. With v and cin constant over the day, X(t) = X0*e^{vX t}
     and every equation has a closed-form solution, so no Euler sub-steps are needed
@@ -106,23 +112,30 @@ def closed_form_step(C_phys, v, cin_phys, F=F_PERFUSION):
 
         cell density : X0 * e^{vX}
         cell size    : CV0 + v_CV*X0 * (e^{vX}-1)/vX
-        titer        : Tit0*e^{-F} + v_tit*X0*e^{-F} * (e^{vX+F}-1)/(vX+F)
+        titer        : Tit0*e^{-ηF} + v_tit*X0*e^{-ηF} * (e^{vX+ηF}-1)/(vX+ηF)
         metabolite   : C0*e^{-F} + cin*(1-e^{-F}) + v*X0*e^{-F} * (e^{vX+F}-1)/(vX+F)
 
-    The (e^{·}-1)/· factors use _expm1_over_x, which handles the degenerate cases
-    vX -> 0 (cell size) and vX -> -F (titer/metabolite).
+    eta_titer (η) is the titer removal fraction: 0 before day 8 (retained, so titer
+    accumulates: the term reduces to Tit0 + v_tit*X0*(e^{vX}-1)/vX), 1 after (washed
+    out). Scalar or (B,1). The (e^{·}-1)/· factors use _expm1_over_x, which handles
+    the degenerate cases vX -> 0 and vX+ηF -> 0.
     """
     X0  = C_phys[:, IDX_CD:IDX_CD + 1]
     vX  = v[:, IDX_CD:IDX_CD + 1]
     emF = float(np.exp(-F))
 
-    g_vXF = _expm1_over_x(vX + F)   # (e^{vX+F} - 1)/(vX+F); metabolite/titer factor
+    g_vXF = _expm1_over_x(vX + F)   # metabolite factor (eta = 1 always for metabolites)
+
+    # Titer with variable eta: washout coefficient b = eta*F.
+    b       = eta_titer * F
+    e_negb  = torch.exp(-b) if torch.is_tensor(b) else float(np.exp(-b))
+    g_titer = _expm1_over_x(vX + b)
 
     cd    = X0 * torch.exp(vX)
     size  = (C_phys[:, IDX_SIZE:IDX_SIZE + 1]
              + v[:, IDX_SIZE:IDX_SIZE + 1] * X0 * _expm1_over_x(vX))
-    titer = (C_phys[:, IDX_TITER:IDX_TITER + 1] * emF
-             + v[:, IDX_TITER:IDX_TITER + 1] * X0 * emF * g_vXF)
+    titer = (C_phys[:, IDX_TITER:IDX_TITER + 1] * e_negb
+             + v[:, IDX_TITER:IDX_TITER + 1] * X0 * e_negb * g_titer)
     met   = (C_phys[:, MET_SLICE] * emF
              + cin_phys[:, MET_SLICE] * (1.0 - emF)
              + v[:, MET_SLICE] * X0 * emF * g_vXF)
@@ -204,10 +217,17 @@ class FluxDecoder(nn.Module):
         C_last_norm = x[:, -1, :self.n_features]
         C_phys = C_last_norm * self.feat_scale + self.feat_min
 
+        # Titer eta: the step advances from the window's last day t to t+1.
+        # Reconstruct t from the time column (t = time * (N_DAYS-1)); eta = 0 while
+        # t < day 8 (titer retained/accumulating), 1 after (harvested/washed out).
+        day = torch.round(x[:, -1, self.n_features] * (N_DAYS - 1))
+        eta_titer = (day >= ETA_SWITCH_DAY).float().unsqueeze(1)   # (B,1)
+
         if self.integrator == 'closed':
-            C_next_phys = closed_form_step(C_phys, v, cin_phys)
+            C_next_phys = closed_form_step(C_phys, v, cin_phys, eta_titer=eta_titer)
         else:
-            C_next_phys = ode_step(C_phys, v, cin_phys, self.n_substeps)
+            C_next_phys = ode_step(C_phys, v, cin_phys, eta_titer=eta_titer,
+                                   n_substeps=self.n_substeps)
 
         C_next_norm = (C_next_phys - self.feat_min) / self.feat_scale
         return C_next_norm, v

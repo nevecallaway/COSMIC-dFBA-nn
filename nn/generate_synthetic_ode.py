@@ -44,6 +44,8 @@ from scipy.integrate import solve_ivp
 F       = 1.0    # perfusion rate (bioreactor volumes/day, confirmed from paper)
 N_DAYS  = 13     # day 0 through day 12 (13 timepoints)
 T_EVAL  = np.arange(0, N_DAYS, dtype=float)
+ETA_SWITCH_DAY = 8   # titer eta: 0 (retained/accumulating) before this day, 1 after
+                     # (paper: antibody retained then harvested at day 8)
 
 # ---------------------------------------------------------------------------
 # Window constants -- must match model.py FEATURE_INDICES / SEQ_LEN
@@ -261,7 +263,7 @@ def make_cin(doe):
 # Interval-based ODE integration
 # ---------------------------------------------------------------------------
 
-def _make_interval_ode(v_net, cin):
+def _make_interval_ode(v_net, cin, eta_titer=1.0):
     """
     Build the ODE function for one 1-day interval with constant v_net and eta.
 
@@ -269,10 +271,10 @@ def _make_interval_ode(v_net, cin):
         dC_i/dt = F * (C_i_in - eta * C_i) + v_i * X
 
     Applied per component:
-        dX/dt     = v_CD * X                           [eta=0, X_in=0]
-        dX_bm/dt  = v_bm * X                           [eta=0, X_bm_in=0; driver is X not X_bm]
-        dC_tit/dt = v_tit * X - F * C_tit              [eta=1 always]
-        dC_i/dt   = F * (Cin_i - C_i) + v_i * X       [eta=1, all other metabolites]
+        dX/dt     = v_CD * X                                [eta=0, X_in=0]
+        dX_bm/dt  = v_bm * X                                [eta=0, X_bm_in=0; driver is X]
+        dC_tit/dt = v_tit * X - eta_titer * F * C_tit       [eta=0 before day 8, 1 after]
+        dC_i/dt   = F * (Cin_i - C_i) + v_i * X            [eta=1, all other metabolites]
     """
     def ode(t, C):
         X    = max(C[IDX_CD], 0.0)
@@ -284,8 +286,8 @@ def _make_interval_ode(v_net, cin):
         # Cell size: driven by cell density (per paper eq. 2, C_1 = X for all components)
         dC[IDX_CV] = v_net[IDX_CV] * X
 
-        # Titer: production minus washout (eta=1 always, per Sarat)
-        dC[IDX_TIT] = v_net[IDX_TIT] * X - F * max(C[IDX_TIT], 0.0)
+        # Titer: production minus washout (eta=0 while retained, 1 once harvested)
+        dC[IDX_TIT] = v_net[IDX_TIT] * X - eta_titer * F * max(C[IDX_TIT], 0.0)
 
         # All other metabolites
         for i in range(N_COMPONENTS):
@@ -325,8 +327,9 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
         f       = pm_by_day.get(d + 1, f_fallback)
         v_net   = (1.0 - f) * v_growth + f * v_prod
 
-
-        ode_fn  = _make_interval_ode(v_net, cin)
+        # Titer eta: 0 (retained, accumulating) for intervals before day 8, 1 after.
+        eta_titer = 0.0 if d < ETA_SWITCH_DAY else 1.0
+        ode_fn    = _make_interval_ode(v_net, cin, eta_titer)
 
         sol = solve_ivp(
             ode_fn,
@@ -641,8 +644,10 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
     if n_extra > 0:
         donor_ids = reactor_ids
         if holdout is not None:
-            donor_ids = [r for k, r in enumerate(reactor_ids) if k != holdout]
-            print(f'\nLORO: excluding {reactor_ids[holdout]} (index {holdout}) '
+            hold = {holdout} if isinstance(holdout, int) else set(holdout)
+            donor_ids = [r for k, r in enumerate(reactor_ids) if k not in hold]
+            excluded = [reactor_ids[k] for k in sorted(hold)]
+            print(f'\nHoldout: excluding {excluded} (indices {sorted(hold)}) '
                   f'from donor/sampling pool')
         mode = 'sampled rates' if sample_rates else 'donor rates'
         print(f'\nGenerating {n_extra} extra reactors ({mode})...')
@@ -796,8 +801,9 @@ if __name__ == '__main__':
                         help='Scale factor on covariance (0.25 = tighter sampling)')
     parser.add_argument('--seq-len', type=int, default=SEQ_LEN,
                         help=f'Window size in days (default: {SEQ_LEN})')
-    parser.add_argument('--holdout', type=int, default=None,
-                        help='Reactor index to exclude from donor/sampling pool (LORO test)')
+    parser.add_argument('--holdout', type=int, nargs='+', default=None,
+                        help='Reactor index/indices to exclude from donor pool '
+                             '(one for LORO, several for a stratified holdout set)')
     parser.add_argument('--extend-prod', type=float, default=0.0,
                         help='Extend productivity (cell-density+titer) sampling range by this fraction')
     parser.add_argument('--output', type=str, default=None,
