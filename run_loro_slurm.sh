@@ -24,8 +24,6 @@ REPO_DIR="$HOME/cosmic"                        # dir containing the nn scripts +
 PYTHON="/home/nevecc/.conda/envs/cosmic/bin/python"
 
 FOLDS="0 1 2 3 4"                              # reactor indices to hold out
-RATE_MIX=1.0                                    # 1.0 = no donor copies (no memorization)
-RATE_SCALE=0.5                                  # broaden sampled-rate spread
 N_EXTRA=3000                                    # lower (e.g. 1500) if generation is slow
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -40,9 +38,14 @@ cd "$REPO_DIR"
 log "Computing per-AA scales..."
 $PYTHON compute_aa_scales.py
 
-# Step 1: leave-one-reactor-out under broad sampling.
-log "Running LORO: folds=[$FOLDS] rate-mix=$RATE_MIX rate-scale=$RATE_SCALE"
-$PYTHON loro_eval.py --folds $FOLDS \
-    --rate-mix $RATE_MIX --rate-scale $RATE_SCALE --n-extra $N_EXTRA
+# Baseline: tight sampling (80% donor copies). Confirms the leakage/memorization
+# problem is representative across folds, not just reactor 0 (which gave 83.8%).
+log "LORO BASELINE (tight: rate-mix 0.2, rate-scale 0.1)  folds=[$FOLDS]"
+$PYTHON loro_eval.py --folds $FOLDS --rate-mix 0.2 --rate-scale 0.1 --n-extra $N_EXTRA
 
-log "Done. Summary is at the end of logs/loro_${SLURM_JOB_ID}.log"
+# Experiment: broad sampling (no donor copies). Tests whether removing the
+# memorization target and widening the rate spread recovers generalization.
+log "LORO EXPERIMENT (broad: rate-mix 1.0, rate-scale 0.5)  folds=[$FOLDS]"
+$PYTHON loro_eval.py --folds $FOLDS --rate-mix 1.0 --rate-scale 0.5 --n-extra $N_EXTRA
+
+log "Done. Two summaries (BASELINE then EXPERIMENT) at the end of the log."
