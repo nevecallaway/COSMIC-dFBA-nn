@@ -166,6 +166,9 @@ def main():
                         help='Print a warning for each negative prediction (no clip applied)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Skip diagnostic plots (useful for single-reactor LORO runs)')
+    parser.add_argument('--real-target', action='store_true',
+                        help='Score against denormalized data_2 (real measured) instead of '
+                             'the ODE trajectory. Use for models trained with train_real.py.')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -215,6 +218,15 @@ def main():
                          'with the updated generate_synthetic_ode.py.')
 
     n_original = int(npz['n_original']) if 'n_original' in npz else len(trajectories)
+
+    # Ground truth = denormalized data_2 (real measured) for the real reactors.
+    if args.real_target:
+        from real_data import denormalize_data2
+        real = denormalize_data2(here / 'data' / 'data_2.csv', trajectories, n_original)
+        trajectories = trajectories.copy()
+        trajectories[:n_original] = real
+        print('--real-target: scoring against denormalized data_2 (real measured), '
+              'seed and actual both from real')
 
     if args.val:
         # Reproduce the train/val split from train.py

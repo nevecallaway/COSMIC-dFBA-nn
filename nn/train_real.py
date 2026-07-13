@@ -29,38 +29,15 @@ Usage:
 
 import argparse
 import numpy as np
-import pandas as pd
 import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
 from sklearn.preprocessing import MinMaxScaler
 
 from model_primeur import FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN
-from generate_synthetic_ode import build_windows, WINDOW_FEATURE_INDICES, T_EVAL
+from generate_synthetic_ode import build_windows
 from train_sample import FluxWindowDataset
-
-REACTOR_IDS = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
-               'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
-
-
-def denormalize_data2(here, ode_traj, n_original):
-    """data_2 (normalized) -> approximate physical, using the ODE per-reactor
-    per-component peak as the scale. Returns (n_original, N_DAYS, 25)."""
-    df2 = pd.read_csv(here / 'data' / 'data_2.csv', skiprows=1)
-    df2.columns = ['Vessel', 'Time', 'Phase'] + [f'C{i}' for i in range(25)]
-    df2['Time'] = pd.to_numeric(df2['Time'], errors='coerce')
-    df2 = df2.dropna(subset=['Time'])
-
-    real = ode_traj[:n_original].copy()   # start from ODE physical; overwrite the 8 feats
-    for r in range(n_original):
-        rdf = df2[df2['Vessel'] == REACTOR_IDS[r]].sort_values('Time')
-        rdays = rdf['Time'].to_numpy(float)
-        for c in WINDOW_FEATURE_INDICES:
-            norm = pd.to_numeric(rdf[f'C{c}'], errors='coerce').to_numpy(float)
-            interp = np.interp(T_EVAL, rdays, norm)          # onto integer days 0..12
-            omax = ode_traj[r, :, c].max()
-            real[r, :, c] = interp * (omax if omax > 0 else 1.0)
-    return real
+from real_data import denormalize_data2
 
 
 def main():
@@ -91,7 +68,7 @@ def main():
     doe_min, doe_max = npz['doe_min'].astype(np.float32), npz['doe_max'].astype(np.float32)
 
     # ---- real physical trajectories from data_2 ----
-    real = denormalize_data2(here, ode_traj, n_original)
+    real = denormalize_data2(here / 'data' / 'data_2.csv', ode_traj, n_original)
     print(f'Denormalized {n_original} real reactors from data_2 (ODE-scaled).')
 
     windows, targets, wdoe, wcin, ridx = build_windows(
