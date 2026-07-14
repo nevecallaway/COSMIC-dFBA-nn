@@ -40,6 +40,9 @@ def main():
     parser.add_argument('--data',  default=str(here / 'synthetic_ode.npz'))
     parser.add_argument('--feature', type=int, default=2,
                         help='MODEL feature index 0-7 (default 2=Titer)')
+    parser.add_argument('--real-target', action='store_true',
+                        help='Seed from and show the denormalized real data (for '
+                             'models trained with train_real.py)')
     args = parser.parse_args()
     feat = args.feature
     comp = FEATURE_INDICES[feat]   # index into the 25-component trajectory / data_2
@@ -62,6 +65,15 @@ def main():
     cin_params   = npz['cin_params'].astype(np.float32)
     n_original   = int(npz['n_original'])
     seq_len      = int(npz['seq_len']) if 'seq_len' in npz else SEQ_LEN
+
+    # --real-target: replace the real reactors' trajectories with denormalized
+    # data_2, so the seed and the blue reference are the real measurements.
+    if args.real_target:
+        from real_data import denormalize_data2
+        real = denormalize_data2(here / 'data' / 'data_2.csv', trajectories, n_original)
+        trajectories = trajectories.copy()
+        trajectories[:n_original] = real
+    blue_label = 'real target (denorm)' if args.real_target else 'synthetic (ODE)'
 
     df2 = pd.read_csv(here / 'data' / 'data_2.csv', skiprows=1)
     df2.columns = ['Vessel', 'Time', 'Phase'] + [f'C{i}' for i in range(25)]
@@ -114,7 +126,7 @@ def main():
         rmax = real.max() if real.size and real.max() > 0 else 1.0
 
         ax = axes[i]
-        ax.plot(np.arange(N_DAYS), synth / smax, 'b-', lw=1.8, label='synthetic (ODE)')
+        ax.plot(np.arange(N_DAYS), synth / smax, 'b-', lw=1.8, label=blue_label)
         # overlapping-window ensemble: mean line + min/max band
         ax.fill_between(p_days, p_lo / smax, p_hi / smax, color='red', alpha=0.2, lw=0)
         ax.plot(p_days, p_mean / smax, 'r--', lw=2, label='predicted (mean of windows)')
