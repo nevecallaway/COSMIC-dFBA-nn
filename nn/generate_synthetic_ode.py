@@ -300,7 +300,31 @@ def _make_interval_ode(v_net, cin, eta_titer=1.0):
     return ode
 
 
-def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
+def _expm1_over_x(x, eps=1e-9):
+    """(exp(x) - 1) / x, stable near 0 (limit -> 1). Scalar."""
+    return 1.0 + 0.5 * x if abs(x) < eps else np.expm1(x) / x
+
+
+def _analytic_step(C, v_net, cin, eta_titer, F=F):
+    """
+    Exact one-day advance in closed form, identical result to _make_interval_ode
+    under solve_ivp but with no numerical integration. VALID ONLY for the current
+    linear ODE (constant rates over the day, X = X0*e^{vX t}); if the equations
+    change (e.g. Michaelis-Menten, DoE-coupled rates), this no longer applies and
+    solve_ivp must be used instead.
+    """
+    X0, vX, eF = C[IDX_CD], v_net[IDX_CD], np.exp(-F)
+    g = _expm1_over_x(vX + F)
+    C_next = C * eF + cin * (1.0 - eF) + v_net * X0 * eF * g   # metabolite form (all)
+    C_next[IDX_CD]  = X0 * np.exp(vX)
+    C_next[IDX_CV]  = C[IDX_CV] + v_net[IDX_CV] * X0 * _expm1_over_x(vX)
+    b = eta_titer * F
+    C_next[IDX_TIT] = (C[IDX_TIT] * np.exp(-b)
+                       + v_net[IDX_TIT] * X0 * np.exp(-b) * _expm1_over_x(vX + b))
+    return C_next
+
+
+def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe, fast=False):
     """
     Integrate the ODE interval by interval (1 day each) per Sarat's specification.
 
@@ -329,24 +353,27 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe):
 
         # Titer eta: 0 (retained, accumulating) for intervals before day 8, 1 after.
         eta_titer = 0.0 if d < ETA_SWITCH_DAY else 1.0
-        ode_fn    = _make_interval_ode(v_net, cin, eta_titer)
 
-        sol = solve_ivp(
-            ode_fn,
-            t_span=(0.0, 1.0),
-            y0=C.copy(),
-            method='RK45',
-            t_eval=[1.0],
-            max_step=0.1,
-            rtol=1e-6,
-            atol=1e-8,
-        )
-
-        if not sol.success:
-            print(f'  WARNING: {reactor_id} interval [{d},{d+1}]: {sol.message}')
-            C_next = C.copy()
+        if fast:
+            # Exact closed-form step (same math as solve_ivp, no integration).
+            C_next = _analytic_step(C, v_net, cin, eta_titer)
         else:
-            C_next = sol.y[:, -1].copy()
+            ode_fn = _make_interval_ode(v_net, cin, eta_titer)
+            sol = solve_ivp(
+                ode_fn,
+                t_span=(0.0, 1.0),
+                y0=C.copy(),
+                method='RK45',
+                t_eval=[1.0],
+                max_step=0.1,
+                rtol=1e-6,
+                atol=1e-8,
+            )
+            if not sol.success:
+                print(f'  WARNING: {reactor_id} interval [{d},{d+1}]: {sol.message}')
+                C_next = C.copy()
+            else:
+                C_next = sol.y[:, -1].copy()
 
         neg_mask = C_next < 0
         if neg_mask.any():
@@ -421,7 +448,7 @@ def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LE
 
 def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
                    seed=0, sample_rates=False, rate_mix=0.0, rate_scale=1.0,
-                   extend_prod=0.0):
+                   extend_prod=0.0, fast=False):
     """
     Generate n_extra additional synthetic reactors with randomly sampled DoE.
 
@@ -524,6 +551,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
             v_prod,
             pm_dict[donor],
             doe,
+            fast=fast,
         )
 
         # Reject trajectories with negative concentrations or NaN
@@ -554,7 +582,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
 def generate_all(data_dir=None, output_file=None, n_extra=50,
                  sample_rates=False, rate_mix=0.0, rate_scale=1.0,
-                 seq_len=SEQ_LEN, holdout=None, extend_prod=0.0):
+                 seq_len=SEQ_LEN, holdout=None, extend_prod=0.0, fast=False):
     """
     Generate unnormalized trajectories for all 10 reactors plus n_extra
     synthetic reactors with randomly sampled DoE conditions.
@@ -617,6 +645,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
             rates_prod[reactor],
             pm_days,
             doe,
+            fast=fast,
         )
 
         pm_vals = np.array([pm_days.get(int(t), list(pm_days.values())[-1])
@@ -654,7 +683,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         extra_trajs, extra_doe, extra_cin = generate_extra(
             n_extra, rates_growth, rates_prod, donor_ids, pm_dict, doe_dict,
             sample_rates=sample_rates, rate_mix=rate_mix, rate_scale=rate_scale,
-            extend_prod=extend_prod)
+            extend_prod=extend_prod, fast=fast)
         # Dummy phases for extras: repeat last phase value from first reactor
         extra_phases = np.tile(phases_out[0], (n_extra, 1))
         trajectories = np.concatenate([trajectories, extra_trajs], axis=0)
@@ -808,13 +837,16 @@ if __name__ == '__main__':
                         help='Extend productivity (cell-density+titer) sampling range by this fraction')
     parser.add_argument('--output', type=str, default=None,
                         help='Output npz path (default: synthetic_ode.npz)')
+    parser.add_argument('--fast', action='store_true',
+                        help='Use the exact closed-form ODE step instead of solve_ivp '
+                             '(much faster; valid only for the current linear equations)')
     args = parser.parse_args()
 
     trajs, times, phases, doe_params, component_names = generate_all(
         n_extra=args.n_extra, sample_rates=args.sample_rates,
         rate_mix=args.rate_mix, rate_scale=args.rate_scale,
         seq_len=args.seq_len, holdout=args.holdout, output_file=args.output,
-        extend_prod=args.extend_prod)
+        extend_prod=args.extend_prod, fast=args.fast)
     reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
                    'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
     plot_comparison(trajs[:10], reactor_ids, component_names)

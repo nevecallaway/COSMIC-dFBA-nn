@@ -64,7 +64,7 @@ def main():
     # 1. synthetic pretrain with the held-out reactors excluded from donors
     run([py, here / 'generate_synthetic_ode.py', '--holdout', *H, '--output', npz,
          '--n-extra', args.n_extra, '--rate-mix', args.rate_mix,
-         '--rate-scale', args.rate_scale])
+         '--rate-scale', args.rate_scale, '--fast'])
     run([py, here / 'train_sample.py', '--data', npz, '--output', flux, '--batch', 256])
 
     # 2. fine-tune on the non-held-out real reactors

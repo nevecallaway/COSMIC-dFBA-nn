@@ -113,7 +113,7 @@ def main():
         npz = here / f'loroplot_{"_".join(H)}.npz'
         pt  = here / f'loroplot_{"_".join(H)}.pt'
         run([py, here / 'generate_synthetic_ode.py', '--holdout', *H, '--output', npz,
-             '--n-extra', args.n_extra, '--rate-mix', 0.2, '--rate-scale', 0.1])
+             '--n-extra', args.n_extra, '--rate-mix', 0.2, '--rate-scale', 0.1, '--fast'])
         run([py, here / 'train_sample.py', '--data', npz, '--output', pt, '--batch', 256])
         if ref_npz is None:
             ref_npz = npz
