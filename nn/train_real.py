@@ -55,6 +55,9 @@ def main():
     ap.add_argument('--hidden', type=int,   default=32)   # small: few real windows
     ap.add_argument('--weight-decay', type=float, default=1e-4)
     ap.add_argument('--substeps', type=int, default=50)
+    ap.add_argument('--freeze-conv', action='store_true',
+                    help='Freeze the conv feature-extractor; fine-tune only attention + head '
+                         '(prevents overfitting the few real windows, for transfer)')
     args = ap.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -112,9 +115,15 @@ def main():
         print(f'Transfer: initialized from {args.init}')
     model.set_scaler(scaler)
 
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'Parameters: {n_params:,}  hidden={hidden}')
+    if args.freeze_conv:
+        for p in model.conv.parameters():
+            p.requires_grad = False
+        print('Froze conv feature-extractor; fine-tuning attention + head only')
+
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.Adam(trainable, lr=args.lr, weight_decay=args.weight_decay)
+    n_params = sum(p.numel() for p in trainable)
+    print(f'Trainable parameters: {n_params:,}  hidden={hidden}')
 
     # ---- train (plain MSE; small model + weight decay for the tiny dataset) ----
     for epoch in range(1, args.epochs + 1):

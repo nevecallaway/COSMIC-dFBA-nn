@@ -51,6 +51,8 @@ def main():
     ap.add_argument('--n-extra', type=int, default=3000)
     ap.add_argument('--rate-mix', type=float, default=0.2)
     ap.add_argument('--rate-scale', type=float, default=0.1)
+    ap.add_argument('--freeze-conv', action='store_true',
+                    help='Freeze conv during fine-tuning (recommended for transfer)')
     args = ap.parse_args()
 
     py = sys.executable
@@ -66,8 +68,11 @@ def main():
     run([py, here / 'train_sample.py', '--data', npz, '--output', flux, '--batch', 256])
 
     # 2. fine-tune on the non-held-out real reactors
-    run([py, here / 'train_real.py', '--ode-data', npz, '--init', flux,
-         '--output', real, '--holdout', *H])
+    ft_cmd = [py, here / 'train_real.py', '--ode-data', npz, '--init', flux,
+              '--output', real, '--holdout', *H]
+    if args.freeze_conv:
+        ft_cmd.append('--freeze-conv')
+    run(ft_cmd)
 
     # 3. evaluate each held-out reactor: baseline (synthetic only) vs transfer
     results = {}
