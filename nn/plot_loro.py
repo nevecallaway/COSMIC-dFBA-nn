@@ -52,6 +52,21 @@ def load_model(path, device):
     return m, sc.data_min_.astype(np.float32), scale, ck['doe_min'], ck['doe_max']
 
 
+def single_step(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device):
+    """One prediction per day from the REAL previous seq_len days (teacher-forced,
+    no rollout). Returns (days, values, None, None) -- no band."""
+    days, vals = [], []
+    for d in range(seq_len, N_DAYS):
+        seed = np.clip((sub_i[d - seq_len:d] - fmin) / scale, 0.0, 1.0)
+        tcol = (np.arange(d - seq_len, d, dtype=np.float32) / (N_DAYS - 1))[:, None]
+        seed = np.concatenate([seed, tcol], axis=1)
+        pr = rollout(model, seed, n_steps=1, device=device, doe=doe_i,
+                     cin=cin_i, is_decoder=True)
+        vals.append(pr[0, feat] * scale[feat] + fmin[feat])
+        days.append(d)
+    return np.array(days), np.array(vals), None, None
+
+
 def ensemble(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device):
     """Predict each future day from every seed window; return per-day mean/min/max."""
     per_day = defaultdict(list)
@@ -81,6 +96,9 @@ def main():
                     help='Holdout groups, each a space-joined index string. Default = full LORO.')
     ap.add_argument('--feature', type=int, default=2, help='0-7 (default 2=Titer)')
     ap.add_argument('--n-extra', type=int, default=3000)
+    ap.add_argument('--single-step', action='store_true',
+                    help='Predict each day from the REAL previous window (one point per '
+                         'day, no rollout, no band) instead of autoregressive forecast')
     args = ap.parse_args()
 
     feat = args.feature
@@ -106,9 +124,10 @@ def main():
         doep = data['doe_params'].astype(np.float32)
         seq_len = int(data['seq_len']) if 'seq_len' in data else SEQ_LEN
         dsc = dmax - dmin; dsc[dsc == 0] = 1.0
+        predict = single_step if args.single_step else ensemble
         for i in fold:
-            preds[i] = ensemble(model, sub[i], cinp[i], (doep[i] - dmin) / dsc,
-                                fmin, scale, feat, seq_len, device)
+            preds[i] = predict(model, sub[i], cinp[i], (doep[i] - dmin) / dsc,
+                               fmin, scale, feat, seq_len, device)
 
     # references (ODE + real) from any npz; the 10 real reactors are identical across folds
     ref = np.load(ref_npz, allow_pickle=True)
@@ -129,7 +148,8 @@ def main():
         ax.plot(np.arange(N_DAYS), synth / smax, 'b-', lw=1.8, label='synthetic (ODE)')
         if i in preds:
             d, m, lo, hi = preds[i]
-            ax.fill_between(d, lo / smax, hi / smax, color='red', alpha=0.2, lw=0)
+            if lo is not None:
+                ax.fill_between(d, lo / smax, hi / smax, color='red', alpha=0.2, lw=0)
             ax.plot(d, m / smax, 'r--', lw=2, label='predicted (held-out model)')
         ax.plot(rdays, real / rmax, 'k:', lw=1.8, label='real (data_2)')
         ax.axvline(SEQ_LEN, color='gray', lw=0.6, ls=':')
