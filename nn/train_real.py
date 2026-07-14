@@ -58,7 +58,16 @@ def main():
     ap.add_argument('--freeze-conv', action='store_true',
                     help='Freeze the conv feature-extractor; fine-tune only attention + head '
                          '(prevents overfitting the few real windows, for transfer)')
+    ap.add_argument('--stripped', action='store_true',
+                    help='Use the low-capacity model_stripped decoder (1 conv layer, '
+                         'linear head) instead of the full en Primeur body')
     args = ap.parse_args()
+
+    if args.stripped:
+        from model_stripped import FluxDecoder as ModelClass
+        print('Using stripped (low-capacity) decoder')
+    else:
+        ModelClass = FluxDecoder
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
@@ -108,8 +117,8 @@ def main():
     n_doe = wdoe_n.shape[1]
     if args.init:
         hidden = ckpt.get('hidden', hidden)
-    model = FluxDecoder(hidden=hidden, n_doe=n_doe,
-                        n_input_features=N_INPUT_FEATURES, n_substeps=args.substeps).to(device)
+    model = ModelClass(hidden=hidden, n_doe=n_doe,
+                       n_input_features=N_INPUT_FEATURES, n_substeps=args.substeps).to(device)
     if args.init:
         model.load_state_dict(ckpt['model_state'])
         print(f'Transfer: initialized from {args.init}')
@@ -145,6 +154,7 @@ def main():
         'doe_min': doe_min, 'doe_max': doe_max, 'hidden': hidden,
         'n_features': N_FEATURES, 'n_input_features': N_INPUT_FEATURES,
         'seq_len': SEQ_LEN, 'n_doe': n_doe, 'n_substeps': args.substeps,
+        'arch': 'stripped' if args.stripped else 'primeur',
     }, args.output)
     print(f'Saved to {args.output}')
     print(f'Evaluate held-out: python evaluate.py --model {Path(args.output).name} '

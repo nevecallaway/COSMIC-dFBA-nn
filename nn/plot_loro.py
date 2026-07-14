@@ -43,9 +43,13 @@ def run(cmd):
 
 def load_model(path, device):
     ck = torch.load(path, map_location=device, weights_only=False)
-    m = FluxDecoder(hidden=ck.get('hidden', 64), n_doe=ck.get('n_doe', 3),
-                    n_input_features=ck.get('n_input_features', N_FEATURES + 1),
-                    n_substeps=int(ck['n_substeps'])).to(device)
+    if ck.get('arch') == 'stripped':
+        from model_stripped import FluxDecoder as ModelClass
+    else:
+        ModelClass = FluxDecoder
+    m = ModelClass(hidden=ck.get('hidden', 64), n_doe=ck.get('n_doe', 3),
+                   n_input_features=ck.get('n_input_features', N_FEATURES + 1),
+                   n_substeps=int(ck['n_substeps'])).to(device)
     m.load_state_dict(ck['model_state']); m.eval()
     sc = ck['scaler']
     scale = sc.data_range_.astype(np.float32); scale[scale == 0] = 1.0
