@@ -72,6 +72,21 @@ def single_step(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device,
     return np.array(days), np.array(vals), None, None
 
 
+def forecast(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device,
+             phase=None):
+    """En-Primeur forecast: seed with the FIRST real window (days 0..seq_len-1),
+    then predict every remaining day from the model's OWN previous prediction
+    (autoregressive, no teacher forcing). One trajectory, no band."""
+    seed = np.clip((sub_i[0:seq_len] - fmin) / scale, 0.0, 1.0)
+    tcol = (np.arange(0, seq_len, dtype=np.float32) / (N_DAYS - 1))[:, None]
+    seed = np.concatenate([seed, tcol], axis=1)
+    pr = rollout(model, seed, n_steps=N_DAYS - seq_len, device=device, doe=doe_i,
+                 cin=cin_i, is_decoder=True, phase=phase)
+    days = np.arange(seq_len, N_DAYS)
+    vals = pr[:, feat] * scale[feat] + fmin[feat]
+    return days, vals, None, None
+
+
 def ensemble(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device,
              phase=None):
     """Predict each future day from every seed window; return per-day mean/min/max."""
@@ -102,10 +117,11 @@ def main():
                     help='Holdout groups, each a space-joined index string. Default = full LORO.')
     ap.add_argument('--feature', type=int, default=2, help='0-7 (default 2=Titer)')
     ap.add_argument('--n-extra', type=int, default=3000)
-    ap.add_argument('--rollout', action='store_true',
-                    help='Autoregressive forecast with the min/max band (en-Primeur). '
-                         'Default is single-step (Kimberly window model): one prediction '
-                         'per day from the real previous window, no band.')
+    ap.add_argument('--single-step', action='store_true',
+                    help='Teacher-forced: predict each day from the REAL previous window '
+                         '(one-day-ahead accuracy, not a forecast)')
+    ap.add_argument('--band', action='store_true',
+                    help='Ensemble of all windows with the min/max band')
     args = ap.parse_args()
 
     feat = args.feature
@@ -131,7 +147,7 @@ def main():
         doep = data['doe_params'].astype(np.float32)
         seq_len = int(data['seq_len']) if 'seq_len' in data else SEQ_LEN
         dsc = dmax - dmin; dsc[dsc == 0] = 1.0
-        predict = ensemble if args.rollout else single_step
+        predict = single_step if args.single_step else (ensemble if args.band else forecast)
         for i in fold:
             preds[i] = predict(model, sub[i], cinp[i], (doep[i] - dmin) / dsc,
                                fmin, scale, feat, seq_len, device)

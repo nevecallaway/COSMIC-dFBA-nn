@@ -29,7 +29,7 @@ import torch
 
 from model import FEATURE_INDICES, N_DAYS, SEQ_LEN
 from real_data import denormalize_data2, REACTOR_IDS
-from plot_loro import run, load_model, ensemble, single_step
+from plot_loro import run, load_model, ensemble, single_step, forecast
 
 
 def main():
@@ -40,10 +40,11 @@ def main():
     ap.add_argument('--seq-len', type=int, default=SEQ_LEN,
                     help='Input window length in days (default 6)')
     ap.add_argument('--epochs', type=int, default=300)
-    ap.add_argument('--rollout', action='store_true',
-                    help='Autoregressive rollout with the min/max band (en-Primeur '
-                         'forecast). Default is single-step (Kimberly window model): one '
-                         'teacher-forced prediction per day, no band.')
+    ap.add_argument('--single-step', action='store_true',
+                    help='Teacher-forced: predict each day from the REAL previous window '
+                         '(one-day-ahead accuracy, not a forecast)')
+    ap.add_argument('--band', action='store_true',
+                    help='Ensemble of all windows with the min/max band')
     ap.add_argument('--phase', action='store_true',
                     help='Phase-driven titer washout (eta = f(t)) instead of the day-8 switch')
     ap.add_argument('--phase-threshold', type=float, default=None,
@@ -77,7 +78,7 @@ def main():
     real_sub = real[:, :, FEATURE_INDICES].astype(np.float32)          # (10, N_DAYS, 8)
     ode_sub  = ode_traj[:, :, FEATURE_INDICES].astype(np.float32)      # synthetic ref
 
-    predict = ensemble if args.rollout else single_step
+    predict = single_step if args.single_step else (ensemble if args.band else forecast)
     preds = {}
     for i in range(n_original):
         pt = here / f'loro_real_{i}.pt'
