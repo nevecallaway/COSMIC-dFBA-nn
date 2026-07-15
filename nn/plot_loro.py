@@ -102,9 +102,10 @@ def main():
                     help='Holdout groups, each a space-joined index string. Default = full LORO.')
     ap.add_argument('--feature', type=int, default=2, help='0-7 (default 2=Titer)')
     ap.add_argument('--n-extra', type=int, default=3000)
-    ap.add_argument('--single-step', action='store_true',
-                    help='Predict each day from the REAL previous window (one point per '
-                         'day, no rollout, no band) instead of autoregressive forecast')
+    ap.add_argument('--rollout', action='store_true',
+                    help='Autoregressive forecast with the min/max band (en-Primeur). '
+                         'Default is single-step (Kimberly window model): one prediction '
+                         'per day from the real previous window, no band.')
     args = ap.parse_args()
 
     feat = args.feature
@@ -130,7 +131,7 @@ def main():
         doep = data['doe_params'].astype(np.float32)
         seq_len = int(data['seq_len']) if 'seq_len' in data else SEQ_LEN
         dsc = dmax - dmin; dsc[dsc == 0] = 1.0
-        predict = single_step if args.single_step else ensemble
+        predict = ensemble if args.rollout else single_step
         for i in fold:
             preds[i] = predict(model, sub[i], cinp[i], (doep[i] - dmin) / dsc,
                                fmin, scale, feat, seq_len, device)

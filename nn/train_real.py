@@ -64,6 +64,8 @@ def main():
     ap.add_argument('--phase', action='store_true',
                     help='Phase-driven titer washout: eta = production fraction f(t) per '
                          'reactor/day (from data_2 phases) instead of the day-8 switch')
+    ap.add_argument('--phase-threshold', type=float, default=None,
+                    help='With --phase, step eta = 1 once f crosses this value (per reactor)')
     args = ap.parse_args()
 
     if args.stripped:
@@ -88,6 +90,8 @@ def main():
 
     # Phase-driven eta uses the real per-reactor production fraction f(t).
     phase_traj = npz['phases'].astype(np.float32)[:n_original] if args.phase else None
+    if phase_traj is not None and args.phase_threshold is not None:
+        phase_traj = (phase_traj > args.phase_threshold).astype(np.float32)
     windows, targets, wdoe, wcin, weta, ridx = build_windows(
         real, doe_params=doe_params[:n_original], cin_params=cin_params[:n_original],
         phase_traj=phase_traj)

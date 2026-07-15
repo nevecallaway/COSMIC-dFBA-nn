@@ -325,7 +325,7 @@ def _analytic_step(C, v_net, cin, eta_titer, F=F):
 
 
 def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe, fast=False,
-                     phase=False):
+                     phase=False, phase_threshold=None):
     """
     Integrate the ODE interval by interval (1 day each) per Sarat's specification.
 
@@ -352,10 +352,14 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe, fast=False,
         f       = pm_by_day.get(d + 1, f_fallback)
         v_net   = (1.0 - f) * v_growth + f * v_prod
 
-        # Titer eta: phase-driven (washout ramps with the production fraction f)
-        # when phase=True, else the blanket day-8 switch (0 retained before day 8,
-        # 1 washed out after).
-        eta_titer = f if phase else (0.0 if d < ETA_SWITCH_DAY else 1.0)
+        # Titer eta. Phase-driven when phase=True: eta = f (continuous washout) or,
+        # with a threshold, a per-reactor step eta = 1 once f crosses it (full
+        # washout, but starting at each reactor's own production onset). Otherwise
+        # the blanket day-8 switch (0 retained before day 8, 1 washed out after).
+        if phase:
+            eta_titer = float(f > phase_threshold) if phase_threshold is not None else f
+        else:
+            eta_titer = 0.0 if d < ETA_SWITCH_DAY else 1.0
 
         if fast:
             # Exact closed-form step (same math as solve_ivp, no integration).
@@ -463,7 +467,7 @@ def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LE
 
 def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
                    seed=0, sample_rates=False, rate_mix=0.0, rate_scale=1.0,
-                   extend_prod=0.0, fast=False, phase=False):
+                   extend_prod=0.0, fast=False, phase=False, phase_threshold=None):
     """
     Generate n_extra additional synthetic reactors with randomly sampled DoE.
 
@@ -568,6 +572,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
             doe,
             fast=fast,
             phase=phase,
+            phase_threshold=phase_threshold,
         )
 
         # Reject trajectories with negative concentrations or NaN
@@ -599,7 +604,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 def generate_all(data_dir=None, output_file=None, n_extra=50,
                  sample_rates=False, rate_mix=0.0, rate_scale=1.0,
                  seq_len=SEQ_LEN, holdout=None, extend_prod=0.0, fast=False,
-                 phase=False):
+                 phase=False, phase_threshold=None):
     """
     Generate unnormalized trajectories for all 10 reactors plus n_extra
     synthetic reactors with randomly sampled DoE conditions.
@@ -664,6 +669,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
             doe,
             fast=fast,
             phase=phase,
+            phase_threshold=phase_threshold,
         )
 
         pm_vals = np.array([pm_days.get(int(t), list(pm_days.values())[-1])
@@ -701,7 +707,8 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         extra_trajs, extra_doe, extra_cin = generate_extra(
             n_extra, rates_growth, rates_prod, donor_ids, pm_dict, doe_dict,
             sample_rates=sample_rates, rate_mix=rate_mix, rate_scale=rate_scale,
-            extend_prod=extend_prod, fast=fast, phase=phase)
+            extend_prod=extend_prod, fast=fast, phase=phase,
+            phase_threshold=phase_threshold)
         # Dummy phases for extras: repeat last phase value from first reactor
         extra_phases = np.tile(phases_out[0], (n_extra, 1))
         trajectories = np.concatenate([trajectories, extra_trajs], axis=0)
@@ -716,6 +723,8 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
 
     print('\nBuilding sliding windows (extra reactors only; originals reserved for eval)...')
     phase_traj = phases_out[n_original:] if phase else None
+    if phase_traj is not None and phase_threshold is not None:
+        phase_traj = (phase_traj > phase_threshold).astype(np.float32)
     windows, targets, window_doe, window_cin, window_eta, reactor_idx = build_windows(
         trajectories[n_original:], doe_params=doe_params[n_original:],
         cin_params=cin_params[n_original:], seq_len=seq_len, phase_traj=phase_traj)
@@ -866,13 +875,17 @@ if __name__ == '__main__':
     parser.add_argument('--phase', action='store_true',
                         help='Phase-driven titer washout: eta = production fraction f(t) '
                              'per reactor/day, instead of the blanket day-8 switch')
+    parser.add_argument('--phase-threshold', type=float, default=None,
+                        help='With --phase, use a per-reactor step eta = 1 once f crosses '
+                             'this value (e.g. 0.5), instead of continuous eta = f')
     args = parser.parse_args()
 
     trajs, times, phases, doe_params, component_names = generate_all(
         n_extra=args.n_extra, sample_rates=args.sample_rates,
         rate_mix=args.rate_mix, rate_scale=args.rate_scale,
         seq_len=args.seq_len, holdout=args.holdout, output_file=args.output,
-        extend_prod=args.extend_prod, fast=args.fast, phase=args.phase)
+        extend_prod=args.extend_prod, fast=args.fast, phase=args.phase,
+        phase_threshold=args.phase_threshold)
     reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
                    'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
     plot_comparison(trajs[:10], reactor_ids, component_names)

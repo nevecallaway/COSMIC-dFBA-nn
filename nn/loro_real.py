@@ -38,10 +38,14 @@ def main():
     ap.add_argument('--feature', type=int, default=2, help='0-7 (default 2=Titer)')
     ap.add_argument('--hidden', type=int, default=16, help='stripped body width')
     ap.add_argument('--epochs', type=int, default=300)
-    ap.add_argument('--single-step', action='store_true',
-                    help='Predict each day from the REAL previous window (no band)')
+    ap.add_argument('--rollout', action='store_true',
+                    help='Autoregressive rollout with the min/max band (en-Primeur '
+                         'forecast). Default is single-step (Kimberly window model): one '
+                         'teacher-forced prediction per day, no band.')
     ap.add_argument('--phase', action='store_true',
                     help='Phase-driven titer washout (eta = f(t)) instead of the day-8 switch')
+    ap.add_argument('--phase-threshold', type=float, default=None,
+                    help='With --phase, step eta = 1 once f crosses this value (e.g. 0.5)')
     args = ap.parse_args()
 
     feat = args.feature
@@ -54,6 +58,8 @@ def main():
                '--output', npz_path, '--fast']
     if args.phase:
         gen_cmd.append('--phase')
+        if args.phase_threshold is not None:
+            gen_cmd += ['--phase-threshold', args.phase_threshold]
     run(gen_cmd)
     data = np.load(npz_path, allow_pickle=True)
     ode_traj   = data['trajectories'].astype(np.float32)
@@ -61,13 +67,15 @@ def main():
     doe_params = data['doe_params'].astype(np.float32)
     phases     = data['phases'].astype(np.float32)
     n_original = int(data['n_original'])
+    if args.phase and args.phase_threshold is not None:
+        phases = (phases > args.phase_threshold).astype(np.float32)
 
     # Real (denormalized data_2) trajectories = the seeds and the ground truth.
     real = denormalize_data2(here / 'data' / 'data_2.csv', ode_traj, n_original)
     real_sub = real[:, :, FEATURE_INDICES].astype(np.float32)          # (10, N_DAYS, 8)
     ode_sub  = ode_traj[:, :, FEATURE_INDICES].astype(np.float32)      # synthetic ref
 
-    predict = single_step if args.single_step else ensemble
+    predict = ensemble if args.rollout else single_step
     preds = {}
     for i in range(n_original):
         pt = here / f'loro_real_{i}.pt'
@@ -76,6 +84,8 @@ def main():
                   '--hidden', args.hidden, '--epochs', args.epochs]
         if args.phase:
             tr_cmd.append('--phase')
+            if args.phase_threshold is not None:
+                tr_cmd += ['--phase-threshold', args.phase_threshold]
         run(tr_cmd)
         model, fmin, scale, dmin, dmax = load_model(pt, device)
         dsc = dmax - dmin; dsc[dsc == 0] = 1.0
