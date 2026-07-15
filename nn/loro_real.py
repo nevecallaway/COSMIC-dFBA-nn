@@ -40,6 +40,8 @@ def main():
     ap.add_argument('--epochs', type=int, default=300)
     ap.add_argument('--single-step', action='store_true',
                     help='Predict each day from the REAL previous window (no band)')
+    ap.add_argument('--phase', action='store_true',
+                    help='Phase-driven titer washout (eta = f(t)) instead of the day-8 switch')
     args = ap.parse_args()
 
     feat = args.feature
@@ -48,12 +50,16 @@ def main():
 
     # ODE npz once: physical scale + DoE + feed for train_real (no extras needed).
     npz_path = here / 'loro_real.npz'
-    run([py, here / 'generate_synthetic_ode.py', '--n-extra', 0,
-         '--output', npz_path, '--fast'])
+    gen_cmd = [py, here / 'generate_synthetic_ode.py', '--n-extra', 0,
+               '--output', npz_path, '--fast']
+    if args.phase:
+        gen_cmd.append('--phase')
+    run(gen_cmd)
     data = np.load(npz_path, allow_pickle=True)
     ode_traj   = data['trajectories'].astype(np.float32)
     cin_params = data['cin_params'].astype(np.float32)
     doe_params = data['doe_params'].astype(np.float32)
+    phases     = data['phases'].astype(np.float32)
     n_original = int(data['n_original'])
 
     # Real (denormalized data_2) trajectories = the seeds and the ground truth.
@@ -65,14 +71,18 @@ def main():
     preds = {}
     for i in range(n_original):
         pt = here / f'loro_real_{i}.pt'
-        run([py, here / 'train_real.py', '--stripped', '--holdout', i,
-             '--ode-data', npz_path, '--output', pt,
-             '--hidden', args.hidden, '--epochs', args.epochs])
+        tr_cmd = [py, here / 'train_real.py', '--stripped', '--holdout', i,
+                  '--ode-data', npz_path, '--output', pt,
+                  '--hidden', args.hidden, '--epochs', args.epochs]
+        if args.phase:
+            tr_cmd.append('--phase')
+        run(tr_cmd)
         model, fmin, scale, dmin, dmax = load_model(pt, device)
         dsc = dmax - dmin; dsc[dsc == 0] = 1.0
         preds[i] = predict(model, real_sub[i], cin_params[i],
                            (doe_params[i] - dmin) / dsc,
-                           fmin, scale, feat, SEQ_LEN, device)
+                           fmin, scale, feat, SEQ_LEN, device,
+                           phase=phases[i] if args.phase else None)
 
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()

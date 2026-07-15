@@ -29,7 +29,8 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 
-from model_primeur import FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN, N_SUBSTEPS
+from model_primeur import (FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN,
+                           N_SUBSTEPS, N_DAYS)
 
 BATCH_SIZE   = 8
 LR           = 1e-3
@@ -43,12 +44,13 @@ FEATURE_NAMES = ['CellDensity', 'CellSize', 'Titer', 'Glucose',
 
 
 class FluxWindowDataset(Dataset):
-    """Windows + DoE + physical feed (cin) + targets."""
+    """Windows + DoE + physical feed (cin) + per-window titer eta + targets."""
 
-    def __init__(self, windows, doe, cin, targets):
+    def __init__(self, windows, doe, cin, eta, targets):
         self.windows = windows.astype(np.float32)
         self.doe     = doe.astype(np.float32)
         self.cin     = cin.astype(np.float32)
+        self.eta     = eta.astype(np.float32).reshape(-1, 1)
         self.targets = targets.astype(np.float32)
 
     def __len__(self):
@@ -58,6 +60,7 @@ class FluxWindowDataset(Dataset):
         return (torch.from_numpy(self.windows[i]),
                 torch.from_numpy(self.doe[i]),
                 torch.from_numpy(self.cin[i]),
+                torch.from_numpy(self.eta[i]),
                 torch.from_numpy(self.targets[i]))
 
 
@@ -88,6 +91,12 @@ def main():
                          'the updated generate_synthetic_ode.py (cin plumbing).')
     window_cin = npz['window_cin'].astype(np.float32)   # (n, N_FEATURES) physical feed
     seq_len = int(npz['seq_len']) if 'seq_len' in npz else SEQ_LEN
+    if 'window_eta' in npz:
+        window_eta = npz['window_eta'].astype(np.float32)
+    else:
+        # Old npz (pre-eta): reconstruct the day-8 eta from each window's last day.
+        last_day = np.round(windows[:, -1, N_FEATURES] * (N_DAYS - 1))
+        window_eta = (last_day >= 8).astype(np.float32)
 
     doe_min   = npz['doe_min'].astype(np.float32)
     doe_max   = npz['doe_max'].astype(np.float32)
@@ -126,9 +135,9 @@ def main():
 
     # cin stays in PHYSICAL units; the model un-normalizes internally.
     train_ds = FluxWindowDataset(windows_tr, window_doe[train_mask],
-                                 window_cin[train_mask], targets_tr)
+                                 window_cin[train_mask], window_eta[train_mask], targets_tr)
     val_ds   = FluxWindowDataset(windows_vl, window_doe[val_mask],
-                                 window_cin[val_mask], targets_vl)
+                                 window_cin[val_mask], window_eta[val_mask], targets_vl)
     n_train, n_val = len(train_ds), len(val_ds)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True)
@@ -176,10 +185,11 @@ def main():
         model.train()
         train_loss = 0.0
         feat_mse = np.zeros(N_FEATURES)
-        for x, d, cin, y in train_loader:
-            x, d, cin, y = x.to(device), d.to(device), cin.to(device), y.to(device)
+        for x, d, cin, eta, y in train_loader:
+            x, d, cin, eta, y = (x.to(device), d.to(device), cin.to(device),
+                                 eta.to(device), y.to(device))
             optimizer.zero_grad()
-            pred, _ = model(x, d, cin)
+            pred, _ = model(x, d, cin, eta_ext=eta)
             loss = criterion(pred, y)
             loss.backward()
             optimizer.step()
@@ -192,9 +202,10 @@ def main():
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for x, d, cin, y in val_loader:
-                x, d, cin, y = x.to(device), d.to(device), cin.to(device), y.to(device)
-                pred, _ = model(x, d, cin)
+            for x, d, cin, eta, y in val_loader:
+                x, d, cin, eta, y = (x.to(device), d.to(device), cin.to(device),
+                                     eta.to(device), y.to(device))
+                pred, _ = model(x, d, cin, eta_ext=eta)
                 val_loss += criterion(pred, y).item() * len(x)
         val_loss /= n_val
 

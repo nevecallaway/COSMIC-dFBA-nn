@@ -61,6 +61,9 @@ def main():
     ap.add_argument('--stripped', action='store_true',
                     help='Use the low-capacity model_stripped decoder (1 conv layer, '
                          'linear head) instead of the full en Primeur body')
+    ap.add_argument('--phase', action='store_true',
+                    help='Phase-driven titer washout: eta = production fraction f(t) per '
+                         'reactor/day (from data_2 phases) instead of the day-8 switch')
     args = ap.parse_args()
 
     if args.stripped:
@@ -83,14 +86,18 @@ def main():
     real = denormalize_data2(here / 'data' / 'data_2.csv', ode_traj, n_original)
     print(f'Denormalized {n_original} real reactors from data_2 (ODE-scaled).')
 
-    windows, targets, wdoe, wcin, ridx = build_windows(
-        real, doe_params=doe_params[:n_original], cin_params=cin_params[:n_original])
+    # Phase-driven eta uses the real per-reactor production fraction f(t).
+    phase_traj = npz['phases'].astype(np.float32)[:n_original] if args.phase else None
+    windows, targets, wdoe, wcin, weta, ridx = build_windows(
+        real, doe_params=doe_params[:n_original], cin_params=cin_params[:n_original],
+        phase_traj=phase_traj)
 
     hold = set(args.holdout)
     keep = np.array([r not in hold for r in ridx])
     print(f'Training on real reactors {[i for i in range(n_original) if i not in hold]}; '
           f'holding out {sorted(hold)}')
-    windows, targets, wdoe, wcin = windows[keep], targets[keep], wdoe[keep], wcin[keep]
+    windows, targets, wdoe, wcin, weta = (windows[keep], targets[keep], wdoe[keep],
+                                          wcin[keep], weta[keep])
 
     win_feats, win_time = windows[:, :, :N_FEATURES], windows[:, :, N_FEATURES:]
 
@@ -108,7 +115,7 @@ def main():
     doe_scale = doe_max - doe_min; doe_scale[doe_scale == 0] = 1.0
     wdoe_n = ((wdoe - doe_min) / doe_scale).astype(np.float32)
 
-    ds = FluxWindowDataset(windows_n, wdoe_n, wcin, targets_n)
+    ds = FluxWindowDataset(windows_n, wdoe_n, wcin, weta, targets_n)
     loader = DataLoader(ds, batch_size=args.batch, shuffle=True)
     print(f'Real training windows: {len(ds)}')
 
@@ -138,10 +145,11 @@ def main():
     for epoch in range(1, args.epochs + 1):
         model.train()
         tot = 0.0
-        for x, d, cin, y in loader:
-            x, d, cin, y = x.to(device), d.to(device), cin.to(device), y.to(device)
+        for x, d, cin, eta, y in loader:
+            x, d, cin, eta, y = (x.to(device), d.to(device), cin.to(device),
+                                 eta.to(device), y.to(device))
             opt.zero_grad()
-            pred, _ = model(x, d, cin)
+            pred, _ = model(x, d, cin, eta_ext=eta)
             loss = ((pred - y) ** 2).mean()
             loss.backward()
             opt.step()
@@ -155,6 +163,7 @@ def main():
         'n_features': N_FEATURES, 'n_input_features': N_INPUT_FEATURES,
         'seq_len': SEQ_LEN, 'n_doe': n_doe, 'n_substeps': args.substeps,
         'arch': 'stripped' if args.stripped else 'primeur',
+        'phase': args.phase,
     }, args.output)
     print(f'Saved to {args.output}')
     print(f'Evaluate held-out: python evaluate.py --model {Path(args.output).name} '

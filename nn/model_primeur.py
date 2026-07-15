@@ -210,18 +210,23 @@ class FluxDecoder(nn.Module):
             context = torch.cat([context, doe], dim=-1)
         return self.head(context)                            # (B, n_features)
 
-    def forward(self, x, doe, cin_phys):
+    def forward(self, x, doe, cin_phys, eta_ext=None):
         v = self.predict_flux(x, doe)
 
         # Current physical state = last day of the window, un-normalized.
         C_last_norm = x[:, -1, :self.n_features]
         C_phys = C_last_norm * self.feat_scale + self.feat_min
 
-        # Titer eta: the step advances from the window's last day t to t+1.
-        # Reconstruct t from the time column (t = time * (N_DAYS-1)); eta = 0 while
-        # t < day 8 (titer retained/accumulating), 1 after (harvested/washed out).
-        day = torch.round(x[:, -1, self.n_features] * (N_DAYS - 1))
-        eta_titer = (day >= ETA_SWITCH_DAY).float().unsqueeze(1)   # (B,1)
+        # Titer eta (removal fraction). If eta_ext is given (phase-driven washout,
+        # --phase), use it directly: (B,1) tensor in training, scalar in rollout.
+        # Otherwise fall back to the blanket day-8 switch, reconstructing the
+        # window's last day t from the time column (eta = 0 while t < day 8,
+        # titer retained/accumulating; 1 after, harvested/washed out).
+        if eta_ext is not None:
+            eta_titer = eta_ext
+        else:
+            day = torch.round(x[:, -1, self.n_features] * (N_DAYS - 1))
+            eta_titer = (day >= ETA_SWITCH_DAY).float().unsqueeze(1)   # (B,1)
 
         if self.integrator == 'closed':
             C_next_phys = closed_form_step(C_phys, v, cin_phys, eta_titer=eta_titer)

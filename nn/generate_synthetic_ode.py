@@ -324,7 +324,8 @@ def _analytic_step(C, v_net, cin, eta_titer, F=F):
     return C_next
 
 
-def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe, fast=False):
+def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe, fast=False,
+                     phase=False):
     """
     Integrate the ODE interval by interval (1 day each) per Sarat's specification.
 
@@ -351,8 +352,10 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe, fast=False):
         f       = pm_by_day.get(d + 1, f_fallback)
         v_net   = (1.0 - f) * v_growth + f * v_prod
 
-        # Titer eta: 0 (retained, accumulating) for intervals before day 8, 1 after.
-        eta_titer = 0.0 if d < ETA_SWITCH_DAY else 1.0
+        # Titer eta: phase-driven (washout ramps with the production fraction f)
+        # when phase=True, else the blanket day-8 switch (0 retained before day 8,
+        # 1 washed out after).
+        eta_titer = f if phase else (0.0 if d < ETA_SWITCH_DAY else 1.0)
 
         if fast:
             # Exact closed-form step (same math as solve_ivp, no integration).
@@ -390,7 +393,8 @@ def generate_reactor(reactor_id, v_growth, v_prod, pm_by_day, doe, fast=False):
 # Window building
 # ---------------------------------------------------------------------------
 
-def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LEN):
+def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LEN,
+                  phase_traj=None):
     """
     Build sliding windows from trajectories for next-day prediction.
 
@@ -418,17 +422,27 @@ def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LE
     N, T, _ = sub.shape
     n_days_total = T  # should be N_DAYS = 13
 
-    windows, targets, window_doe, window_cin, reactor_indices = [], [], [], [], []
+    windows, targets, window_doe, window_cin, window_eta, reactor_indices = \
+        [], [], [], [], [], []
     for i in range(N):
         for d in range(T - seq_len):
+            target = d + seq_len
             feats = sub[i, d : d + seq_len, :]
             time_col = (np.arange(d, d + seq_len, dtype=np.float32) / (n_days_total - 1))[:, None]
             windows.append(np.concatenate([feats, time_col], axis=1))
-            targets.append(sub[i, d + seq_len, :])
+            targets.append(sub[i, target, :])
             if doe_params is not None:
                 window_doe.append(doe_params[i])
             if cin_params is not None:
                 window_cin.append(cin_params[i])
+            # Per-window titer eta for the step (target-1) -> target. Phase-driven
+            # (phase fraction at the target day) if phase_traj given, else the
+            # blanket day-8 switch, indexed by the source day (target-1) to match
+            # the forward pass and generate_reactor's day-8 rule.
+            if phase_traj is not None:
+                window_eta.append(float(phase_traj[i, target]))
+            else:
+                window_eta.append(float((target - 1) >= ETA_SWITCH_DAY))
             reactor_indices.append(i)
 
     doe_arr = np.array(window_doe, dtype=np.float32) if window_doe else None
@@ -439,6 +453,7 @@ def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LE
         np.array(targets, dtype=np.float32),
         doe_arr,
         cin_arr,
+        np.array(window_eta, dtype=np.float32),
         np.array(reactor_indices, dtype=np.int32),
     )
 
@@ -448,7 +463,7 @@ def build_windows(trajectories, doe_params=None, cin_params=None, seq_len=SEQ_LE
 
 def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_dict,
                    seed=0, sample_rates=False, rate_mix=0.0, rate_scale=1.0,
-                   extend_prod=0.0, fast=False):
+                   extend_prod=0.0, fast=False, phase=False):
     """
     Generate n_extra additional synthetic reactors with randomly sampled DoE.
 
@@ -552,6 +567,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
             pm_dict[donor],
             doe,
             fast=fast,
+            phase=phase,
         )
 
         # Reject trajectories with negative concentrations or NaN
@@ -582,7 +598,8 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
 def generate_all(data_dir=None, output_file=None, n_extra=50,
                  sample_rates=False, rate_mix=0.0, rate_scale=1.0,
-                 seq_len=SEQ_LEN, holdout=None, extend_prod=0.0, fast=False):
+                 seq_len=SEQ_LEN, holdout=None, extend_prod=0.0, fast=False,
+                 phase=False):
     """
     Generate unnormalized trajectories for all 10 reactors plus n_extra
     synthetic reactors with randomly sampled DoE conditions.
@@ -646,6 +663,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
             pm_days,
             doe,
             fast=fast,
+            phase=phase,
         )
 
         pm_vals = np.array([pm_days.get(int(t), list(pm_days.values())[-1])
@@ -683,7 +701,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         extra_trajs, extra_doe, extra_cin = generate_extra(
             n_extra, rates_growth, rates_prod, donor_ids, pm_dict, doe_dict,
             sample_rates=sample_rates, rate_mix=rate_mix, rate_scale=rate_scale,
-            extend_prod=extend_prod, fast=fast)
+            extend_prod=extend_prod, fast=fast, phase=phase)
         # Dummy phases for extras: repeat last phase value from first reactor
         extra_phases = np.tile(phases_out[0], (n_extra, 1))
         trajectories = np.concatenate([trajectories, extra_trajs], axis=0)
@@ -697,9 +715,10 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
     times_out = np.tile(T_EVAL, (len(trajectories), 1))
 
     print('\nBuilding sliding windows (extra reactors only; originals reserved for eval)...')
-    windows, targets, window_doe, window_cin, reactor_idx = build_windows(
+    phase_traj = phases_out[n_original:] if phase else None
+    windows, targets, window_doe, window_cin, window_eta, reactor_idx = build_windows(
         trajectories[n_original:], doe_params=doe_params[n_original:],
-        cin_params=cin_params[n_original:], seq_len=seq_len)
+        cin_params=cin_params[n_original:], seq_len=seq_len, phase_traj=phase_traj)
     print(f'  {len(windows)} windows  '
           f'({len(trajectories) - n_original} extra reactors x {N_DAYS - seq_len} windows each)')
 
@@ -725,6 +744,7 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
         targets=targets,
         window_doe=window_doe,
         window_cin=window_cin,
+        window_eta=window_eta,
         window_reactor_idx=reactor_idx,
         n_original=np.array(n_original),
         seq_len=np.array(seq_len),
@@ -843,13 +863,16 @@ if __name__ == '__main__':
     parser.add_argument('--fast', action='store_true',
                         help='Use the exact closed-form ODE step instead of solve_ivp '
                              '(much faster; valid only for the current linear equations)')
+    parser.add_argument('--phase', action='store_true',
+                        help='Phase-driven titer washout: eta = production fraction f(t) '
+                             'per reactor/day, instead of the blanket day-8 switch')
     args = parser.parse_args()
 
     trajs, times, phases, doe_params, component_names = generate_all(
         n_extra=args.n_extra, sample_rates=args.sample_rates,
         rate_mix=args.rate_mix, rate_scale=args.rate_scale,
         seq_len=args.seq_len, holdout=args.holdout, output_file=args.output,
-        extend_prod=args.extend_prod, fast=args.fast)
+        extend_prod=args.extend_prod, fast=args.fast, phase=args.phase)
     reactor_ids = ['R0001', 'R0002', 'R0003', 'R0004', 'R0005',
                    'R0006', 'R0008', 'R0010', 'R0011', 'R0012']
     plot_comparison(trajs[:10], reactor_ids, component_names)

@@ -60,7 +60,7 @@ FEATURE_NAMES_SHORT = [
 
 
 def rollout(model, seed_norm, n_steps, device, doe=None, reactor_id=None,
-            log_negatives=False, cin=None, is_decoder=False):
+            log_negatives=False, cin=None, is_decoder=False, phase=None):
     """
     Autoregressive rollout. Returns normalized predictions.
 
@@ -88,7 +88,12 @@ def rollout(model, seed_norm, n_steps, device, doe=None, reactor_id=None,
         for step in range(n_steps):
             x         = torch.from_numpy(window).unsqueeze(0).float().to(device)
             if is_decoder:
-                out, _    = model(x, doe_t, cin_t)
+                # Phase-driven eta: f at the target day (window last day + 1).
+                eta_ext = None
+                if phase is not None:
+                    target_day = int(round(window[-1, N_FEATURES] * (N_DAYS - 1))) + 1
+                    eta_ext = float(phase[min(target_day, len(phase) - 1)])
+                out, _    = model(x, doe_t, cin_t, eta_ext=eta_ext)
                 pred_norm = out.squeeze(0).cpu().numpy()
             else:
                 pred_norm = model(x, doe_t).squeeze(0).cpu().numpy()   # (N_FEATURES,)

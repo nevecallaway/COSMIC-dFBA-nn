@@ -56,7 +56,8 @@ def load_model(path, device):
     return m, sc.data_min_.astype(np.float32), scale, ck['doe_min'], ck['doe_max']
 
 
-def single_step(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device):
+def single_step(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device,
+                phase=None):
     """One prediction per day from the REAL previous seq_len days (teacher-forced,
     no rollout). Returns (days, values, None, None) -- no band."""
     days, vals = [], []
@@ -65,13 +66,14 @@ def single_step(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device):
         tcol = (np.arange(d - seq_len, d, dtype=np.float32) / (N_DAYS - 1))[:, None]
         seed = np.concatenate([seed, tcol], axis=1)
         pr = rollout(model, seed, n_steps=1, device=device, doe=doe_i,
-                     cin=cin_i, is_decoder=True)
+                     cin=cin_i, is_decoder=True, phase=phase)
         vals.append(pr[0, feat] * scale[feat] + fmin[feat])
         days.append(d)
     return np.array(days), np.array(vals), None, None
 
 
-def ensemble(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device):
+def ensemble(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device,
+             phase=None):
     """Predict each future day from every seed window; return per-day mean/min/max."""
     per_day = defaultdict(list)
     for s in range(0, N_DAYS - seq_len):
@@ -82,7 +84,7 @@ def ensemble(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device):
         if ns <= 0:
             continue
         pr = rollout(model, seed, n_steps=ns, device=device, doe=doe_i,
-                     cin=cin_i, is_decoder=True)
+                     cin=cin_i, is_decoder=True, phase=phase)
         pp = pr[:, feat] * scale[feat] + fmin[feat]
         for k in range(ns):
             per_day[s + seq_len + k].append(pp[k])
