@@ -703,8 +703,11 @@ def generate_all(data_dir=None, output_file=None, n_extra=50,
     print(f'  {len(windows)} windows  '
           f'({len(trajectories) - n_original} extra reactors x {N_DAYS - seq_len} windows each)')
 
-    doe_min = doe_params[n_original:].min(axis=0)
-    doe_max = doe_params[n_original:].max(axis=0)
+    # DoE normalization bounds: from the extras when present, else the originals
+    # (n_extra=0 real-only runs, e.g. loro_real.py).
+    doe_bounds_src = doe_params[n_original:] if len(doe_params) > n_original else doe_params
+    doe_min = doe_bounds_src.min(axis=0)
+    doe_max = doe_bounds_src.max(axis=0)
 
     np.savez(
         output_file,
