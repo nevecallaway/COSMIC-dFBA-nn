@@ -55,6 +55,8 @@ def main():
     ap.add_argument('--hidden', type=int,   default=32)   # small: few real windows
     ap.add_argument('--weight-decay', type=float, default=1e-4)
     ap.add_argument('--substeps', type=int, default=50)
+    ap.add_argument('--seq-len', type=int, default=SEQ_LEN,
+                    help='Input window length (days) for flux prediction (default 6)')
     ap.add_argument('--freeze-conv', action='store_true',
                     help='Freeze the conv feature-extractor; fine-tune only attention + head '
                          '(prevents overfitting the few real windows, for transfer)')
@@ -94,7 +96,7 @@ def main():
         phase_traj = (phase_traj > args.phase_threshold).astype(np.float32)
     windows, targets, wdoe, wcin, weta, ridx = build_windows(
         real, doe_params=doe_params[:n_original], cin_params=cin_params[:n_original],
-        phase_traj=phase_traj)
+        phase_traj=phase_traj, seq_len=args.seq_len)
 
     hold = set(args.holdout)
     keep = np.array([r not in hold for r in ridx])
@@ -165,7 +167,7 @@ def main():
         'model_state': model.state_dict(), 'scaler': scaler,
         'doe_min': doe_min, 'doe_max': doe_max, 'hidden': hidden,
         'n_features': N_FEATURES, 'n_input_features': N_INPUT_FEATURES,
-        'seq_len': SEQ_LEN, 'n_doe': n_doe, 'n_substeps': args.substeps,
+        'seq_len': args.seq_len, 'n_doe': n_doe, 'n_substeps': args.substeps,
         'arch': 'stripped' if args.stripped else 'primeur',
         'phase': args.phase,
     }, args.output)

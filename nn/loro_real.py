@@ -37,6 +37,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--feature', type=int, default=2, help='0-7 (default 2=Titer)')
     ap.add_argument('--hidden', type=int, default=16, help='stripped body width')
+    ap.add_argument('--seq-len', type=int, default=SEQ_LEN,
+                    help='Input window length in days (default 6)')
     ap.add_argument('--epochs', type=int, default=300)
     ap.add_argument('--rollout', action='store_true',
                     help='Autoregressive rollout with the min/max band (en-Primeur '
@@ -81,7 +83,8 @@ def main():
         pt = here / f'loro_real_{i}.pt'
         tr_cmd = [py, here / 'train_real.py', '--stripped', '--holdout', i,
                   '--ode-data', npz_path, '--output', pt,
-                  '--hidden', args.hidden, '--epochs', args.epochs]
+                  '--hidden', args.hidden, '--epochs', args.epochs,
+                  '--seq-len', args.seq_len]
         if args.phase:
             tr_cmd.append('--phase')
             if args.phase_threshold is not None:
@@ -91,7 +94,7 @@ def main():
         dsc = dmax - dmin; dsc[dsc == 0] = 1.0
         preds[i] = predict(model, real_sub[i], cin_params[i],
                            (doe_params[i] - dmin) / dsc,
-                           fmin, scale, feat, SEQ_LEN, device,
+                           fmin, scale, feat, args.seq_len, device,
                            phase=phases[i] if args.phase else None)
 
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
@@ -107,7 +110,7 @@ def main():
             ax.fill_between(d, lo / rmax, hi / rmax, color='red', alpha=0.2, lw=0)
         ax.plot(d, m / rmax, 'r--', lw=2, label='predicted (held-out stripped)')
         ax.plot(np.arange(N_DAYS), rtrace / rmax, 'k:', lw=1.8, label='real (data_2)')
-        ax.axvline(SEQ_LEN, color='gray', lw=0.6, ls=':')
+        ax.axvline(args.seq_len, color='gray', lw=0.6, ls=':')
         ax.set_title(REACTOR_IDS[i], fontsize=9); ax.set_ylim(-0.05, 1.6)
         if i == 0:
             ax.legend(fontsize=7)
