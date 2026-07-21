@@ -76,7 +76,16 @@ def main():
     parser.add_argument('--seed',    type=int,   default=42)
     parser.add_argument('--substeps', type=int,  default=N_SUBSTEPS)
     parser.add_argument('--sigma-warmup', type=int, default=SIGMA_WARMUP)
+    parser.add_argument('--stripped', action='store_true',
+                        help='Pretrain the low-capacity model_stripped decoder (for '
+                             'synthetic->real transfer of the stripped model)')
     args = parser.parse_args()
+
+    if args.stripped:
+        from model_stripped import FluxDecoder as ModelClass
+        print('Using stripped (low-capacity) decoder')
+    else:
+        ModelClass = FluxDecoder
 
     torch.manual_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -148,9 +157,9 @@ def main():
 
     # ----------------------------------------------------------------- model
     n_doe = window_doe.shape[1]
-    model = FluxDecoder(hidden=args.hidden, n_doe=n_doe,
-                        n_input_features=N_INPUT_FEATURES,
-                        n_substeps=args.substeps).to(device)
+    model = ModelClass(hidden=args.hidden, n_doe=n_doe,
+                       n_input_features=N_INPUT_FEATURES,
+                       n_substeps=args.substeps).to(device)
     model.set_scaler(scaler)
 
     # Heteroscedastic loss, all sigmas learnable after warmup (no frozen features)
@@ -230,6 +239,7 @@ def main():
                 'n_doe':            n_doe,
                 'n_substeps':       args.substeps,
                 'integrator':       model.integrator,
+                'arch':             'stripped' if args.stripped else 'primeur',
             }, args.output)
         else:
             patience_count += 1

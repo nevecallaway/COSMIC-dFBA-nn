@@ -505,7 +505,12 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
         p_mean, p_cov = p_matrix.mean(axis=0), np.cov(p_matrix, rowvar=False)
         g_cov = g_cov * rate_scale + np.eye(N_COMPONENTS) * 1e-8
         p_cov = p_cov * rate_scale + np.eye(N_COMPONENTS) * 1e-8
-        env_lo, env_hi = build_envelope_from_rates(rates_growth, rates_prod)
+        # Envelope from the DONOR reactors only (reactor_ids already excludes the
+        # held-out reactor), so a held-out reactor's rate range never influences
+        # which synthetic draws are accepted. Fully leakage-free.
+        rg_donor = {r: rates_growth[r] for r in reactor_ids}
+        rp_donor = {r: rates_prod[r]   for r in reactor_ids}
+        env_lo, env_hi = build_envelope_from_rates(rg_donor, rp_donor)
         print(f'  Rate sampling: scale={rate_scale}, mix={rate_mix}')
         print(f'  Physiological rate envelope active (data_3 bounds, +10% margin)')
 

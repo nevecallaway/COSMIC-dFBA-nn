@@ -15,8 +15,14 @@ Assembled plot per reactor:
     black = real (denormalized data_2), scaled to its own peak
 Red above 1.0 = the model over-predicts titer for that held-out reactor. No clamp.
 
+--pretrain adds a leakage-free synthetic prior: for each fold, generate synthetic
+with reactor i excluded from the donor pool, pretrain the stripped model on it,
+then fine-tune on the 9 real reactors. Tests whether the synthetic flux-range
+prior reins in the reactors that overshoot (Kimberly's suggestion).
+
 Usage:
-    python loro_real.py                 # full 10-fold, titer
+    python loro_real.py                 # full 10-fold forecast, real-only
+    python loro_real.py --pretrain      # synthetic-pretrained then fine-tuned
     python loro_real.py --single-step   # one point per day from the real window
 """
 
@@ -49,6 +55,12 @@ def main():
                     help='Phase-driven titer washout (eta = f(t)) instead of the day-8 switch')
     ap.add_argument('--phase-threshold', type=float, default=None,
                     help='With --phase, step eta = 1 once f crosses this value (e.g. 0.5)')
+    ap.add_argument('--pretrain', action='store_true',
+                    help='Pretrain the stripped model on synthetic (held-out reactor '
+                         'excluded from donors) before fine-tuning on the 9 real reactors. '
+                         'Tests whether a synthetic flux-range prior reins in the overshoots.')
+    ap.add_argument('--n-extra', type=int, default=3000,
+                    help='Synthetic reactors for the pretrain step (--pretrain only)')
     args = ap.parse_args()
 
     feat = args.feature
@@ -82,10 +94,31 @@ def main():
     preds = {}
     for i in range(n_original):
         pt = here / f'loro_real_{i}.pt'
+        ode_for_train = npz_path      # npz used for real trajectories + DoE scale
+        init_args = []
+        if args.pretrain:
+            # Leakage-free synthetic prior: generate with reactor i excluded from the
+            # donor pool, pretrain the stripped model, then fine-tune (--init) on real.
+            # Fine-tune uses the SAME npz so the DoE normalization is consistent.
+            pre_npz = here / f'loro_real_pre_{i}.npz'
+            pre_pt  = here / f'loro_real_pre_{i}.pt'
+            gen_i = [py, here / 'generate_synthetic_ode.py', '--holdout', i,
+                     '--n-extra', args.n_extra, '--output', pre_npz, '--fast',
+                     '--rate-mix', 0.2, '--rate-scale', 0.1]
+            if args.phase:
+                gen_i.append('--phase')
+                if args.phase_threshold is not None:
+                    gen_i += ['--phase-threshold', args.phase_threshold]
+            run(gen_i)
+            run([py, here / 'train_sample.py', '--stripped', '--data', pre_npz,
+                 '--output', pre_pt, '--hidden', args.hidden, '--batch', 256])
+            ode_for_train = pre_npz
+            init_args = ['--init', pre_pt]
+
         tr_cmd = [py, here / 'train_real.py', '--stripped', '--holdout', i,
-                  '--ode-data', npz_path, '--output', pt,
+                  '--ode-data', ode_for_train, '--output', pt,
                   '--hidden', args.hidden, '--epochs', args.epochs,
-                  '--seq-len', args.seq_len]
+                  '--seq-len', args.seq_len] + init_args
         if args.phase:
             tr_cmd.append('--phase')
             if args.phase_threshold is not None:
@@ -115,8 +148,10 @@ def main():
         ax.set_title(REACTOR_IDS[i], fontsize=9); ax.set_ylim(-0.05, 1.6)
         if i == 0:
             ax.legend(fontsize=7)
-    fig.suptitle('Titer, STRIPPED trained on REAL only (leakage-free): red = model '
-                 'that held that reactor out; red > 1 = overshoot vs real', y=1.02)
+    train_desc = ('synthetic-pretrained then fine-tuned on REAL'
+                  if args.pretrain else 'REAL only')
+    fig.suptitle(f'Titer, STRIPPED {train_desc} (leakage-free): red = model that held '
+                 f'that reactor out; red > 1 = overshoot vs real', y=1.02)
     fig.tight_layout()
     out = here / 'loro_real_Titer.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
