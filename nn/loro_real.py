@@ -131,6 +131,30 @@ def main():
                            fmin, scale, feat, args.seq_len, device,
                            phase=phases[i] if args.phase else None)
 
+    # ---- metrics on the forecast days (predicted vs real) ----
+    # shape = trajectory correlation (scale-free); magnitude = MAE and peak height,
+    # both normalized by the real peak (same scaling as the plot, so peak ratio > 1
+    # means overshoot). Absolute titer scale is a denorm guess, hence the normalization.
+    print(f'\n{"reactor":>8} | {"shape rho":>9} {"norm MAE":>9} {"peak ratio":>10}  verdict')
+    print('-' * 56)
+    rhos, maes, ratios = [], [], []
+    for i in range(n_original):
+        d, m = preds[i][0], preds[i][1]
+        r = real_sub[i, d, feat]
+        rmax = real_sub[i, :, feat].max(); rmax = rmax if rmax > 0 else 1.0
+        rho = (np.corrcoef(m, r)[0, 1]
+               if len(m) > 1 and np.std(m) > 0 and np.std(r) > 0 else float('nan'))
+        mae = float(np.mean(np.abs(m - r)) / rmax)
+        ratio = float(m.max() / rmax)
+        verdict = 'overshoot' if ratio > 1.1 else ('undershoot' if ratio < 0.9 else 'on-target')
+        rhos.append(rho); maes.append(mae); ratios.append(ratio)
+        print(f'{REACTOR_IDS[i]:>8} | {rho:>9.2f} {mae:>9.3f} {ratio:>10.2f}  {verdict}')
+    n_over  = sum(x > 1.1 for x in ratios)
+    n_under = sum(x < 0.9 for x in ratios)
+    print('-' * 56)
+    print(f'{"MEAN":>8} | {np.nanmean(rhos):>9.2f} {np.mean(maes):>9.3f} {np.mean(ratios):>10.2f}'
+          f'  {n_over} over / {n_under} under / {n_original - n_over - n_under} on-target')
+
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
     for i in range(min(n_original, 10)):
