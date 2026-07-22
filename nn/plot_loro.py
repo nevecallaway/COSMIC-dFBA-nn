@@ -88,6 +88,46 @@ def forecast(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device,
     return days, vals, None, None
 
 
+def warmup_forecast(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device,
+                    phase=None, warmup=3):
+    """
+    Warm-started forecast: the first `warmup` predictions are made from REAL
+    previous windows (teacher-forced), then the model runs free from its own
+    predictions for the rest of the trajectory.
+
+    With seq_len=4 and warmup=3 this predicts days 4, 5, 6 from real observations
+    and forecasts day 7 onward autoregressively.
+    """
+    days, vals = [], []
+
+    # --- teacher-forced warm-up: real observations precede each predicted day ---
+    for k in range(warmup):
+        d = seq_len + k
+        if d >= N_DAYS:
+            break
+        seed = np.clip((sub_i[d - seq_len:d] - fmin) / scale, 0.0, 1.0)
+        tcol = (np.arange(d - seq_len, d, dtype=np.float32) / (N_DAYS - 1))[:, None]
+        seed = np.concatenate([seed, tcol], axis=1)
+        pr = rollout(model, seed, n_steps=1, device=device, doe=doe_i,
+                     cin=cin_i, is_decoder=True, phase=phase)
+        vals.append(pr[0, feat] * scale[feat] + fmin[feat])
+        days.append(d)
+
+    # --- then free-running from the last all-real window ---
+    start = min(seq_len + warmup, N_DAYS)
+    n_steps = N_DAYS - start
+    if n_steps > 0:
+        seed = np.clip((sub_i[start - seq_len:start] - fmin) / scale, 0.0, 1.0)
+        tcol = (np.arange(start - seq_len, start, dtype=np.float32) / (N_DAYS - 1))[:, None]
+        seed = np.concatenate([seed, tcol], axis=1)
+        pr = rollout(model, seed, n_steps=n_steps, device=device, doe=doe_i,
+                     cin=cin_i, is_decoder=True, phase=phase)
+        vals.extend(pr[:, feat] * scale[feat] + fmin[feat])
+        days.extend(range(start, N_DAYS))
+
+    return np.array(days), np.array(vals), None, None
+
+
 def ensemble(model, sub_i, cin_i, doe_i, fmin, scale, feat, seq_len, device,
              phase=None):
     """Predict each future day from every seed window; return per-day mean/min/max."""
