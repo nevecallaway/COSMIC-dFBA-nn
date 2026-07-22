@@ -100,7 +100,12 @@ def main():
         ids.append(i)
 
     trajs = np.stack(trajs)                  # (n, 15, 6)
-    sub = info.set_index('bioreactor_id').loc[ids]
+    # runs_information has duplicate bioreactor_ids (400,569 rows for a
+    # 1000*100*4 design), so .loc on it would return MORE rows than ids and
+    # desync these columns from `trajs`. Deduplicate, then reindex.
+    inf_idx = info.set_index('bioreactor_id')
+    inf_idx = inf_idx[~inf_idx.index.duplicated(keep='first')]
+    sub = inf_idx.reindex(ids)
     np.savez_compressed(
         OUTNPZ,
         trajectories=trajs,
