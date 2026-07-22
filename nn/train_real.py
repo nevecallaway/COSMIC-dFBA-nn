@@ -35,10 +35,51 @@ from torch.utils.data import DataLoader
 from sklearn.preprocessing import MinMaxScaler
 
 from device_utils import pick_device
-from model_primeur import FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN
+from generate_synthetic_ode import WINDOW_FEATURE_INDICES
+from model_primeur import (FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN,
+                           N_DAYS, ETA_SWITCH_DAY)
 from generate_synthetic_ode import build_windows
 from train_sample import FluxWindowDataset
 from real_data import denormalize_data2
+
+
+def perfusion_rollout(model, seed_norm, doe, cin, etas, horizon, seq_len, n_days):
+    """
+    Differentiable autoregressive rollout through the perfusion ODE step.
+
+    Seeds on real days and then feeds each prediction back in, so by the last step
+    the input window contains no real data. Identical in structure to how the
+    forecast is scored, which is the whole point: train on what we measure.
+
+    seed_norm (B, seq_len, F) normalized -> (B, horizon, F) normalized predictions
+    """
+    B = seed_norm.shape[0]
+    dev = seed_norm.device
+    win = seed_norm
+    preds = []
+    for k in range(horizon):
+        days = torch.arange(k, k + seq_len, device=dev, dtype=torch.float32) / (n_days - 1)
+        x = torch.cat([win, days.view(1, -1, 1).expand(B, -1, 1)], dim=2)
+        nxt, _ = model(x, doe, cin, eta_ext=etas[:, k:k + 1])
+        preds.append(nxt)
+        win = torch.cat([win[:, 1:], nxt.unsqueeze(1)], dim=1)
+    return torch.stack(preds, dim=1)
+
+
+def build_rollout_tensors(real, reactors, doe_n, cin, seq_len, eta_day):
+    """
+    One rollout example per reactor: seed on the first seq_len days, supervise the
+    rest. Returns numpy (seeds, targets, doe, cin, etas).
+
+    etas[k] is the washout for the step ending on day seq_len+k, indexed by the
+    SOURCE day to match generate_synthetic_ode and the forward pass.
+    """
+    sub = real[reactors][:, :, WINDOW_FEATURE_INDICES].astype(np.float32)
+    horizon = sub.shape[1] - seq_len
+    etas = np.array([[float((seq_len + k - 1) >= eta_day) for k in range(horizon)]],
+                    dtype=np.float32).repeat(len(reactors), axis=0)
+    return (sub[:, :seq_len], sub[:, seq_len:],
+            doe_n[reactors].astype(np.float32), cin[reactors].astype(np.float32), etas)
 
 
 def main():
@@ -78,7 +119,26 @@ def main():
                          'and just log the curve)')
     ap.add_argument('--curve-csv', default=None,
                     help='write per-epoch train/val loss curve here')
+    ap.add_argument('--gap-stop', type=float, default=None,
+                    help='stop as soon as val_loss exceeds this multiple of train_loss, '
+                         'i.e. when the val curve "lifts off" the train curve. This is a '
+                         'gap criterion, not the usual "val stopped improving" one.')
+    ap.add_argument('--rollout', action='store_true',
+                    help='Train on the autoregressive forecast instead of one-day-ahead: '
+                         'seed the first seq_len real days, predict the rest from the '
+                         "model's own predictions, loss over the whole trajectory. "
+                         'Makes training, validation and reporting measure the same thing.')
+    ap.add_argument('--eta-day', type=int, default=None,
+                    help='day the titer washout switches on (default 8). The predicted '
+                         'titer peak is pinned to this day by construction, so if the '
+                         'real harvest is a day earlier this introduces a systematic lag')
     args = ap.parse_args()
+
+    if args.eta_day is not None:
+        import model_primeur, generate_synthetic_ode as _gen
+        model_primeur.ETA_SWITCH_DAY = args.eta_day
+        _gen.ETA_SWITCH_DAY = args.eta_day
+        print(f'Eta switch day set to {args.eta_day} (default 8)')
 
     if args.stripped:
         from model_stripped import FluxDecoder as ModelClass
@@ -177,6 +237,29 @@ def main():
     n_params = sum(p.numel() for p in trainable)
     print(f'Trainable parameters: {n_params:,}  hidden={hidden}')
 
+    # ---- rollout tensors (only used with --rollout) ----
+    if args.rollout:
+        eta_day = args.eta_day if args.eta_day is not None else ETA_SWITCH_DAY
+        fit_r = [r for r in range(n_original) if r not in hold and r not in val_reactors]
+        val_r = sorted(val_reactors)
+        wcin_full = cin_params[:n_original]
+        doe_full  = ((doe_params[:n_original] - doe_min) / doe_scale).astype(np.float32)
+
+        def _pack(rs):
+            s, t, dn, cn, et = build_rollout_tensors(real, rs, doe_full, wcin_full,
+                                                     args.seq_len, eta_day)
+            fmin  = scaler.data_min_.astype(np.float32)
+            sc    = (scaler.data_max_ - scaler.data_min_).astype(np.float32); sc[sc == 0] = 1.0
+            to = lambda a: torch.from_numpy(a).to(device)
+            return (to(((s - fmin) / sc).astype(np.float32)), to(dn), to(cn), to(et),
+                    to(((t - fmin) / sc).astype(np.float32)))
+
+        roll_fit = _pack(fit_r)
+        roll_val = _pack(val_r) if val_r else None
+        horizon = roll_fit[4].shape[1]
+        print(f'Rollout training: {len(fit_r)} reactors, horizon {horizon} days '
+              f'({len(fit_r) * horizon} supervised day-predictions)')
+
     # ---- train (plain MSE; small model + weight decay for the tiny dataset) ----
     val_loader = (DataLoader(val_ds, batch_size=args.batch, shuffle=False)
                   if val_ds is not None and len(val_ds) else None)
@@ -185,6 +268,42 @@ def main():
     for epoch in range(1, args.epochs + 1):
         model.train()
         tot = 0.0
+
+        if args.rollout:
+            s, dn, cn, et, y = roll_fit
+            opt.zero_grad()
+            pred = perfusion_rollout(model, s, dn, cn, et, horizon, args.seq_len, N_DAYS)
+            loss = ((pred - y) ** 2).mean()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+            tr = loss.item()
+            vl = float('nan')
+            if roll_val is not None:
+                model.eval()
+                with torch.no_grad():
+                    vs, vd, vc, ve, vy = roll_val
+                    vp = perfusion_rollout(model, vs, vd, vc, ve, horizon,
+                                           args.seq_len, N_DAYS)
+                    vl = float(((vp - vy) ** 2).mean())
+                if vl < best_val - 1e-9:
+                    best_val, best_ep, bad = vl, epoch, 0
+                    best_state = {k: v.detach().clone()
+                                  for k, v in model.state_dict().items()}
+                else:
+                    bad += 1
+            curves.append((epoch, tr, vl))
+            if epoch % 25 == 0 or epoch == 1:
+                print(f'Epoch {epoch:4d}  train={tr:.5f}  val={vl:.5f}')
+            if args.gap_stop and not np.isnan(vl) and vl > args.gap_stop * tr:
+                print(f'Gap stop at epoch {epoch}: val={vl:.5f} > '
+                      f'{args.gap_stop}x train={tr:.5f}')
+                break
+            if args.patience and bad >= args.patience:
+                print(f'Early stop at epoch {epoch} (best {best_ep}, val={best_val:.5f})')
+                break
+            continue
+
         for x, d, cin, eta, y in loader:
             x, d, cin, eta, y = (x.to(device), d.to(device), cin.to(device),
                                  eta.to(device), y.to(device))
@@ -215,6 +334,10 @@ def main():
 
         if epoch % 25 == 0 or epoch == 1:
             print(f'Epoch {epoch:4d}  train={tr:.5f}  val={vl:.5f}')
+        if args.gap_stop and not np.isnan(vl) and vl > args.gap_stop * tr:
+            print(f'Gap stop at epoch {epoch}: val={vl:.5f} > '
+                  f'{args.gap_stop}x train={tr:.5f}')
+            break
         if args.patience and bad >= args.patience:
             print(f'Early stop at epoch {epoch} (best {best_ep}, val={best_val:.5f})')
             break

@@ -68,7 +68,23 @@ def main():
                     help='early-stopping patience per fold (0 = fixed epochs, log only)')
     ap.add_argument('--curve-dir', default=None,
                     help='write per-fold train/val curves as CSV here')
+    ap.add_argument('--gap-stop', type=float, default=None,
+                    help='stop each fold when val_loss exceeds this multiple of '
+                         'train_loss (val "lifts off" train)')
+    ap.add_argument('--rollout-train', action='store_true',
+                    help='Train each fold on the autoregressive forecast (matches how '
+                         'we score it) instead of one-day-ahead')
+    ap.add_argument('--eta-day', type=int, default=None,
+                    help='day the titer washout switches on (default 8). The predicted '
+                         'peak is pinned to this day, so try 7 if the real peak is a '
+                         'day earlier than the prediction')
     args = ap.parse_args()
+
+    if args.eta_day is not None:
+        import model_primeur, generate_synthetic_ode as _gen
+        model_primeur.ETA_SWITCH_DAY = args.eta_day
+        _gen.ETA_SWITCH_DAY = args.eta_day
+        print(f'Eta switch day set to {args.eta_day} (default 8)')
 
     feat = args.feature
     device = pick_device()
@@ -127,6 +143,12 @@ def main():
                   '--hidden', args.hidden, '--epochs', args.epochs,
                   '--seq-len', args.seq_len,
                   '--val-reactors', args.val_reactors] + init_args
+        if args.eta_day is not None:
+            tr_cmd += ['--eta-day', args.eta_day]
+        if args.rollout_train:
+            tr_cmd.append('--rollout')
+        if args.gap_stop is not None:
+            tr_cmd += ['--gap-stop', args.gap_stop]
         if args.patience:
             tr_cmd += ['--patience', args.patience]
         if args.curve_dir:
