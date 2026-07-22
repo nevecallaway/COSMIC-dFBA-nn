@@ -71,6 +71,27 @@ def main():
     g = df.groupby('n_feeds')[vol].nunique().head(5)
     print(g.to_string())
 
+    # Decisive: is the bolus a property of the STRATEGY, the MEDIA, or neither?
+    # If volume is (near) constant within a feed_strategy_id, the strategy encodes
+    # both which days are fed and how much, so we can read the bolus straight off.
+    V0 = 0.158
+    df['v_bolus'] = (df[vol] - V0) / df['n_feeds']
+
+    for key in ['feed_strategy_id', 'feed_media_concentration_id']:
+        spread = df.groupby(key)[vol].agg(['nunique', 'std', 'min', 'max'])
+        print(f'\n--- final volume grouped by {key} ---')
+        print(f'  mean within-group std : {spread["std"].mean():.6f} L')
+        print(f'  mean unique values    : {spread["nunique"].mean():.2f}')
+        print(f'  groups with 1 value   : {(spread["nunique"] == 1).sum()} / {len(spread)}')
+
+    print('\n--- implied per-run bolus, v = (V_final - V0)/n_feeds ---')
+    print(f'  V0 assumed {V0} L')
+    print(f'  v_bolus  min={df.v_bolus.min():.5f}  max={df.v_bolus.max():.5f}  '
+          f'mean={df.v_bolus.mean():.5f}  std={df.v_bolus.std():.5f}')
+    bs = df.groupby('feed_strategy_id')['v_bolus'].std()
+    print(f'  within-strategy std of v_bolus: mean={bs.mean():.6f}  max={bs.max():.6f}')
+    print('  (near-zero -> bolus is fixed per strategy: read it off directly)')
+
 
 if __name__ == '__main__':
     main()
