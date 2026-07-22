@@ -1,17 +1,21 @@
 #!/bin/bash
-# One-time extraction + build of the fed-batch daily npz on SLURM (CPU only).
-# This job has NO GPU work (decompression + CSV downsampling), so it uses the
-# CPU partition, not gpu. The 13 GB zip must already be downloaded:
+# =============================================================================
+# SLURM job: one-time prep of the Golzarijalal 400k in-silico CHO fed-batch
+# dataset (Figshare DOI 10.26188/28943096, CC BY 4.0) into a compact daily npz.
 #
-#   On a login/transfer node (compute nodes have no internet):
-#       cd <repo>/nn/data
-#       wget -O cho_fedbatch.zip "https://ndownloader.figshare.com/files/56779742"
+# CPU only: this is decompression + CSV downsampling, no GPU work, so it runs on
+# m9 rather than m9g. Idempotent, re-running is a no-op once the npz exists.
 #
-#   Then, from the repo's nn/ directory:
-#       mkdir -p logs && sbatch prep_fedbatch.sbatch
+# The 13 GB zip must already be downloaded into nn/data from a login/transfer
+# node (compute nodes have no internet):
+#     cd <repo>/nn/data
+#     wget -O cho_fedbatch.zip "https://ndownloader.figshare.com/files/56779742"
 #
+# Submit from the nn/ directory: sbatch prep_fedbatch.sbatch
+# =============================================================================
 #SBATCH --job-name=fedbatch_prep
-#SBATCH --partition=m9               # CPU partition, lots of idle nodes. NOT a GPU partition.
+#SBATCH --account=jth54
+#SBATCH --partition=m9
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -19,22 +23,35 @@
 #SBATCH --time=01:30:00
 #SBATCH --output=logs/fedbatch_prep_%j.log
 #SBATCH --error=logs/fedbatch_prep_%j.err
+#SBATCH --mail-type=BEGIN,END,FAIL
 
-set -e
-cd "$SLURM_SUBMIT_DIR"
+set -euo pipefail
 
-# --- environment (mirrors your interactive `conda activate cosmic`) ---
-# conda activate needs initializing in a batch shell; this does that first.
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate cosmic
-python -c "import py7zr" 2>/dev/null || pip install --quiet py7zr
+# ── Edit to match your cluster ───────────────────────────────────────────────
+NN_DIR="${SLURM_SUBMIT_DIR:-$PWD}"             # submit from the nn/ directory
+PYTHON="/home/nevecc/.conda/envs/cosmic/bin/python"
 
-# --- paths: zip lives in nn/data (gitignored); npz written alongside it ---
-export FEDBATCH_ZIP=$SLURM_SUBMIT_DIR/data/cho_fedbatch.zip
-export FEDBATCH_OUT=$SLURM_SUBMIT_DIR/data/cho_fedbatch_daily.npz
-export FEDBATCH_N=2000
-export FEDBATCH_SEED=0
+N_RUNS=2000                                     # runs to sample (raise for more data)
+SEED=0
+# ─────────────────────────────────────────────────────────────────────────────
 
-python prep_fedbatch.py
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+log "Job ${SLURM_JOB_ID} on $(hostname)"
 
-echo "Done. Reusable dataset at: $FEDBATCH_OUT"
+mkdir -p "$NN_DIR/logs"
+cd "$NN_DIR"
+
+# py7zr is only needed if the system 7z is unavailable; prep_fedbatch.py prefers 7z.
+$PYTHON -c "import py7zr" 2>/dev/null || $PYTHON -m pip install --quiet py7zr
+
+export FEDBATCH_ZIP="$NN_DIR/data/cho_fedbatch.zip"
+export FEDBATCH_OUT="$NN_DIR/data/cho_fedbatch_daily.npz"
+export FEDBATCH_N=$N_RUNS
+export FEDBATCH_SEED=$SEED
+
+log "Sampling $N_RUNS runs from $FEDBATCH_ZIP ..."
+$PYTHON prep_fedbatch.py
+
+log "Done. Reusable dataset: $FEDBATCH_OUT"
+log "Cleanup to reclaim ~26 GB once verified:"
+log "  rm -rf $NN_DIR/data/fedbatch_inner.7z $NN_DIR/data/fedbatch_runs"
