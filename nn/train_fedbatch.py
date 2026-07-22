@@ -91,26 +91,64 @@ def forecast_run(model, data, i, scaler, seq_len, device):
         ff = torch.tensor([[data['feed_frac'][i, t]]], dtype=torch.float32, device=device)
         nxt, _ = model(x, None, fc, ff)
         nxt = nxt.squeeze(0).cpu().numpy()
-        out.append(nxt * scale + fmin)
-        win = np.vstack([win[1:], nxt])
-    return np.arange(seq_len, D), np.array(out)
+        phys = nxt * scale + fmin
+        # Concentrations and cell density cannot be negative. This is physics, not
+        # an arbitrary cap, and it keeps a diverging rollout from going imaginary.
+        phys = np.maximum(phys, 0.0)
+        out.append(phys)
+        if not np.isfinite(phys).all():
+            break                                  # diverged; caller detects it
+        win = np.vstack([win[1:], (phys - fmin) / scale])
+    return np.arange(seq_len, seq_len + len(out)), np.array(out)
+
+
+@torch.no_grad()
+def evaluate_onestep(model, data, holdout_runs, scaler, seq_len, device, feat):
+    """
+    Teacher-forced one-step error on HELD-OUT runs: predict each day from the
+    real previous window. This is pure generalization, with no rollout
+    compounding, so it isolates 'did more data help the model learn' from
+    'is the autoregressive rollout numerically stable'.
+    """
+    n_feat = data['traj'].shape[2]
+    w, y, fc, ff, _ = build_fedbatch_windows(data, seq_len, runs=holdout_runs)
+    wn = normalize_windows(w, scaler, n_feat)
+    model.eval()
+    pred, _ = model(torch.from_numpy(wn).to(device), None,
+                    torch.from_numpy(fc).to(device), torch.from_numpy(ff).to(device))
+    fmin  = scaler.data_min_.astype(np.float32)
+    scale = (scaler.data_max_ - scaler.data_min_).astype(np.float32)
+    scale[scale == 0] = 1.0
+    p = pred.cpu().numpy() * scale + fmin
+    denom = np.abs(y[:, feat]).mean()
+    return float(np.abs(p[:, feat] - y[:, feat]).mean() / max(denom, 1e-12))
 
 
 def evaluate(model, data, holdout_runs, scaler, seq_len, device, feat):
-    """Shape (rho) and magnitude (norm MAE, peak ratio) over held-out runs."""
+    """Rollout forecast quality over held-out runs, divergence-aware."""
     rhos, maes, ratios = [], [], []
+    diverged = 0
     for i in holdout_runs:
         days, pred = forecast_run(model, data, i, scaler, seq_len, device)
-        real = data['traj'][i][days, feat]
         p = pred[:, feat]
+        real = data['traj'][i][days, feat]
         rmax = data['traj'][i][:, feat].max()
         rmax = rmax if rmax > 0 else 1.0
+        # A rollout counts as diverged if it went non-finite, stopped early, or
+        # ran away past a physically absurd multiple of the real peak.
+        if (len(p) != len(data['traj'][i]) - seq_len or not np.isfinite(p).all()
+                or p.max() > 100 * rmax):
+            diverged += 1
+            continue
         if len(p) > 1 and np.std(p) > 0 and np.std(real) > 0:
             rhos.append(float(np.corrcoef(p, real)[0, 1]))
         maes.append(float(np.mean(np.abs(p - real)) / rmax))
         ratios.append(float(p.max() / rmax))
-    return (float(np.nanmean(rhos)), float(np.mean(maes)), float(np.mean(ratios)),
-            int(sum(r > 1.1 for r in ratios)), int(sum(r < 0.9 for r in ratios)))
+
+    nanmean = lambda a: float(np.mean(a)) if len(a) else float('nan')
+    return (nanmean(rhos), nanmean(maes), nanmean(ratios),
+            int(sum(r > 1.1 for r in ratios)), int(sum(r < 0.9 for r in ratios)),
+            diverged)
 
 
 def main():
@@ -154,25 +192,35 @@ def main():
     sizes   = [n for n in sizes if n <= len(pool)]
     print(f'Held-out runs: {len(holdout)} (fixed across all training sizes)\n')
 
-    print(f'{"n_train":>8} | {"shape rho":>9} {"norm MAE":>9} {"peak ratio":>10} '
-          f'{"over":>5} {"under":>6}')
-    print('-' * 56)
+    print(f'{"n_train":>8} | {"1step MAE":>9} | {"rho":>6} {"MAE":>7} {"peak":>6} '
+          f'{"over":>5} {"under":>6} {"diverged":>9}')
+    print('-' * 72)
     results = []
     for n in sizes:
         print(f'  training on {n} runs...', flush=True)
         model, scaler = train_model(data, pool[:n], args.seq_len, args.hidden,
                                     args.epochs, args.lr, args.batch, device, args.seed)
-        rho, mae, ratio, over, under = evaluate(model, data, holdout, scaler,
-                                                args.seq_len, device, args.feature)
-        results.append((n, rho, mae, ratio, over, under))
-        print(f'{n:>8} | {rho:>9.2f} {mae:>9.3f} {ratio:>10.2f} {over:>5} {under:>6}')
+        one = evaluate_onestep(model, data, holdout, scaler, args.seq_len,
+                               device, args.feature)
+        rho, mae, ratio, over, under, div = evaluate(model, data, holdout, scaler,
+                                                     args.seq_len, device, args.feature)
+        results.append((n, one, rho, mae, ratio, over, under, div))
+        print(f'{n:>8} | {one:>9.4f} | {rho:>6.2f} {mae:>7.3f} {ratio:>6.2f} '
+              f'{over:>5} {under:>6} {div:>9}')
 
-    print('\nIf shape rho rises and norm MAE falls as n_train grows, the '
-          'generalization limit is DATA, not method.')
+    print('\n1step MAE = teacher-forced held-out error (pure generalization, no '
+          'rollout compounding).')
+    print('The rollout columns additionally require the autoregressive forecast '
+          'to stay stable.')
     if len(results) > 1:
-        first, last = results[0], results[-1]
-        print(f'  n={first[0]:<5} rho={first[1]:.2f} MAE={first[2]:.3f}   ->   '
-              f'n={last[0]:<5} rho={last[1]:.2f} MAE={last[2]:.3f}')
+        f, l = results[0], results[-1]
+        print(f'\n  n={f[0]:<5} 1step={f[1]:.4f}   ->   n={l[0]:<5} 1step={l[1]:.4f}')
+        if l[1] < f[1]:
+            print('  Held-out one-step error FELL with more data: the '
+                  'generalization limit is DATA, not method.')
+        else:
+            print('  Held-out one-step error did NOT fall: more data is not the '
+                  'binding constraint.')
 
 
 if __name__ == '__main__':
