@@ -38,7 +38,16 @@ log "Job ${SLURM_JOB_ID} on $(hostname)  GPUs: ${CUDA_VISIBLE_DEVICES:-none}"
 mkdir -p "$NN_DIR/logs"
 cd "$NN_DIR"
 
-log "Data-scaling sweep: n_train = [$SWEEP], epochs=$EPOCHS"
-$PYTHON train_fedbatch.py --sweep $SWEEP --epochs $EPOCHS
+# Pass 1: fixed epoch budget, but now with a validation split and logged curves.
+# The overtraining readout at the end says whether val bottomed out early.
+log "PASS 1: fixed $EPOCHS epochs (no early stopping), curves -> curves_fixed/"
+$PYTHON train_fedbatch.py --sweep $SWEEP --epochs $EPOCHS \
+    --curve-dir curves_fixed
 
-log "Done. Read the table: rising rho and falling MAE with n_train => data limit."
+# Pass 2: same, with early stopping on validation loss and best-weight restore.
+# If Kimberly is right, this beats pass 1, especially at the small n_train rows.
+log "PASS 2: early stopping (patience 20), curves -> curves_earlystop/"
+$PYTHON train_fedbatch.py --sweep $SWEEP --epochs $EPOCHS --patience 20 \
+    --curve-dir curves_earlystop
+
+log "Done. Compare PASS 1 vs PASS 2 tables; check the overtraining readout."

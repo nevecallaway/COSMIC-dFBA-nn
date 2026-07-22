@@ -22,6 +22,7 @@ Usage:
     python train_fedbatch.py --horizon 3          # shorter rollout (curriculum)
 """
 import argparse
+import os
 
 import numpy as np
 import torch
@@ -76,11 +77,26 @@ def _scale_arrays(scaler):
 
 
 def train_model(data, train_runs, seq_len, hidden, epochs, lr, batch, device,
-                horizon=None, seed=0):
+                horizon=None, seed=0, val_frac=0.2, patience=0, curve_csv=None):
+    """
+    Train on a rollout objective, holding out a validation slice of the TRAINING
+    runs (never the evaluation holdout) so we can see overtraining.
+
+    patience > 0 enables early stopping on validation loss and restores the best
+    weights. curve_csv writes the per-epoch train/val curves for plotting.
+    """
     torch.manual_seed(seed)
     n_days = data['traj'].shape[1]
     n_feat = data['traj'].shape[2]
-    seeds, targets, fc, ff = build_rollout_data(data, seq_len, train_runs)
+
+    # split the training runs into fit / validation
+    train_runs = np.asarray(train_runs)
+    n_val = int(round(len(train_runs) * val_frac))
+    n_val = min(max(n_val, 1), max(len(train_runs) - 1, 1)) if len(train_runs) > 1 else 0
+    val_runs = train_runs[:n_val]
+    fit_runs = train_runs[n_val:] if n_val else train_runs
+
+    seeds, targets, fc, ff = build_rollout_data(data, seq_len, fit_runs)
     H = targets.shape[1] if horizon is None else min(horizon, targets.shape[1])
 
     scaler = MinMaxScaler().fit(np.vstack([seeds.reshape(-1, n_feat),
@@ -98,6 +114,16 @@ def train_model(data, train_runs, seq_len, hidden, epochs, lr, batch, device,
     loader = DataLoader(ds, batch_size=batch, shuffle=True)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
+    # validation tensors (same rollout objective, unseen runs)
+    val_t = None
+    if n_val:
+        vs, vt, vfc, vff = build_rollout_data(data, seq_len, val_runs)
+        val_t = (torch.from_numpy(((vs - fmin) / scale).astype(np.float32)).to(device),
+                 torch.from_numpy(vfc).to(device),
+                 torch.from_numpy(vff[:, :H]).to(device),
+                 torch.from_numpy(((vt[:, :H] - fmin) / scale).astype(np.float32)).to(device))
+
+    curves, best_val, best_state, best_ep, bad = [], float('inf'), None, 0, 0
     for ep in range(1, epochs + 1):
         model.train(); tot = 0.0
         for sb, fcb, ffb, yb in loader:
@@ -110,9 +136,42 @@ def train_model(data, train_runs, seq_len, hidden, epochs, lr, batch, device,
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             tot += loss.item() * len(sb)
+        tr = tot / len(ds)
+
+        vl = float('nan')
+        if val_t is not None:
+            model.eval()
+            with torch.no_grad():
+                vp = rollout(model, val_t[0], val_t[1], val_t[2], H, seq_len, n_days)
+                vl = float(((vp - val_t[3]) ** 2).mean())
+            if vl < best_val - 1e-9:
+                best_val, best_ep, bad = vl, ep, 0
+                best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            else:
+                bad += 1
+        curves.append((ep, tr, vl))
+
         if ep % 20 == 0 or ep == 1:
-            print(f'    epoch {ep:4d}  rollout loss={tot / len(ds):.6f}', flush=True)
-    return model, scaler
+            print(f'    epoch {ep:4d}  train={tr:.6f}  val={vl:.6f}', flush=True)
+        if patience and bad >= patience:
+            print(f'    early stop at epoch {ep} (best epoch {best_ep}, '
+                  f'val={best_val:.6f})', flush=True)
+            break
+
+    if patience and best_state is not None:
+        model.load_state_dict(best_state)
+        print(f'    restored best weights from epoch {best_ep}', flush=True)
+
+    if curve_csv:
+        with open(curve_csv, 'w') as fh:
+            fh.write('epoch,train_loss,val_loss\n')
+            for e, t, v in curves:
+                fh.write(f'{e},{t:.8f},{v:.8f}\n')
+        print(f'    curves -> {curve_csv}', flush=True)
+
+    return model, scaler, dict(best_epoch=best_ep, best_val=best_val,
+                               final_train=curves[-1][1], final_val=curves[-1][2],
+                               epochs_run=len(curves))
 
 
 @torch.no_grad()
@@ -164,6 +223,12 @@ def main():
     ap.add_argument('--feature', type=int, default=1, help='scored feature (1=Titer)')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'])
+    ap.add_argument('--val-frac', type=float, default=0.2,
+                    help='fraction of the TRAINING runs held out for validation')
+    ap.add_argument('--patience', type=int, default=0,
+                    help='early-stopping patience on val loss (0 = train all epochs)')
+    ap.add_argument('--curve-dir', default=None,
+                    help='write per-epoch train/val curves as CSV here')
     args = ap.parse_args()
 
     if args.device == 'auto':
@@ -187,19 +252,38 @@ def main():
     H = (D - args.seq_len) if args.horizon is None else args.horizon
     print(f'Held-out runs: {len(holdout)} (fixed)  |  training rollout horizon: {H} days\n')
 
+    if args.curve_dir:
+        os.makedirs(args.curve_dir, exist_ok=True)
+
     print(f'{"n_train":>8} | {"day1 err":>8} {"rho":>6} {"MAE":>7} {"peak":>6} '
-          f'{"over":>5} {"under":>6} {"diverged":>9}')
-    print('-' * 68)
+          f'{"over":>5} {"under":>6} {"div":>4} | {"bestEp":>6} {"ep_run":>6} '
+          f'{"val_min":>9} {"val_end":>9}')
+    print('-' * 104)
     results = []
     for n in sizes:
         print(f'  training on {n} runs...', flush=True)
-        model, scaler = train_model(data, pool[:n], args.seq_len, args.hidden,
-                                    args.epochs, args.lr, args.batch, device,
-                                    args.horizon, args.seed)
+        csv = (os.path.join(args.curve_dir, f'curve_n{n}.csv')
+               if args.curve_dir else None)
+        model, scaler, h = train_model(data, pool[:n], args.seq_len, args.hidden,
+                                       args.epochs, args.lr, args.batch, device,
+                                       args.horizon, args.seed, args.val_frac,
+                                       args.patience, csv)
         r = evaluate(model, data, holdout, scaler, args.seq_len, device, args.feature)
-        results.append((n, r))
+        results.append((n, r, h))
         print(f'{n:>8} | {r["first"]:>8.3f} {r["rho"]:>6.2f} {r["mae"]:>7.3f} '
-              f'{r["peak"]:>6.2f} {r["over"]:>5} {r["under"]:>6} {r["diverged"]:>9}')
+              f'{r["peak"]:>6.2f} {r["over"]:>5} {r["under"]:>6} {r["diverged"]:>4} | '
+              f'{h["best_epoch"]:>6} {h["epochs_run"]:>6} {h["best_val"]:>9.5f} '
+              f'{h["final_val"]:>9.5f}')
+
+    # Overtraining readout: if val bottoms out early and then rises, the fixed
+    # epoch budget was hurting that row.
+    print('\nOvertraining check (val_min vs val_end, and how early val bottomed):')
+    for n, _, h in results:
+        frac = h['best_epoch'] / max(h['epochs_run'], 1)
+        worse = (h['final_val'] - h['best_val']) / max(h['best_val'], 1e-12)
+        flag = 'OVERTRAINED' if (frac < 0.6 and worse > 0.05) else 'ok'
+        print(f'  n={n:<5} best epoch {h["best_epoch"]:>4}/{h["epochs_run"]:<4} '
+              f'({frac:.0%} through)  val rose {worse:+.1%} after best   {flag}')
 
     print('\nAll columns are FULL-ROLLOUT forecasts on held-out runs (no teacher '
           'forcing anywhere): seed 6 real days, then predict from own predictions.')
