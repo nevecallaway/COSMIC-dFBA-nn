@@ -93,7 +93,10 @@ def main():
     ap.add_argument('--holdout', type=int, nargs='+', default=[])
     ap.add_argument('--epochs', type=int,   default=300)
     ap.add_argument('--lr',     type=float, default=1e-3)
-    ap.add_argument('--batch',  type=int,   default=32)
+    ap.add_argument('--batch',  type=int,   default=8,
+                    help='small by design: with ~49 training windows, batch 32 gives only '
+                         '2 gradient steps per epoch, batch 8 gives 7 (and more '
+                         'stochasticity, which regularizes a tiny dataset)')
     ap.add_argument('--hidden', type=int,   default=32)   # small: few real windows
     ap.add_argument('--weight-decay', type=float, default=1e-4)
     ap.add_argument('--substeps', type=int, default=50)

@@ -68,6 +68,8 @@ def main():
                     help='early-stopping patience per fold (0 = fixed epochs, log only)')
     ap.add_argument('--curve-dir', default=None,
                     help='write per-fold train/val curves as CSV here')
+    ap.add_argument('--batch', type=int, default=8,
+                    help='training batch size per fold (small dataset: 8 or 16)')
     ap.add_argument('--gap-stop', type=float, default=None,
                     help='stop each fold when val_loss exceeds this multiple of '
                          'train_loss (val "lifts off" train)')
@@ -141,7 +143,7 @@ def main():
         tr_cmd = [py, here / 'train_real.py', '--stripped', '--holdout', i,
                   '--ode-data', ode_for_train, '--output', pt,
                   '--hidden', args.hidden, '--epochs', args.epochs,
-                  '--seq-len', args.seq_len,
+                  '--seq-len', args.seq_len, '--batch', args.batch,
                   '--val-reactors', args.val_reactors] + init_args
         if args.eta_day is not None:
             tr_cmd += ['--eta-day', args.eta_day]
