@@ -122,6 +122,10 @@ def main():
                          'and just log the curve)')
     ap.add_argument('--curve-csv', default=None,
                     help='write per-epoch train/val loss curve here')
+    ap.add_argument('--seed', type=int, default=0,
+                    help='seeds weight init and batch shuffling. With ~7 training '
+                         'reactors the run-to-run spread is large, so comparisons '
+                         'between settings are only meaningful across several seeds')
     ap.add_argument('--gap-stop', type=float, default=None,
                     help='stop as soon as val_loss exceeds this multiple of train_loss, '
                          'i.e. when the val curve "lifts off" the train curve. This is a '
@@ -149,8 +153,11 @@ def main():
     else:
         ModelClass = FluxDecoder
 
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
     device = pick_device()
-    print(f'Device: {device}')
+    print(f'Device: {device}  seed: {args.seed}')
 
     npz = np.load(args.ode_data, allow_pickle=True)
     ode_traj   = npz['trajectories'].astype(np.float32)

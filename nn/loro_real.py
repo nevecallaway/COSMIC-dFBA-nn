@@ -68,6 +68,8 @@ def main():
                     help='early-stopping patience per fold (0 = fixed epochs, log only)')
     ap.add_argument('--curve-dir', default=None,
                     help='write per-fold train/val curves as CSV here')
+    ap.add_argument('--seed', type=int, default=0,
+                    help='training seed, passed to every fold')
     ap.add_argument('--batch', type=int, default=8,
                     help='training batch size per fold (small dataset: 8 or 16)')
     ap.add_argument('--gap-stop', type=float, default=None,
@@ -144,6 +146,7 @@ def main():
                   '--ode-data', ode_for_train, '--output', pt,
                   '--hidden', args.hidden, '--epochs', args.epochs,
                   '--seq-len', args.seq_len, '--batch', args.batch,
+                  '--seed', args.seed,
                   '--val-reactors', args.val_reactors] + init_args
         if args.eta_day is not None:
             tr_cmd += ['--eta-day', args.eta_day]
