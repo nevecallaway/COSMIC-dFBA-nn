@@ -288,7 +288,7 @@ def main():
     print('\nAll columns are FULL-ROLLOUT forecasts on held-out runs (no teacher '
           'forcing anywhere): seed 6 real days, then predict from own predictions.')
     if len(results) > 1:
-        (n0, r0), (n1, r1) = results[0], results[-1]
+        (n0, r0, _), (n1, r1, _) = results[0], results[-1]
         print(f'  n={n0:<5} MAE={r0["mae"]:.3f} peak={r0["peak"]:.2f}   ->   '
               f'n={n1:<5} MAE={r1["mae"]:.3f} peak={r1["peak"]:.2f}')
 

@@ -30,7 +30,10 @@ NN_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 PYTHON="/home/nevecc/.conda/envs/cosmic/bin/python"
 
 SWEEP="10 50 200 1000"
-EPOCHS=60
+# Generous budget: the diagnostic showed small n overtrains long before 60 epochs
+# while large n was STILL improving at 60. Early stopping then gives each size the
+# training length it actually needs, instead of one budget that is wrong for both.
+EPOCHS=300
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 log "Job ${SLURM_JOB_ID} on $(hostname)  GPUs: ${CUDA_VISIBLE_DEVICES:-none}"
