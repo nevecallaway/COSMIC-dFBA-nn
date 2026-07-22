@@ -34,7 +34,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-IDX_CD = 0            # cell density = X, the flux driver (must be feature 0)
+IDX_CD    = 0         # cell density = X, the flux driver (must be feature 0)
+EXP_GUARD = 10.0      # overflow guard on the growth exponent (not a biological cap)
 
 N_FEATURES       = 6  # CellDensity, Titer, Glucose, Asparagine, Serine, Glycine
 N_INPUT_FEATURES = N_FEATURES + 1      # + normalized day index
@@ -64,7 +65,11 @@ def fedbatch_step(C_phys, v, feed_conc, feed_frac):
         (B, F) physical concentrations at the next day
     """
     X0 = C_phys[:, IDX_CD:IDX_CD + 1]
-    vX = v[:, IDX_CD:IDX_CD + 1]
+    # Numerical overflow guard on the growth exponent only. A specific growth rate
+    # of +/-10 per day is e^10 ~ 22000-fold per day, orders of magnitude outside
+    # anything physiological, so this never binds on a sane solution; it exists so
+    # a bad step during a long rollout cannot produce inf and poison the graph.
+    vX = v[:, IDX_CD:IDX_CD + 1].clamp(-EXP_GUARD, EXP_GUARD)
 
     # --- closed vessel growth / consumption over one day ---
     grown = C_phys + v * X0 * _expm1_over_x(vX)          # dC/dt = v*X for all
@@ -105,6 +110,14 @@ class FedBatchDecoder(nn.Module):
         )
         self.attn = nn.Linear(hidden, 1)
         self.head = nn.Linear(hidden + n_doe, n_features)
+
+        # Start from ZERO flux. With v = 0 the ODE step is the identity, so a
+        # multi-step autoregressive rollout stays finite at initialization and
+        # training can get going. With the default random init, arbitrary initial
+        # growth fluxes compound through exp(v*X) over the rollout and overflow to
+        # inf/NaN on the very first batch.
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
 
         self.register_buffer('feat_min',   torch.zeros(n_features))
         self.register_buffer('feat_scale', torch.ones(n_features))
