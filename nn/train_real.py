@@ -85,7 +85,16 @@ def main():
     else:
         ModelClass = FluxDecoder
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # CUDA can be "visible" on a login node without being allocated to us, which
+    # fails only at the first .to(device). Probe it and fall back to CPU: this
+    # model is tiny, so CPU is perfectly adequate.
+    device = torch.device('cpu')
+    if torch.cuda.is_available():
+        try:
+            torch.zeros(1).cuda()
+            device = torch.device('cuda')
+        except RuntimeError:
+            print('CUDA visible but not allocated (no --gres=gpu?); using CPU.')
     print(f'Device: {device}')
 
     npz = np.load(args.ode_data, allow_pickle=True)
