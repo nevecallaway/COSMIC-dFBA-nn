@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from device_utils import pick_device
 from model import FEATURE_INDICES, N_DAYS, SEQ_LEN
 from real_data import denormalize_data2, REACTOR_IDS
 from plot_loro import run, load_model, ensemble, single_step, forecast
@@ -70,7 +71,7 @@ def main():
     args = ap.parse_args()
 
     feat = args.feature
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = pick_device()
     py = sys.executable
 
     # ODE npz once: physical scale + DoE + feed for train_real (no extras needed).

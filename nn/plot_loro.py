@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from device_utils import pick_device
 from model import FEATURE_INDICES, N_FEATURES, SEQ_LEN, N_DAYS
 from model_primeur import FluxDecoder
 from evaluate import rollout
@@ -126,7 +127,7 @@ def main():
 
     feat = args.feature
     comp = FEATURE_INDICES[feat]
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = pick_device()
     py = sys.executable
     folds = [[int(x) for x in f.split()] for f in args.folds]
 

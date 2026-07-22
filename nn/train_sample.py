@@ -29,6 +29,7 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 
+from device_utils import pick_device
 from model_primeur import (FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN,
                            N_SUBSTEPS, N_DAYS)
 
@@ -88,7 +89,7 @@ def main():
         ModelClass = FluxDecoder
 
     torch.manual_seed(args.seed)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = pick_device()
     print(f'Device: {device}')
 
     # ------------------------------------------------------------------ data

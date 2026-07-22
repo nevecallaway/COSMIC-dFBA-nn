@@ -34,6 +34,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from sklearn.preprocessing import MinMaxScaler
 
+from device_utils import pick_device
 from model_primeur import FluxDecoder, N_FEATURES, N_INPUT_FEATURES, SEQ_LEN
 from generate_synthetic_ode import build_windows
 from train_sample import FluxWindowDataset
@@ -85,16 +86,7 @@ def main():
     else:
         ModelClass = FluxDecoder
 
-    # CUDA can be "visible" on a login node without being allocated to us, which
-    # fails only at the first .to(device). Probe it and fall back to CPU: this
-    # model is tiny, so CPU is perfectly adequate.
-    device = torch.device('cpu')
-    if torch.cuda.is_available():
-        try:
-            torch.zeros(1).cuda()
-            device = torch.device('cuda')
-        except RuntimeError:
-            print('CUDA visible but not allocated (no --gres=gpu?); using CPU.')
+    device = pick_device()
     print(f'Device: {device}')
 
     npz = np.load(args.ode_data, allow_pickle=True)

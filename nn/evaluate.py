@@ -28,6 +28,7 @@ from scipy.stats import spearmanr
 from sklearn.metrics import (confusion_matrix, precision_score, recall_score,
                              f1_score, roc_curve, auc)
 
+from device_utils import pick_device
 from model import NextDayPredictor, N_FEATURES, SEQ_LEN, FEATURE_INDICES, N_DAYS
 from model_primeur import FluxDecoder
 
@@ -176,7 +177,7 @@ def main():
                              'the ODE trajectory. Use for models trained with train_real.py.')
     args = parser.parse_args()
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = pick_device()
     print(f'Device: {device}')
 
     ckpt    = torch.load(args.model, map_location=device, weights_only=False)

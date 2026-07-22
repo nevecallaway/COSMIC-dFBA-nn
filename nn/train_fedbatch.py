@@ -29,6 +29,7 @@ import torch
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+from device_utils import pick_device
 from fedbatch_data import load_fedbatch
 from model_fedbatch import FedBatchDecoder
 
@@ -233,15 +234,7 @@ def main():
                     help='write per-epoch train/val curves as CSV here')
     args = ap.parse_args()
 
-    if args.device == 'auto':
-        device = torch.device('cpu')
-        if torch.cuda.is_available():
-            try:
-                torch.zeros(1).cuda(); device = torch.device('cuda')
-            except RuntimeError as e:
-                print(f'CUDA visible but unusable ({e.__class__.__name__}); using CPU.')
-    else:
-        device = torch.device(args.device)
+    device = pick_device(args.device)
 
     data = load_fedbatch()
     R, D, F = data['traj'].shape
