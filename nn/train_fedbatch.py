@@ -77,10 +77,15 @@ def _scale_arrays(scaler):
 
 
 def train_model(data, train_runs, seq_len, hidden, epochs, lr, batch, device,
-                horizon=None, seed=0, val_frac=0.2, patience=0, curve_csv=None):
+                horizon=None, seed=0, val_runs=None, patience=0, curve_csv=None):
     """
-    Train on a rollout objective, holding out a validation slice of the TRAINING
-    runs (never the evaluation holdout) so we can see overtraining.
+    Train on a rollout objective against a FIXED validation set.
+
+    val_runs is a dedicated set of runs, disjoint from both the training pool and
+    the evaluation holdout, and identical for every sweep size. That matters: a
+    validation fraction carved out of the training runs would be 2 runs at
+    n_train=10, far too noisy to early-stop on, and it would also shrink the
+    training set so the sweep sizes were not what they claimed.
 
     patience > 0 enables early stopping on validation loss and restores the best
     weights. curve_csv writes the per-epoch train/val curves for plotting.
@@ -89,12 +94,8 @@ def train_model(data, train_runs, seq_len, hidden, epochs, lr, batch, device,
     n_days = data['traj'].shape[1]
     n_feat = data['traj'].shape[2]
 
-    # split the training runs into fit / validation
-    train_runs = np.asarray(train_runs)
-    n_val = int(round(len(train_runs) * val_frac))
-    n_val = min(max(n_val, 1), max(len(train_runs) - 1, 1)) if len(train_runs) > 1 else 0
-    val_runs = train_runs[:n_val]
-    fit_runs = train_runs[n_val:] if n_val else train_runs
+    fit_runs = np.asarray(train_runs)
+    n_val = 0 if val_runs is None else len(val_runs)
 
     seeds, targets, fc, ff = build_rollout_data(data, seq_len, fit_runs)
     H = targets.shape[1] if horizon is None else min(horizon, targets.shape[1])
@@ -223,8 +224,9 @@ def main():
     ap.add_argument('--feature', type=int, default=1, help='scored feature (1=Titer)')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'])
-    ap.add_argument('--val-frac', type=float, default=0.2,
-                    help='fraction of the TRAINING runs held out for validation')
+    ap.add_argument('--n-val', type=int, default=200,
+                    help='size of the FIXED validation set, shared by every sweep '
+                         'size and disjoint from training and the eval holdout')
     ap.add_argument('--patience', type=int, default=0,
                     help='early-stopping patience on val loss (0 = train all epochs)')
     ap.add_argument('--curve-dir', default=None,
@@ -247,10 +249,14 @@ def main():
 
     rng = np.random.default_rng(args.seed)
     perm = rng.permutation(R)
-    holdout, pool = perm[:args.n_holdout], perm[args.n_holdout:]
+    holdout = perm[:args.n_holdout]                       # scored, never trained on
+    val_runs = perm[args.n_holdout:args.n_holdout + args.n_val]   # early stopping only
+    pool = perm[args.n_holdout + args.n_val:]             # training draws from here
     sizes = [n for n in (args.sweep or [args.n_train]) if n <= len(pool)]
     H = (D - args.seq_len) if args.horizon is None else args.horizon
-    print(f'Held-out runs: {len(holdout)} (fixed)  |  training rollout horizon: {H} days\n')
+    print(f'Eval holdout: {len(holdout)} runs | validation: {len(val_runs)} runs '
+          f'(fixed, shared across sizes) | train pool: {len(pool)}')
+    print(f'Training rollout horizon: {H} days\n')
 
     if args.curve_dir:
         os.makedirs(args.curve_dir, exist_ok=True)
@@ -266,7 +272,7 @@ def main():
                if args.curve_dir else None)
         model, scaler, h = train_model(data, pool[:n], args.seq_len, args.hidden,
                                        args.epochs, args.lr, args.batch, device,
-                                       args.horizon, args.seed, args.val_frac,
+                                       args.horizon, args.seed, val_runs,
                                        args.patience, csv)
         r = evaluate(model, data, holdout, scaler, args.seq_len, device, args.feature)
         results.append((n, r, h))
