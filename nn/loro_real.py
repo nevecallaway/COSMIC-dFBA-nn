@@ -61,6 +61,12 @@ def main():
                          'Tests whether a synthetic flux-range prior reins in the overshoots.')
     ap.add_argument('--n-extra', type=int, default=3000,
                     help='Synthetic reactors for the pretrain step (--pretrain only)')
+    ap.add_argument('--val-reactors', type=int, default=2,
+                    help='reactors held out of each fold for validation curves')
+    ap.add_argument('--patience', type=int, default=0,
+                    help='early-stopping patience per fold (0 = fixed epochs, log only)')
+    ap.add_argument('--curve-dir', default=None,
+                    help='write per-fold train/val curves as CSV here')
     args = ap.parse_args()
 
     feat = args.feature
@@ -118,7 +124,13 @@ def main():
         tr_cmd = [py, here / 'train_real.py', '--stripped', '--holdout', i,
                   '--ode-data', ode_for_train, '--output', pt,
                   '--hidden', args.hidden, '--epochs', args.epochs,
-                  '--seq-len', args.seq_len] + init_args
+                  '--seq-len', args.seq_len,
+                  '--val-reactors', args.val_reactors] + init_args
+        if args.patience:
+            tr_cmd += ['--patience', args.patience]
+        if args.curve_dir:
+            Path(args.curve_dir).mkdir(parents=True, exist_ok=True)
+            tr_cmd += ['--curve-csv', str(Path(args.curve_dir) / f'curve_fold{i}.csv')]
         if args.phase:
             tr_cmd.append('--phase')
             if args.phase_threshold is not None:

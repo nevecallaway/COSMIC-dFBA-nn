@@ -68,6 +68,15 @@ def main():
                          'reactor/day (from data_2 phases) instead of the day-8 switch')
     ap.add_argument('--phase-threshold', type=float, default=None,
                     help='With --phase, step eta = 1 once f crosses this value (per reactor)')
+    ap.add_argument('--val-reactors', type=int, default=2,
+                    help='reactors held out of the fit for validation (0 = none). '
+                         'Reactor-level, so it catches reactor generalization, which '
+                         'is the failure mode we care about')
+    ap.add_argument('--patience', type=int, default=0,
+                    help='early-stopping patience on val loss (0 = train all epochs '
+                         'and just log the curve)')
+    ap.add_argument('--curve-csv', default=None,
+                    help='write per-epoch train/val loss curve here')
     args = ap.parse_args()
 
     if args.stripped:
@@ -104,6 +113,20 @@ def main():
           f'holding out {sorted(hold)}')
     windows, targets, wdoe, wcin, weta = (windows[keep], targets[keep], wdoe[keep],
                                           wcin[keep], weta[keep])
+    ridx = ridx[keep]
+
+    # Reactor-level validation split, taken from the TRAINING reactors only.
+    # With ~9 training reactors this is a small validation set and early stopping
+    # on it is noisy; the per-epoch curve is the reliable output, and --patience
+    # is opt-in rather than default for that reason.
+    train_reactors = sorted(set(int(r) for r in ridx))
+    n_val_r = min(args.val_reactors, max(len(train_reactors) - 1, 0))
+    val_reactors = set(train_reactors[:n_val_r])
+    fit_mask = np.array([int(r) not in val_reactors for r in ridx])
+    val_mask = ~fit_mask
+    if n_val_r:
+        print(f'Validation reactors (held out of the fit): {sorted(val_reactors)}  '
+              f'| fit windows={int(fit_mask.sum())} val windows={int(val_mask.sum())}')
 
     win_feats, win_time = windows[:, :, :N_FEATURES], windows[:, :, N_FEATURES:]
 
@@ -112,7 +135,9 @@ def main():
         ckpt = torch.load(args.init, map_location=device, weights_only=False)
         scaler = ckpt['scaler']
     else:
-        scaler = MinMaxScaler().fit(np.vstack([win_feats.reshape(-1, N_FEATURES), targets]))
+        # fit on the FIT windows only, so validation does not leak into normalization
+        scaler = MinMaxScaler().fit(
+            np.vstack([win_feats[fit_mask].reshape(-1, N_FEATURES), targets[fit_mask]]))
 
     n, s, f = win_feats.shape
     win_scaled = scaler.transform(win_feats.reshape(-1, f)).reshape(n, s, f).astype(np.float32)
@@ -121,7 +146,11 @@ def main():
     doe_scale = doe_max - doe_min; doe_scale[doe_scale == 0] = 1.0
     wdoe_n = ((wdoe - doe_min) / doe_scale).astype(np.float32)
 
-    ds = FluxWindowDataset(windows_n, wdoe_n, wcin, weta, targets_n)
+    ds = FluxWindowDataset(windows_n[fit_mask], wdoe_n[fit_mask], wcin[fit_mask],
+                           weta[fit_mask], targets_n[fit_mask])
+    val_ds = (FluxWindowDataset(windows_n[val_mask], wdoe_n[val_mask], wcin[val_mask],
+                                weta[val_mask], targets_n[val_mask])
+              if n_val_r else None)
     loader = DataLoader(ds, batch_size=args.batch, shuffle=True)
     print(f'Real training windows: {len(ds)}')
 
@@ -148,6 +177,10 @@ def main():
     print(f'Trainable parameters: {n_params:,}  hidden={hidden}')
 
     # ---- train (plain MSE; small model + weight decay for the tiny dataset) ----
+    val_loader = (DataLoader(val_ds, batch_size=args.batch, shuffle=False)
+                  if val_ds is not None and len(val_ds) else None)
+    curves, best_val, best_state, best_ep, bad = [], float('inf'), None, 0, 0
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         tot = 0.0
@@ -160,8 +193,46 @@ def main():
             loss.backward()
             opt.step()
             tot += loss.item() * len(x)
+        tr = tot / len(ds)
+
+        vl = float('nan')
+        if val_loader is not None:
+            model.eval(); vtot = 0.0
+            with torch.no_grad():
+                for x, d, cin, eta, y in val_loader:
+                    x, d, cin, eta, y = (x.to(device), d.to(device), cin.to(device),
+                                         eta.to(device), y.to(device))
+                    pred, _ = model(x, d, cin, eta_ext=eta)
+                    vtot += ((pred - y) ** 2).mean().item() * len(x)
+            vl = vtot / len(val_ds)
+            if vl < best_val - 1e-9:
+                best_val, best_ep, bad = vl, epoch, 0
+                best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            else:
+                bad += 1
+        curves.append((epoch, tr, vl))
+
         if epoch % 25 == 0 or epoch == 1:
-            print(f'Epoch {epoch:4d}  loss={tot / len(ds):.5f}')
+            print(f'Epoch {epoch:4d}  train={tr:.5f}  val={vl:.5f}')
+        if args.patience and bad >= args.patience:
+            print(f'Early stop at epoch {epoch} (best {best_ep}, val={best_val:.5f})')
+            break
+
+    if args.patience and best_state is not None:
+        model.load_state_dict(best_state)
+        print(f'Restored best weights from epoch {best_ep}')
+    if curves and not np.isnan(curves[-1][2]):
+        frac = best_ep / max(len(curves), 1)
+        worse = (curves[-1][2] - best_val) / max(best_val, 1e-12)
+        print(f'Val bottomed at epoch {best_ep}/{len(curves)} ({frac:.0%} through); '
+              f'val rose {worse:+.1%} after best'
+              + ('   <-- OVERTRAINED' if (frac < 0.6 and worse > 0.05) else ''))
+    if args.curve_csv:
+        with open(args.curve_csv, 'w') as fh:
+            fh.write('epoch,train_loss,val_loss\n')
+            for e, t, v in curves:
+                fh.write(f'{e},{t:.8f},{v:.8f}\n')
+        print(f'Curve -> {args.curve_csv}')
 
     torch.save({
         'model_state': model.state_dict(), 'scaler': scaler,
