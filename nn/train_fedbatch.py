@@ -126,9 +126,22 @@ def main():
     ap.add_argument('--batch', type=int, default=256)
     ap.add_argument('--feature', type=int, default=1, help='scored feature (1=Titer)')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'],
+                    help='auto uses cuda when usable; the model is small enough '
+                         'that cpu is perfectly fine')
     args = ap.parse_args()
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if args.device == 'auto':
+        device = torch.device('cpu')
+        if torch.cuda.is_available():
+            try:                       # cuda can be "visible" but not allocated to us
+                torch.zeros(1).cuda()
+                device = torch.device('cuda')
+            except RuntimeError as e:
+                print(f'CUDA visible but unusable ({e.__class__.__name__}); using CPU. '
+                      f'Request a GPU with --gres=gpu:1 to use it.')
+    else:
+        device = torch.device(args.device)
     data = load_fedbatch()
     R = data['traj'].shape[0]
     print(f'Loaded {R} runs, features={data["features"]}, device={device}')
