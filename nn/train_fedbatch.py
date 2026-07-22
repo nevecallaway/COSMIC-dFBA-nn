@@ -86,7 +86,7 @@ def forecast_run(model, data, i, scaler, seq_len, device):
     model.eval()
     out = []
     for t in range(seq_len, D):
-        tcol = (np.arange(t - seq_len, t, np.float32) / (D - 1))[:, None]
+        tcol = (np.arange(t - seq_len, t, dtype=np.float32) / (D - 1))[:, None]
         x = torch.from_numpy(np.concatenate([win, tcol], 1)[None]).to(device)
         ff = torch.tensor([[data['feed_frac'][i, t]]], dtype=torch.float32, device=device)
         nxt, _ = model(x, None, fc, ff)
