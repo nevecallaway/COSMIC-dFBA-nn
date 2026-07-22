@@ -33,7 +33,12 @@ SEED   = int(os.environ.get('FEDBATCH_SEED', '0'))
 
 BASE    = 'in_silico_fed_batch_CHOK1_cell_culture/'
 INNER7Z = BASE + 'in_silico_runs_compressed.7z'
-RUNDIR  = 'fedbatch_runs'          # scratch dir for the extracted sample CSVs
+
+# Keep the big intermediates (inner 7z, extracted CSVs) beside the zip, not in
+# the repo's code directory. Both are gitignored.
+WORKDIR = os.path.dirname(os.path.abspath(ZIP)) or '.'
+RUNDIR  = os.path.join(WORKDIR, 'fedbatch_runs')
+INNER_LOCAL = os.path.join(WORKDIR, 'fedbatch_inner.7z')
 
 # our-model-feature -> column in each run CSV (6 of our 8; no cell size / glutamine here)
 FEATS = {
@@ -50,7 +55,7 @@ def extract_sample(inner_7z_path, targets, outdir):
     """Extract the listed internal files from the solid 7z into outdir."""
     os.makedirs(outdir, exist_ok=True)
     if shutil.which('7z'):
-        listfile = 'fedbatch_extract_list.txt'
+        listfile = os.path.join(outdir, 'fedbatch_extract_list.txt')
         with open(listfile, 'w') as fh:
             fh.write('\n'.join(targets) + '\n')
         subprocess.run(['7z', 'x', inner_7z_path, f'@{listfile}', f'-o{outdir}', '-y'],
@@ -74,15 +79,14 @@ def main():
     rng = np.random.default_rng(SEED)
     sample_ids = np.sort(rng.choice(info['bioreactor_id'].values, N, replace=False))
 
-    inner_local = 'fedbatch_inner.7z'
-    if not os.path.exists(inner_local):
-        zf.extract(INNER7Z, '.')
-        os.replace(INNER7Z, inner_local)
+    if not os.path.exists(INNER_LOCAL):
+        zf.extract(INNER7Z, WORKDIR)
+        os.replace(os.path.join(WORKDIR, INNER7Z), INNER_LOCAL)
 
     targets = [f'in_silico_runs/bioreactor_id({i}).csv' for i in sample_ids]
     print(f'Extracting {len(targets)} runs from the solid archive '
           f'(this is the slow step)...', flush=True)
-    extract_sample(inner_local, targets, RUNDIR)
+    extract_sample(INNER_LOCAL, targets, RUNDIR)
 
     day_hours = np.arange(0, 15) * 24        # days 0..14
     trajs, ids = [], []

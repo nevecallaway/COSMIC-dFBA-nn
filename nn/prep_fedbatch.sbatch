@@ -4,7 +4,7 @@
 # CPU partition, not gpu. The 13 GB zip must already be downloaded:
 #
 #   On a login/transfer node (compute nodes have no internet):
-#       mkdir -p $HOME/cosmic/data && cd $HOME/cosmic/data
+#       cd <repo>/nn/data
 #       wget -O cho_fedbatch.zip "https://ndownloader.figshare.com/files/56779742"
 #
 #   Then, from the repo's nn/ directory:
@@ -29,9 +29,9 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate cosmic
 python -c "import py7zr" 2>/dev/null || pip install --quiet py7zr
 
-# --- paths: big zip on scratch, small npz to persistent storage ---
-export FEDBATCH_ZIP=$HOME/cosmic/data/cho_fedbatch.zip
-export FEDBATCH_OUT=$HOME/cosmic/data/cho_fedbatch_daily.npz
+# --- paths: zip lives in nn/data (gitignored); npz written alongside it ---
+export FEDBATCH_ZIP=$SLURM_SUBMIT_DIR/data/cho_fedbatch.zip
+export FEDBATCH_OUT=$SLURM_SUBMIT_DIR/data/cho_fedbatch_daily.npz
 export FEDBATCH_N=2000
 export FEDBATCH_SEED=0
 

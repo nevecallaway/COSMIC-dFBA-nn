@@ -1,6 +1,12 @@
 # Generated data files
 *.npz
 
+# Large downloaded / extracted datasets (13 GB+, never commit)
+*.zip
+*.7z
+fedbatch_runs/
+fedbatch_extract_list.txt
+
 # Python
 __pycache__/
 *.pyc
