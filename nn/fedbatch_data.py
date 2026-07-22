@@ -69,8 +69,13 @@ def load_fedbatch(npz_path=NPZ, zip_path=ZIP, v0=V0_LITRES):
 
     fm = pd.DataFrame(d['feed_media'],    columns=[str(c) for c in d['feed_media_cols']])
     fs = pd.DataFrame(d['feed_strategy'], columns=[str(c) for c in d['feed_strategy_cols']])
+    # The published tables contain a few duplicated ids (runs_information has
+    # 400,569 rows, not exactly 1000*100*4), and .loc on a duplicated index
+    # returns extra rows. Keep the first occurrence of each id.
     fm = fm.set_index('feed_media_concentration_id')
+    fm = fm[~fm.index.duplicated(keep='first')]
     fs = fs.set_index('feed_strategy_id')
+    fs = fs[~fs.index.duplicated(keep='first')]
     day_cols = [c for c in fs.columns if c.startswith('day_')]
 
     # --- per-run feed composition on our features ---
@@ -79,7 +84,7 @@ def load_fedbatch(npz_path=NPZ, zip_path=ZIP, v0=V0_LITRES):
         col = FEED_COL.get(name)
         if col is None:
             continue
-        feed_conc[:, j] = fm.loc[d['feed_media_id'], col].to_numpy(np.float32)
+        feed_conc[:, j] = fm.reindex(d['feed_media_id'])[col].to_numpy(np.float32)
 
     # --- per-run feed day mask, aligned to trajectory day index ---
     # feed_strategy day_1..day_13 map onto trajectory days 1..13.
@@ -93,7 +98,11 @@ def load_fedbatch(npz_path=NPZ, zip_path=ZIP, v0=V0_LITRES):
     zf = zipfile.ZipFile(zip_path)
     info = pd.read_csv(zf.open(BASE + 'in_silico_runs_information.csv'))
     info = info.set_index('bioreactor_id')
-    v_final = info.loc[run_ids, 'final_day_volume(L)'].to_numpy(np.float64)
+    info = info[~info.index.duplicated(keep='first')]
+    v_final = info.reindex(run_ids)['final_day_volume(L)'].to_numpy(np.float64)
+    if np.isnan(v_final).any() or np.isnan(feed_conc).any():
+        raise ValueError('missing metadata for some sampled runs '
+                         '(unmatched bioreactor_id or feed_media_concentration_id)')
 
     n_feeds = fed.sum(axis=1).astype(np.float64)
     v_bolus = np.where(n_feeds > 0, (v_final - v0) / np.maximum(n_feeds, 1), 0.0)
