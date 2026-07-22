@@ -41,8 +41,17 @@ log "Job ${SLURM_JOB_ID} on $(hostname)"
 mkdir -p "$NN_DIR/logs"
 cd "$NN_DIR"
 
-# py7zr is only needed if the system 7z is unavailable; prep_fedbatch.py prefers 7z.
-$PYTHON -c "import py7zr" 2>/dev/null || $PYTHON -m pip install --quiet py7zr
+# prep_fedbatch.py prefers the system `7z`; py7zr is only the fallback. Compute
+# nodes have no internet, so a pip install here would fail: keep it non-fatal and
+# pre-install py7zr on a LOGIN node instead if `7z` is not available:
+#     /home/nevecc/.conda/envs/cosmic/bin/python -m pip install py7zr
+if ! command -v 7z >/dev/null 2>&1; then
+    $PYTHON -c "import py7zr" 2>/dev/null || {
+        log "WARNING: neither system 7z nor py7zr found."
+        log "Run on a login node: $PYTHON -m pip install py7zr"
+        exit 1
+    }
+fi
 
 export FEDBATCH_ZIP="$NN_DIR/data/cho_fedbatch.zip"
 export FEDBATCH_OUT="$NN_DIR/data/cho_fedbatch_daily.npz"
