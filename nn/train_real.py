@@ -134,6 +134,10 @@ def main():
                     help='ODE-relaxation knob: 0 = pure hybrid (physics is a hard '
                          'layer); >0 lets the net add a free correction to bend away '
                          'from the ODE. Sweep it to trade real-data fit vs generalization')
+    ap.add_argument('--residual-l2', type=float, default=0.0,
+                    help='L2 penalty on the residual correction magnitude. Encourages the '
+                         'net to correct the ODE only where it clearly helps, curbing the '
+                         'overshoot the free residual introduces')
     ap.add_argument('--rollout', action='store_true',
                     help='Train on the autoregressive forecast instead of one-day-ahead: '
                          'seed the first seq_len real days, predict the rest from the '
@@ -325,6 +329,8 @@ def main():
             opt.zero_grad()
             pred, _ = model(x, d, cin, eta_ext=eta)
             loss = ((pred - y) ** 2).mean()
+            if args.residual_l2 > 0 and model._last_residual is not None:
+                loss = loss + args.residual_l2 * (model._last_residual ** 2).mean()
             loss.backward()
             opt.step()
             tot += loss.item() * len(x)

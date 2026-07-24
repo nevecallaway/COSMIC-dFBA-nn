@@ -80,6 +80,8 @@ def main():
     ap.add_argument('--residual-weight', type=float, default=0.0,
                     help='ODE-relaxation knob (0 = pure hybrid). Sweep to test whether '
                          'letting the net bend off the physics helps the real fit')
+    ap.add_argument('--residual-l2', type=float, default=0.0,
+                    help='L2 penalty on the residual correction (curbs overshoot)')
     ap.add_argument('--batch', type=int, default=8,
                     help='training batch size per fold (small dataset: 8 or 16)')
     ap.add_argument('--gap-stop', type=float, default=None,
@@ -164,6 +166,7 @@ def main():
                   '--hidden', args.hidden, '--epochs', args.epochs,
                   '--seq-len', args.seq_len, '--batch', args.batch,
                   '--seed', args.seed, '--residual-weight', args.residual_weight,
+                  '--residual-l2', args.residual_l2,
                   '--val-reactors', args.val_reactors] + init_args
         if args.eta_day is not None:
             tr_cmd += ['--eta-day', args.eta_day]

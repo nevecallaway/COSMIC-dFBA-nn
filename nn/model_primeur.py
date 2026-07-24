@@ -177,6 +177,7 @@ class FluxDecoder(nn.Module):
         # in forward so it only exists when the knob is on.
         self.residual_weight = residual_weight
         self.residual_head = None
+        self._last_residual = None      # applied correction, for an optional L2 penalty
 
         conv_layers = [
             nn.Conv1d(n_input_features, hidden, kernel_size=3, padding=1),
@@ -255,7 +256,11 @@ class FluxDecoder(nn.Module):
         # ODE relaxation: add a free correction (in normalized space) so the network
         # can deviate from the physics. residual_weight=0 -> pure hybrid (no-op).
         if self.residual_head is not None:
-            C_next_norm = C_next_norm + self.residual_weight * self.residual_head(context)
+            resid = self.residual_weight * self.residual_head(context)
+            self._last_residual = resid
+            C_next_norm = C_next_norm + resid
+        else:
+            self._last_residual = None
 
         return C_next_norm, v
 
