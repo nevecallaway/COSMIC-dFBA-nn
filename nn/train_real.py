@@ -130,6 +130,10 @@ def main():
                     help='stop as soon as val_loss exceeds this multiple of train_loss, '
                          'i.e. when the val curve "lifts off" the train curve. This is a '
                          'gap criterion, not the usual "val stopped improving" one.')
+    ap.add_argument('--residual-weight', type=float, default=0.0,
+                    help='ODE-relaxation knob: 0 = pure hybrid (physics is a hard '
+                         'layer); >0 lets the net add a free correction to bend away '
+                         'from the ODE. Sweep it to trade real-data fit vs generalization')
     ap.add_argument('--rollout', action='store_true',
                     help='Train on the autoregressive forecast instead of one-day-ahead: '
                          'seed the first seq_len real days, predict the rest from the '
@@ -231,7 +235,8 @@ def main():
     if args.init:
         hidden = ckpt.get('hidden', hidden)
     model = ModelClass(hidden=hidden, n_doe=n_doe,
-                       n_input_features=N_INPUT_FEATURES, n_substeps=args.substeps).to(device)
+                       n_input_features=N_INPUT_FEATURES, n_substeps=args.substeps,
+                       residual_weight=args.residual_weight).to(device)
     if args.init:
         model.load_state_dict(ckpt['model_state'])
         print(f'Transfer: initialized from {args.init}')
@@ -374,6 +379,7 @@ def main():
         'n_features': N_FEATURES, 'n_input_features': N_INPUT_FEATURES,
         'seq_len': args.seq_len, 'n_doe': n_doe, 'n_substeps': args.substeps,
         'arch': 'stripped' if args.stripped else 'primeur',
+        'residual_weight': args.residual_weight,
         'phase': args.phase,
     }, args.output)
     print(f'Saved to {args.output}')

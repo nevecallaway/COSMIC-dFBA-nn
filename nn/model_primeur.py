@@ -162,12 +162,21 @@ class FluxDecoder(nn.Module):
 
     def __init__(self, n_features=N_FEATURES, n_input_features=N_INPUT_FEATURES,
                  hidden=64, n_conv_layers=3, dropout=0.1, n_doe=3,
-                 n_substeps=N_SUBSTEPS, integrator='closed'):
+                 n_substeps=N_SUBSTEPS, integrator='closed', residual_weight=0.0):
         super().__init__()
         self.n_features = n_features
         self.n_doe      = n_doe
         self.n_substeps = n_substeps
         self.integrator = integrator   # 'closed' (exact, fast) or 'euler'
+
+        # ODE-relaxation knob. residual_weight=0 is the pure hybrid (the ODE is a
+        # hard layer). >0 adds a free, non-ODE correction the network can use to
+        # bend away from the physics where the data disagrees (e.g. the day-8 peak
+        # the real data doesn't share). Sweeping it trades real-data fit against
+        # the generalization the ODE provides. The correction head is built lazily
+        # in forward so it only exists when the knob is on.
+        self.residual_weight = residual_weight
+        self.residual_head = None
 
         conv_layers = [
             nn.Conv1d(n_input_features, hidden, kernel_size=3, padding=1),
@@ -189,6 +198,8 @@ class FluxDecoder(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, n_features),
         )
+        if residual_weight > 0:
+            self.residual_head = nn.Linear(hidden + n_doe, n_features)
 
         # Scaler params (physical <-> normalized). Set via set_scaler().
         self.register_buffer('feat_min',   torch.zeros(n_features))
@@ -201,17 +212,22 @@ class FluxDecoder(nn.Module):
         rng[rng == 0] = 1.0
         self.feat_scale.copy_(torch.tensor(rng, dtype=torch.float32))
 
-    def predict_flux(self, x, doe):
-        """Network body: window -> fluxes v (B, n_features)."""
+    def _context(self, x, doe):
+        """Network body: window -> pooled context (B, hidden [+ n_doe])."""
         h = self.conv(x.transpose(1, 2)).transpose(1, 2)     # (B, seq, hidden)
         w = torch.softmax(self.attn(h).squeeze(-1), dim=-1)  # (B, seq)
         context = (h * w.unsqueeze(-1)).sum(dim=1)           # (B, hidden)
         if self.n_doe > 0 and doe is not None:
             context = torch.cat([context, doe], dim=-1)
-        return self.head(context)                            # (B, n_features)
+        return context
+
+    def predict_flux(self, x, doe):
+        """Window -> fluxes v (B, n_features)."""
+        return self.head(self._context(x, doe))
 
     def forward(self, x, doe, cin_phys, eta_ext=None):
-        v = self.predict_flux(x, doe)
+        context = self._context(x, doe)
+        v = self.head(context)
 
         # Current physical state = last day of the window, un-normalized.
         C_last_norm = x[:, -1, :self.n_features]
@@ -235,6 +251,12 @@ class FluxDecoder(nn.Module):
                                    n_substeps=self.n_substeps)
 
         C_next_norm = (C_next_phys - self.feat_min) / self.feat_scale
+
+        # ODE relaxation: add a free correction (in normalized space) so the network
+        # can deviate from the physics. residual_weight=0 -> pure hybrid (no-op).
+        if self.residual_head is not None:
+            C_next_norm = C_next_norm + self.residual_weight * self.residual_head(context)
+
         return C_next_norm, v
 
 
