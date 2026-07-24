@@ -36,7 +36,10 @@ import torch
 from device_utils import pick_device
 from model import FEATURE_INDICES, N_DAYS, SEQ_LEN
 from real_data import denormalize_data2, REACTOR_IDS
-from plot_loro import run, load_model, ensemble, single_step, forecast
+from functools import partial
+
+from plot_loro import (run, load_model, ensemble, single_step, forecast,
+                       warmup_forecast)
 
 
 def main():
@@ -50,6 +53,10 @@ def main():
     ap.add_argument('--single-step', action='store_true',
                     help='Teacher-forced: predict each day from the REAL previous window '
                          '(one-day-ahead accuracy, not a forecast)')
+    ap.add_argument('--warmup', type=int, default=None,
+                    help='Warm-started forecast: make N predictions from REAL windows, '
+                         'then free-run on own predictions for the rest. Bridges '
+                         'single-step (N=all) and pure forecast (N=0).')
     ap.add_argument('--band', action='store_true',
                     help='Ensemble of all windows with the min/max band')
     ap.add_argument('--phase', action='store_true',
@@ -117,7 +124,14 @@ def main():
     real_sub = real[:, :, FEATURE_INDICES].astype(np.float32)          # (10, N_DAYS, 8)
     ode_sub  = ode_traj[:, :, FEATURE_INDICES].astype(np.float32)      # synthetic ref
 
-    predict = single_step if args.single_step else (ensemble if args.band else forecast)
+    if args.warmup is not None:
+        predict = partial(warmup_forecast, warmup=args.warmup)
+    elif args.single_step:
+        predict = single_step
+    elif args.band:
+        predict = ensemble
+    else:
+        predict = forecast
     preds = {}
     for i in range(n_original):
         pt = here / f'loro_real_{i}.pt'
