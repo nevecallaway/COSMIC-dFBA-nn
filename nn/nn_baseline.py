@@ -50,6 +50,9 @@ def main():
     ap.add_argument('--val-frac', type=float, default=0.1,
                     help='fraction of WINDOWS held out per reactor (not whole reactors)')
     ap.add_argument('--feature', type=int, default=0, help='scored feature (0 = cell density)')
+    ap.add_argument('--all-features', action='store_true',
+                    help='score + summarize every feature in one run (a table over all 8), '
+                         'still plots the --feature one')
     ap.add_argument('--seed', type=int, default=0)
     args = ap.parse_args()
 
@@ -118,28 +121,37 @@ def main():
             print(f'epoch {ep:4d}  train={tot/len(tr_ds):.5f}  val={vl:.5f}')
     model.load_state_dict(best_state)
 
-    # --- per-reactor cell-density trajectory: autoregressive rollout vs synthetic truth ---
+    # --- per-reactor rollout vs synthetic truth, in ABSOLUTE units ---
     fmin = scaler.data_min_.astype(np.float32)
     fsc  = (scaler.data_max_ - scaler.data_min_).astype(np.float32); fsc[fsc == 0] = 1.0
-    preds, rhos, maes, ratios = {}, [], [], []
+    all_pred = np.zeros((n_original, N_DAYS - SEQ_LEN, N_FEATURES), np.float32)
     for i in range(n_original):
         seed = np.clip((sub[i, :SEQ_LEN] - fmin) / fsc, 0.0, 1.0)
         tcol = (np.arange(SEQ_LEN, dtype=np.float32) / (N_DAYS - 1))[:, None]
         seed = np.concatenate([seed, tcol], axis=1)
         doe_i = (npz['doe_params'][i].astype(np.float32) - doe_min) / dsc
         pr = rollout(model, seed, n_steps=N_DAYS - SEQ_LEN, device=device, doe=doe_i)
-        pred = pr[:, feat] * fsc[feat] + fmin[feat]         # absolute units
-        real = sub[i, SEQ_LEN:, feat]
-        preds[i] = pred
-        rmax = real.max() if real.max() > 0 else 1.0
-        if np.std(pred) > 0 and np.std(real) > 0:
-            rhos.append(float(np.corrcoef(pred, real)[0, 1]))
-        maes.append(float(np.mean(np.abs(pred - real)) / rmax))
-        ratios.append(float(pred.max() / rmax))
+        all_pred[i] = pr * fsc + fmin                       # absolute units, all features
 
-    print(f'\n{FEATURE_NAMES[feat]} (pure NN, no ODE), rollout vs synthetic truth:')
-    print(f'  mean rho={np.mean(rhos):.2f}  norm MAE={np.mean(maes):.3f}  '
-          f'peak ratio={np.mean(ratios):.2f}')
+    def score(f):
+        rhos, maes, ratios = [], [], []
+        for i in range(n_original):
+            pred, real = all_pred[i, :, f], sub[i, SEQ_LEN:, f]
+            rmax = real.max() if real.max() > 0 else 1.0
+            if np.std(pred) > 0 and np.std(real) > 0:
+                rhos.append(float(np.corrcoef(pred, real)[0, 1]))
+            maes.append(float(np.mean(np.abs(pred - real)) / rmax))
+            ratios.append(float(pred.max() / rmax))
+        return np.mean(rhos), np.mean(maes), np.mean(ratios)
+
+    feats = range(N_FEATURES) if args.all_features else [feat]
+    print(f'\npure NN (no ODE), rollout vs synthetic truth:')
+    print(f'{"feature":>12} | {"rho":>5} {"normMAE":>8} {"peak":>5}')
+    print('-' * 36)
+    for f in feats:
+        r, m, p = score(f)
+        print(f'{FEATURE_NAMES[f]:>12} | {r:>5.2f} {m:>8.3f} {p:>5.2f}')
+    preds = {i: all_pred[i, :, feat] for i in range(n_original)}
 
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
