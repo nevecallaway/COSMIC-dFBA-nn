@@ -69,7 +69,8 @@ def time_nn(model, n, device, is_hybrid):
                 out, _ = model(win, doe, cin)
             else:
                 out = model(win, doe)
-            nxt = torch.cat([out, win[:, -1:, N_FEATURES:]], dim=2)   # carry time col
+            # out is (N, features); add a time step and carry the time column forward
+            nxt = torch.cat([out.unsqueeze(1), win[:, -1:, N_FEATURES:]], dim=2)
             win = torch.cat([win[:, 1:], nxt], dim=1)
         if device.type == 'cuda':
             torch.cuda.synchronize()
