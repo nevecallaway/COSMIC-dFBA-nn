@@ -84,20 +84,28 @@ def time_nn(model, n, device, is_hybrid):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=1000, help='reactors to simulate/predict')
+    ap.add_argument('--hidden', type=int, default=16,
+                    help='body width, SAME for pure NN and hybrid so the comparison '
+                         'isolates the ODE cost, not the network size')
     ap.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'])
     args = ap.parse_args()
 
     device = pick_device(args.device)
-    print(f'Benchmark: {args.n} reactors, {N_DAYS}-day trajectories, device={device}\n')
+    print(f'Benchmark: {args.n} reactors, {N_DAYS}-day trajectories, device={device}, '
+          f'matched hidden={args.hidden}\n')
 
     print('timing mechanistic (numerical solve_ivp)...', flush=True)
     t_num = time_mechanistic(args.n, fast=False)
     print('timing mechanistic (closed-form)...', flush=True)
     t_cf = time_mechanistic(args.n, fast=True)
 
-    pure   = NextDayPredictor(hidden=64, n_doe=3).to(device)
-    hyb_cf = FluxDecoder(hidden=16, n_doe=3, integrator='closed').to(device)
-    hyb_eu = FluxDecoder(hidden=16, n_doe=3, integrator='euler', n_substeps=50).to(device)
+    # Matched architecture: same hidden width and a single conv layer for all,
+    # so any timing difference is the ODE step, not the network.
+    H = args.hidden
+    pure   = NextDayPredictor(hidden=H, n_conv_layers=1, n_doe=3).to(device)
+    hyb_cf = FluxDecoder(hidden=H, n_conv_layers=1, n_doe=3, integrator='closed').to(device)
+    hyb_eu = FluxDecoder(hidden=H, n_conv_layers=1, n_doe=3,
+                         integrator='euler', n_substeps=50).to(device)
     for m in (hyb_cf, hyb_eu):
         class _S:
             data_min_ = np.zeros(N_FEATURES, np.float32)
