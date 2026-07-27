@@ -134,23 +134,28 @@ def main():
         all_pred[i] = pr * fsc + fmin                       # absolute units, all features
 
     def score(f):
-        rhos, maes, ratios = [], [], []
+        rhos, maes, ratios, ranges = [], [], [], []
         for i in range(n_original):
             pred, real = all_pred[i, :, f], sub[i, SEQ_LEN:, f]
             rmax = real.max() if real.max() > 0 else 1.0
+            # relative dynamic range of the TRUE trajectory over the forecast window:
+            # near 0 means the feature is flat, so rho is not meaningful there.
+            ranges.append(float((real.max() - real.min()) / rmax))
             if np.std(pred) > 0 and np.std(real) > 0:
                 rhos.append(float(np.corrcoef(pred, real)[0, 1]))
             maes.append(float(np.mean(np.abs(pred - real)) / rmax))
             ratios.append(float(pred.max() / rmax))
-        return np.mean(rhos), np.mean(maes), np.mean(ratios)
+        return np.mean(rhos), np.mean(maes), np.mean(ratios), np.mean(ranges)
 
     feats = range(N_FEATURES) if args.all_features else [feat]
-    print(f'\npure NN (no ODE), rollout vs synthetic truth:')
-    print(f'{"feature":>12} | {"rho":>5} {"normMAE":>8} {"peak":>5}')
-    print('-' * 36)
+    print(f'\npure NN (no ODE), rollout vs synthetic truth '
+          f'(range = true signal span; rho is not meaningful when range ~ 0):')
+    print(f'{"feature":>12} | {"rho":>5} {"normMAE":>8} {"peak":>5} {"range":>6}  note')
+    print('-' * 52)
     for f in feats:
-        r, m, p = score(f)
-        print(f'{FEATURE_NAMES[f]:>12} | {r:>5.2f} {m:>8.3f} {p:>5.2f}')
+        r, m, p, rng = score(f)
+        note = 'flat -> rho N/A' if rng < 0.1 else ''
+        print(f'{FEATURE_NAMES[f]:>12} | {r:>5.2f} {m:>8.3f} {p:>5.2f} {rng:>6.2f}  {note}')
     preds = {i: all_pred[i, :, feat] for i in range(n_original)}
 
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
