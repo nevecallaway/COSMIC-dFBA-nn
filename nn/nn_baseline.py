@@ -192,6 +192,31 @@ def main():
     for f in feats:
         plot_feature(f)
 
+    # combined single-chart summary: all features, all reactors overlaid
+    if args.all_features:
+        fig, axes = plt.subplots(2, 4, figsize=(22, 9)); axes = axes.flatten()
+        for f in range(N_FEATURES):
+            r, m, p, rng = stats[f]
+            ax = axes[f]
+            for i in range(n_original):
+                ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=0.8, alpha=0.5)
+                ax.plot(np.arange(SEQ_LEN, N_DAYS), all_pred[i, :, f], 'r--',
+                        lw=1.0, alpha=0.7)
+            if rng < 0.1:
+                ax.set_ylim(0, sub[:, :, f].max() * 1.15)     # flat -> anchor at 0
+            tag = ' (flat)' if rng < 0.1 else ''
+            ax.set_title(f'{FEATURE_NAMES[f]}{tag}  peak={p:.2f} MAE={m:.3f} '
+                         f'rho={r:.2f}', fontsize=10)
+        axes[0].plot([], [], 'k-', label='ODE simulation'); axes[0].plot([], [], 'r--',
+                     label='pure NN (no ODE)'); axes[0].legend(fontsize=8, loc='upper left')
+        fig.suptitle('Pure NN (no ODE) vs ODE simulation, all 8 variables in ABSOLUTE '
+                     'units, 10 reactors overlaid. Trained on synthetic, window-level holdout.',
+                     fontsize=13, y=1.01)
+        fig.tight_layout()
+        out = here / 'nn_baseline_ALL.png'
+        fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+        print(f'Saved {out}')
+
 
 if __name__ == '__main__':
     main()
