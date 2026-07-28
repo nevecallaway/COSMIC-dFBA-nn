@@ -152,28 +152,38 @@ def main():
           f'(range = true signal span; rho is not meaningful when range ~ 0):')
     print(f'{"feature":>12} | {"rho":>5} {"normMAE":>8} {"peak":>5} {"range":>6}  note')
     print('-' * 52)
+    stats = {}
     for f in feats:
         r, m, p, rng = score(f)
+        stats[f] = (r, m, p, rng)
         note = 'flat -> rho N/A' if rng < 0.1 else ''
         print(f'{FEATURE_NAMES[f]:>12} | {r:>5.2f} {m:>8.3f} {p:>5.2f} {rng:>6.2f}  {note}')
-    preds = {i: all_pred[i, :, feat] for i in range(n_original)}
 
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
-    for i in range(min(n_original, 10)):
-        ax = axes[i]
-        ax.plot(np.arange(N_DAYS), sub[i, :, feat], 'k-', lw=1.8, label='synthetic (truth)')
-        ax.plot(np.arange(SEQ_LEN, N_DAYS), preds[i], 'r--', lw=2, label='pure NN (no ODE)')
-        ax.axvline(SEQ_LEN, color='gray', lw=0.6, ls=':')
-        ax.set_title(f'reactor {i}', fontsize=9)
-        if i == 0:
-            ax.legend(fontsize=8)
-    fig.suptitle(f'{FEATURE_NAMES[feat]} in ABSOLUTE units: pure NN (no ODE) vs synthetic '
-                 f'truth. Trained on synthetic, window-level holdout.', y=1.02)
-    fig.tight_layout()
-    out = here / f'nn_baseline_{FEATURE_NAMES[feat]}.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
-    print(f'Saved {out}')
+
+    def plot_feature(f):
+        r, m, p, rng = stats[f]
+        fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
+        for i in range(min(n_original, 10)):
+            ax = axes[i]
+            ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=1.8, label='synthetic (truth)')
+            ax.plot(np.arange(SEQ_LEN, N_DAYS), all_pred[i, :, f], 'r--', lw=2,
+                    label='pure NN (no ODE)')
+            ax.axvline(SEQ_LEN, color='gray', lw=0.6, ls=':')
+            ax.set_title(f'reactor {i}', fontsize=9)
+            if i == 0:
+                ax.legend(fontsize=8)
+        flat = '  (flat signal, rho N/A)' if rng < 0.1 else ''
+        fig.suptitle(f'{FEATURE_NAMES[f]} in ABSOLUTE units: pure NN (no ODE) vs synthetic '
+                     f'truth  |  peak={p:.2f}  MAE={m:.3f}  rho={r:.2f}{flat}', y=1.02)
+        fig.tight_layout()
+        out = here / f'nn_baseline_{FEATURE_NAMES[f]}.png'
+        fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+        print(f'Saved {out}')
+
+    # one plot per feature in --all-features, else just the requested one
+    for f in feats:
+        plot_feature(f)
 
 
 if __name__ == '__main__':
