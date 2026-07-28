@@ -53,6 +53,8 @@ def main():
     ap.add_argument('--all-features', action='store_true',
                     help='score + summarize every feature in one run (a table over all 8), '
                          'still plots the --feature one')
+    ap.add_argument('--seq-len', type=int, default=SEQ_LEN,
+                    help='input window length in days (rebuilds windows; try shorter)')
     ap.add_argument('--seed', type=int, default=0)
     args = ap.parse_args()
 
@@ -60,18 +62,27 @@ def main():
     device = pick_device()
     here = Path(__file__).parent
     feat = args.feature
+    seq_len = args.seq_len
 
     npz = np.load(args.data, allow_pickle=True)
-    windows = npz['windows'].astype(np.float32)          # (n, seq, 8+time)
-    targets = npz['targets'].astype(np.float32)          # (n, 8)
-    ridx    = npz['window_reactor_idx']
+    doe_params = npz['doe_params'].astype(np.float32)
+    cin_params = npz['cin_params'].astype(np.float32)
     doe_min = npz['doe_min'].astype(np.float32)
     doe_max = npz['doe_max'].astype(np.float32)
     dsc = doe_max - doe_min; dsc[dsc == 0] = 1.0
-    wdoe = ((npz['window_doe'] - doe_min) / dsc).astype(np.float32)
     traj = npz['trajectories'].astype(np.float32)
     n_original = int(npz['n_original'])
     sub = traj[:, :, WINDOW_FEATURE_INDICES].astype(np.float32)   # (N, N_DAYS, 8) absolute
+
+    # Rebuild windows from the EXTRA reactors at the requested seq_len (originals
+    # reserved for eval). This is what --seq-len varies.
+    from generate_synthetic_ode import build_windows
+    windows, targets, wdoe_raw, _wcin, _weta, ridx = build_windows(
+        traj[n_original:], doe_params=doe_params[n_original:],
+        cin_params=cin_params[n_original:], seq_len=seq_len)
+    windows = windows.astype(np.float32); targets = targets.astype(np.float32)
+    wdoe = ((wdoe_raw - doe_min) / dsc).astype(np.float32)
+    print(f'window length = {seq_len} days')
 
     # --- WINDOW-level split: a few windows per reactor held out, reactors NOT held out ---
     rng = np.random.default_rng(args.seed)
@@ -124,19 +135,19 @@ def main():
     # --- per-reactor rollout vs synthetic truth, in ABSOLUTE units ---
     fmin = scaler.data_min_.astype(np.float32)
     fsc  = (scaler.data_max_ - scaler.data_min_).astype(np.float32); fsc[fsc == 0] = 1.0
-    all_pred = np.zeros((n_original, N_DAYS - SEQ_LEN, N_FEATURES), np.float32)
+    all_pred = np.zeros((n_original, N_DAYS - seq_len, N_FEATURES), np.float32)
     for i in range(n_original):
-        seed = np.clip((sub[i, :SEQ_LEN] - fmin) / fsc, 0.0, 1.0)
-        tcol = (np.arange(SEQ_LEN, dtype=np.float32) / (N_DAYS - 1))[:, None]
+        seed = np.clip((sub[i, :seq_len] - fmin) / fsc, 0.0, 1.0)
+        tcol = (np.arange(seq_len, dtype=np.float32) / (N_DAYS - 1))[:, None]
         seed = np.concatenate([seed, tcol], axis=1)
         doe_i = (npz['doe_params'][i].astype(np.float32) - doe_min) / dsc
-        pr = rollout(model, seed, n_steps=N_DAYS - SEQ_LEN, device=device, doe=doe_i)
+        pr = rollout(model, seed, n_steps=N_DAYS - seq_len, device=device, doe=doe_i)
         all_pred[i] = pr * fsc + fmin                       # absolute units, all features
 
     def score(f):
         rhos, maes, ratios, ranges = [], [], [], []
         for i in range(n_original):
-            pred, real = all_pred[i, :, f], sub[i, SEQ_LEN:, f]
+            pred, real = all_pred[i, :, f], sub[i, seq_len:, f]
             rmax = real.max() if real.max() > 0 else 1.0
             # relative dynamic range of the TRUE trajectory over the forecast window:
             # near 0 means the feature is flat, so rho is not meaningful there.
@@ -169,9 +180,9 @@ def main():
             ax = axes[i]
             ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=1.8,
                     label='ODE simulation (synthetic)')
-            ax.plot(np.arange(SEQ_LEN, N_DAYS), all_pred[i, :, f], 'r--', lw=2,
+            ax.plot(np.arange(seq_len, N_DAYS), all_pred[i, :, f], 'r--', lw=2,
                     label='pure NN (no ODE)')
-            ax.axvline(SEQ_LEN, color='gray', lw=0.6, ls=':')
+            ax.axvline(seq_len, color='gray', lw=0.6, ls=':')
             ax.set_title(f'reactor {i}', fontsize=9)
             if flat:
                 # anchor the y-axis at 0 so a near-constant metabolite reads as flat,
@@ -200,7 +211,7 @@ def main():
             ax = axes[f]
             for i in range(n_original):
                 ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=0.8, alpha=0.5)
-                ax.plot(np.arange(SEQ_LEN, N_DAYS), all_pred[i, :, f], 'r--',
+                ax.plot(np.arange(seq_len, N_DAYS), all_pred[i, :, f], 'r--',
                         lw=1.0, alpha=0.7)
             if rng < 0.1:
                 ax.set_ylim(0, sub[:, :, f].max() * 1.15)     # flat -> anchor at 0
@@ -228,7 +239,7 @@ def main():
                 r, m, p, rng = stats[f]
                 for i in range(n_original):
                     ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=0.8, alpha=0.5)
-                    ax.plot(np.arange(SEQ_LEN, N_DAYS), all_pred[i, :, f], 'r--',
+                    ax.plot(np.arange(seq_len, N_DAYS), all_pred[i, :, f], 'r--',
                             lw=1.0, alpha=0.7)
                 ax.set_ylim(0, sub[:, :, f].max() * 1.15)
                 ax.set_title(f'{FEATURE_NAMES[f]}  MAE={m:.3f}', fontsize=10)
