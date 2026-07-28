@@ -163,19 +163,26 @@ def main():
 
     def plot_feature(f):
         r, m, p, rng = stats[f]
+        flat = rng < 0.1
         fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
         for i in range(min(n_original, 10)):
             ax = axes[i]
-            ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=1.8, label='synthetic (truth)')
+            ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=1.8,
+                    label='ODE simulation (synthetic)')
             ax.plot(np.arange(SEQ_LEN, N_DAYS), all_pred[i, :, f], 'r--', lw=2,
                     label='pure NN (no ODE)')
             ax.axvline(SEQ_LEN, color='gray', lw=0.6, ls=':')
             ax.set_title(f'reactor {i}', fontsize=9)
+            if flat:
+                # anchor the y-axis at 0 so a near-constant metabolite reads as flat,
+                # instead of matplotlib auto-zooming trivial <1% wiggle to fill the panel
+                top = max(sub[i, :, f].max(), all_pred[i, :, f].max())
+                ax.set_ylim(0, top * 1.15)
             if i == 0:
                 ax.legend(fontsize=8)
-        flat = '  (flat signal, rho N/A)' if rng < 0.1 else ''
-        fig.suptitle(f'{FEATURE_NAMES[f]} in ABSOLUTE units: pure NN (no ODE) vs synthetic '
-                     f'truth  |  peak={p:.2f}  MAE={m:.3f}  rho={r:.2f}{flat}', y=1.02)
+        tag = '  (flat signal, predicted near-exactly; rho N/A)' if flat else ''
+        fig.suptitle(f'{FEATURE_NAMES[f]} in ABSOLUTE units: pure NN (no ODE) vs ODE '
+                     f'simulation  |  peak={p:.2f}  MAE={m:.3f}  rho={r:.2f}{tag}', y=1.02)
         fig.tight_layout()
         out = here / f'nn_baseline_{FEATURE_NAMES[f]}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
