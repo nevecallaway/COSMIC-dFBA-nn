@@ -217,6 +217,33 @@ def main():
         fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
         print(f'Saved {out}')
 
+        # combined chart for JUST the flat metabolites, all reactors overlaid,
+        # y-anchored at 0 so they read as flat-on-flat (predicted near-exactly)
+        flats = [f for f in range(N_FEATURES) if stats[f][3] < 0.1]
+        if flats:
+            ncol = len(flats)
+            fig, axes = plt.subplots(1, ncol, figsize=(5 * ncol, 4.5))
+            axes = np.atleast_1d(axes)
+            for ax, f in zip(axes, flats):
+                r, m, p, rng = stats[f]
+                for i in range(n_original):
+                    ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=0.8, alpha=0.5)
+                    ax.plot(np.arange(SEQ_LEN, N_DAYS), all_pred[i, :, f], 'r--',
+                            lw=1.0, alpha=0.7)
+                ax.set_ylim(0, sub[:, :, f].max() * 1.15)
+                ax.set_title(f'{FEATURE_NAMES[f]}  MAE={m:.3f}', fontsize=10)
+                ax.set_xlabel('day')
+            axes[0].plot([], [], 'k-', label='ODE simulation')
+            axes[0].plot([], [], 'r--', label='pure NN (no ODE)')
+            axes[0].legend(fontsize=8, loc='upper right')
+            fig.suptitle('Flat metabolites: predicted near-exactly (MAE < 0.01). '
+                         'Nearly constant, so correlation is not meaningful.',
+                         fontsize=12, y=1.03)
+            fig.tight_layout()
+            out = here / 'nn_baseline_FLAT.png'
+            fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+            print(f'Saved {out}')
+
 
 if __name__ == '__main__':
     main()
