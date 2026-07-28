@@ -199,61 +199,9 @@ def main():
         fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
         print(f'Saved {out}')
 
-    # one plot per feature in --all-features, else just the requested one
+    # one readable per-feature plot (2x5 reactor grid) each -- the presentation style
     for f in feats:
         plot_feature(f)
-
-    # combined single-chart summary: all features, all reactors overlaid
-    if args.all_features:
-        fig, axes = plt.subplots(2, 4, figsize=(22, 9)); axes = axes.flatten()
-        for f in range(N_FEATURES):
-            r, m, p, rng = stats[f]
-            ax = axes[f]
-            for i in range(n_original):
-                ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=0.8, alpha=0.5)
-                ax.plot(np.arange(seq_len, N_DAYS), all_pred[i, :, f], 'r--',
-                        lw=1.0, alpha=0.7)
-            if rng < 0.1:
-                ax.set_ylim(0, sub[:, :, f].max() * 1.15)     # flat -> anchor at 0
-            tag = ' (flat)' if rng < 0.1 else ''
-            ax.set_title(f'{FEATURE_NAMES[f]}{tag}  peak={p:.2f} MAE={m:.3f} '
-                         f'rho={r:.2f}', fontsize=10)
-        axes[0].plot([], [], 'k-', label='ODE simulation'); axes[0].plot([], [], 'r--',
-                     label='pure NN (no ODE)'); axes[0].legend(fontsize=8, loc='upper left')
-        fig.suptitle('Pure NN (no ODE) vs ODE simulation, all 8 variables in ABSOLUTE '
-                     'units, 10 reactors overlaid. Trained on synthetic, window-level holdout.',
-                     fontsize=13, y=1.01)
-        fig.tight_layout()
-        out = here / 'nn_baseline_ALL.png'
-        fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
-        print(f'Saved {out}')
-
-        # combined chart for JUST the flat metabolites, all reactors overlaid,
-        # y-anchored at 0 so they read as flat-on-flat (predicted near-exactly)
-        flats = [f for f in range(N_FEATURES) if stats[f][3] < 0.1]
-        if flats:
-            ncol = len(flats)
-            fig, axes = plt.subplots(1, ncol, figsize=(5 * ncol, 4.5))
-            axes = np.atleast_1d(axes)
-            for ax, f in zip(axes, flats):
-                r, m, p, rng = stats[f]
-                for i in range(n_original):
-                    ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=0.8, alpha=0.5)
-                    ax.plot(np.arange(seq_len, N_DAYS), all_pred[i, :, f], 'r--',
-                            lw=1.0, alpha=0.7)
-                ax.set_ylim(0, sub[:, :, f].max() * 1.15)
-                ax.set_title(f'{FEATURE_NAMES[f]}  MAE={m:.3f}', fontsize=10)
-                ax.set_xlabel('day')
-            axes[0].plot([], [], 'k-', label='ODE simulation')
-            axes[0].plot([], [], 'r--', label='pure NN (no ODE)')
-            axes[0].legend(fontsize=8, loc='upper right')
-            fig.suptitle('Flat metabolites: predicted near-exactly (MAE < 0.01). '
-                         'Nearly constant, so correlation is not meaningful.',
-                         fontsize=12, y=1.03)
-            fig.tight_layout()
-            out = here / 'nn_baseline_FLAT.png'
-            fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
-            print(f'Saved {out}')
 
 
 if __name__ == '__main__':
