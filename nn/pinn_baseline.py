@@ -132,8 +132,9 @@ def main():
         torch.manual_seed(args.seed)
         model = WindowPINN(hidden=args.hidden).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        print(f'  training lambda={lam} ...', flush=True)
         for ep in range(1, args.epochs + 1):
-            model.train()
+            model.train(); td = to = 0.0
             for x, y, cin, eta in tr_ld:
                 x, y, cin, eta = x.to(device), y.to(device), cin.to(device), eta.to(device)
                 opt.zero_grad()
@@ -145,6 +146,10 @@ def main():
                 phys_n = (phys - fmin) / fsc                               # back to norm
                 loss_ode = ((conc - phys_n) ** 2).mean()
                 (loss_data + lam * loss_ode).backward(); opt.step()
+                td += loss_data.item(); to += loss_ode.item()
+            if ep % 20 == 0 or ep == 1:
+                print(f'    epoch {ep:3d}  data={td/len(tr_ld):.5f}  '
+                      f'ode={to/len(tr_ld):.5f}', flush=True)
 
         # eval: autoregressive rollout using the CONC head only (no ODE at inference)
         model.eval()
