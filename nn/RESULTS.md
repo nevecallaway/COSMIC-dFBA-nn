@@ -21,25 +21,26 @@ output metric (total titer / biomass), the number the group actually cares about
 
 | feature | peak ratio | AUC | norm MAE | rho | signal range |
 |---|---|---|---|---|---|
-| Cell Density | 1.13 | 1.09 | 0.098 | 0.77 | 0.31 |
-| Cell Size | 1.01 | 1.02 | 0.029 | 1.00 | 0.51 |
-| Titer | 1.00 | 1.04 | 0.062 | 0.98 | 0.72 |
-| Glucose | 1.01 | 1.00 | 0.041 | 0.88 | 0.23 |
-| Glutamine | 1.00 | 1.00 | 0.004 | 0.17 * | 0.00 |
-| Asparagine | 1.01 | 1.00 | 0.033 | 0.78 | 0.09 |
-| Serine | 1.00 | 1.00 | 0.007 | 0.17 * | 0.01 |
-| Glycine | 1.00 | 1.00 | 0.005 | -0.05 * | 0.00 |
+| Cell Density | 0.99 | 0.98 | 0.040 | 0.61 | 0.31 |
+| Cell Size | 0.99 | 1.01 | 0.024 | 1.00 | 0.51 |
+| Titer | 0.99 | 1.03 | 0.076 | 0.98 | 0.72 |
+| Glucose | 1.00 | 0.98 | 0.044 | 0.83 | 0.23 |
+| Glutamine | 1.00 | 1.00 | 0.004 | -0.35 * | 0.00 |
+| Asparagine | 1.02 | 1.00 | 0.029 | 0.79 | 0.09 |
+| Serine | 1.01 | 1.00 | 0.005 | 0.43 * | 0.01 |
+| Glycine | 1.00 | 1.00 | 0.004 | 0.25 * | 0.00 |
 
 \* Low rho = flat metabolite (signal range < 0.1), predicted near-exactly;
 correlation is not meaningful when there is nothing to correlate. rho tracks
 signal range monotonically (Titer, range 0.72, gets rho 0.98).
 
-**Takeaway:** peak ratios 1.00-1.13, AUC 1.00-1.09, tiny MAE everywhere. A
+**Takeaway:** peak ratios 0.99-1.02, AUC 0.98-1.03, tiny MAE everywhere. A
 physics-free NN reproduces all 8 variables in absolute units to within a few
-percent, including the INTEGRATED output: total titer within 4% (AUC 1.04) and
-total biomass within ~9% (AUC 1.09, the one variable that runs a touch high, its
-peak is 1.13). **The ODE is not what makes the model accurate.** (Single seed; the
-few-percent magnitude story is robust, exact digits move run to run.)
+percent, including the INTEGRATED output: total titer within 3% (AUC 1.03) and
+total biomass within 2% (AUC 0.98). **The ODE is not what makes the model
+accurate.** (Single seed; the few-percent magnitude story is robust, exact digits
+move run to run -- e.g. cell-density AUC spans ~0.98-1.09 across seeds, titer stays
+~1.03-1.04. Report mean +/- std over seeds before quoting a hard number.)
 
 Figures: `nn_baseline_<Feature>.png` (per-feature 2x5 reactor grids; flat
 metabolites y-anchored at 0). Hero slides = Titer, Glucose, Cell Density.
