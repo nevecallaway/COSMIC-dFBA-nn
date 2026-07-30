@@ -30,7 +30,7 @@ import torch
 from device_utils import pick_device
 from generate_synthetic_ode import generate_reactor, N_COMPONENTS, N_DAYS
 from model import NextDayPredictor, N_FEATURES, SEQ_LEN
-from model_primeur import FluxDecoder
+from model_primeur import FluxDecoder, closed_form_step, F_PERFUSION
 
 
 def make_rates(seed):
@@ -81,6 +81,65 @@ def time_nn(model, n, device, is_hybrid):
     return time.perf_counter() - t0
 
 
+def _ode_inputs(n, device):
+    """Random but valid initial state, fluxes, feed, eta for a batch of reactors."""
+    C = torch.rand(n, N_FEATURES, device=device) * 5 + 0.5
+    C[:, 0] = torch.rand(n, device=device) * 2 + 0.5           # cell density = X
+    v = (torch.rand(n, N_FEATURES, device=device) - 0.5) * 0.4
+    v[:, 0] = torch.rand(n, device=device) * 0.4               # growth rate
+    cin = torch.rand(n, N_FEATURES, device=device) * 10
+    eta = torch.ones(n, 1, device=device)
+    return C, v, cin, eta
+
+
+@torch.no_grad()
+def time_closedform_torch(n, device):
+    """GPU-native (batched, torch) closed-form ODE: iterate the exact one-day step
+    over the trajectory. Same device as the NN -> isolates the ODE cost."""
+    C0, v, cin, eta = _ode_inputs(n, device)
+
+    def one_pass():
+        C = C0
+        for _ in range(N_DAYS - 1):
+            C = closed_form_step(C, v, cin, eta_titer=eta)
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+
+    one_pass(); one_pass()                       # warmup
+    t0 = time.perf_counter(); one_pass()
+    return time.perf_counter() - t0
+
+
+def time_torchdiffeq(n, device):
+    """General differentiable GPU solver (torchdiffeq odeint) on the perfusion RHS.
+    Returns None if torchdiffeq is not installed."""
+    try:
+        from torchdiffeq import odeint
+    except ImportError:
+        return None
+    C0, v, cin, eta = _ode_inputs(n, device)
+    F = F_PERFUSION
+
+    def rhs(t, C):
+        X = C[:, 0:1]
+        d_cd  = v[:, 0:1] * X
+        d_sz  = v[:, 1:2] * X
+        d_tit = v[:, 2:3] * X - eta * F * C[:, 2:3]
+        d_met = F * (cin[:, 3:8] - C[:, 3:8]) + v[:, 3:8] * X
+        return torch.cat([d_cd, d_sz, d_tit, d_met], dim=1)
+
+    t = torch.linspace(0, N_DAYS - 1, N_DAYS, device=device)
+
+    def one_pass():
+        odeint(rhs, C0, t, method='dopri5')      # adaptive, differentiable
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+
+    one_pass()
+    t0 = time.perf_counter(); one_pass()
+    return time.perf_counter() - t0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=1000, help='reactors to simulate/predict')
@@ -112,14 +171,24 @@ def main():
             data_max_ = np.full(N_FEATURES, 10.0, np.float32)
         m.set_scaler(_S())
 
+    print('timing GPU-native ODE (batched torch closed-form)...', flush=True)
+    t_cft = time_closedform_torch(args.n, device)
+    print('timing torchdiffeq (if installed)...', flush=True)
+    t_tde = time_torchdiffeq(args.n, device)
+
     print('timing NN variants (batched)...', flush=True)
     t_pure = time_nn(pure,   args.n, device, is_hybrid=False)
     t_hcf  = time_nn(hyb_cf, args.n, device, is_hybrid=True)
     t_heu  = time_nn(hyb_eu, args.n, device, is_hybrid=True)
 
     rows = [
-        ('mechanistic: numerical ODE (solve_ivp)', t_num),
-        ('mechanistic: closed-form ODE',           t_cf),
+        ('mechanistic: numerical ODE (solve_ivp, CPU)', t_num),
+        ('mechanistic: closed-form ODE (numpy, CPU)',   t_cf),
+        (f'mechanistic: closed-form ODE (torch, {device.type})', t_cft),
+    ]
+    if t_tde is not None:
+        rows.append((f'mechanistic: torchdiffeq odeint ({device.type})', t_tde))
+    rows += [
         ('pure NN (no ODE)',                        t_pure),
         ('hybrid NN (closed-form ODE in forward)',  t_hcf),
         ('hybrid NN (50-substep Euler in forward)', t_heu),
