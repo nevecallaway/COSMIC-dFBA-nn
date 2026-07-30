@@ -33,6 +33,9 @@ from evaluate import rollout
 FEATURE_NAMES = ['CellDensity', 'CellSize', 'Titer', 'Glucose',
                  'Glutamine', 'Asparagine', 'Serine', 'Glycine']
 
+# trapezoidal integral, version-proof: NumPy 2.x renamed np.trapz -> np.trapezoid
+_trapz = getattr(np, 'trapezoid', None) or np.trapz
+
 
 def norm_windows(w, scaler, wt):
     n, s, f = w.shape
@@ -159,9 +162,9 @@ def main():
             # AUC = trapezoid integral over the FORECAST window only (the days the
             # NN actually predicts), reported as pred/true. This is the integrated-
             # output metric (total titer / biomass); ~1.0 means the total is right.
-            ta = float(np.trapz(real))
+            ta = float(_trapz(real))
             if ta > 0:
-                aucs.append(float(np.trapz(pred)) / ta)
+                aucs.append(float(_trapz(pred)) / ta)
         auc = float(np.mean(aucs)) if aucs else float('nan')
         return np.mean(rhos), np.mean(maes), np.mean(ratios), auc, np.mean(ranges)
 
