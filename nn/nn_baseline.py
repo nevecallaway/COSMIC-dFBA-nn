@@ -188,6 +188,15 @@ def main():
         fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
         for i in range(min(n_original, 10)):
             ax = axes[i]
+            # shade the AREA under each curve over the FORECAST window -- this is
+            # exactly what AUC integrates. The two shaded regions are the totals
+            # being compared (pred/true = AUC ratio); where red spills past gray
+            # the NN over-integrates (e.g. cell density), and vice versa.
+            xf = np.arange(seq_len, N_DAYS)
+            ax.fill_between(xf, 0, sub[i, seq_len:, f], color='0.4', alpha=0.10,
+                            label='true AUC' if i == 0 else None)
+            ax.fill_between(xf, 0, all_pred[i, :, f], color='r', alpha=0.12,
+                            label='pred AUC' if i == 0 else None)
             ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=1.8,
                     label='ODE simulation (synthetic)')
             ax.plot(np.arange(seq_len, N_DAYS), all_pred[i, :, f], 'r--', lw=2,
@@ -206,7 +215,7 @@ def main():
                      f'simulation  |  peak={p:.2f}  AUC={a:.2f}  MAE={m:.3f}  rho={r:.2f}{tag}',
                      y=1.02)
         fig.tight_layout()
-        out = here / f'nn_baseline_{FEATURE_NAMES[f]}.png'
+        out = here / f'nn_baseline_auc_{FEATURE_NAMES[f]}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
         print(f'Saved {out}')
 
