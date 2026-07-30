@@ -145,7 +145,7 @@ def main():
         all_pred[i] = pr * fsc + fmin                       # absolute units, all features
 
     def score(f):
-        rhos, maes, ratios, ranges = [], [], [], []
+        rhos, maes, ratios, aucs, ranges = [], [], [], [], []
         for i in range(n_original):
             pred, real = all_pred[i, :, f], sub[i, seq_len:, f]
             rmax = real.max() if real.max() > 0 else 1.0
@@ -156,24 +156,31 @@ def main():
                 rhos.append(float(np.corrcoef(pred, real)[0, 1]))
             maes.append(float(np.mean(np.abs(pred - real)) / rmax))
             ratios.append(float(pred.max() / rmax))
-        return np.mean(rhos), np.mean(maes), np.mean(ratios), np.mean(ranges)
+            # AUC = trapezoid integral over the FORECAST window only (the days the
+            # NN actually predicts), reported as pred/true. This is the integrated-
+            # output metric (total titer / biomass); ~1.0 means the total is right.
+            ta = float(np.trapz(real))
+            if ta > 0:
+                aucs.append(float(np.trapz(pred)) / ta)
+        auc = float(np.mean(aucs)) if aucs else float('nan')
+        return np.mean(rhos), np.mean(maes), np.mean(ratios), auc, np.mean(ranges)
 
     feats = range(N_FEATURES) if args.all_features else [feat]
     print(f'\npure NN (no ODE), rollout vs synthetic truth '
           f'(range = true signal span; rho is not meaningful when range ~ 0):')
-    print(f'{"feature":>12} | {"rho":>5} {"normMAE":>8} {"peak":>5} {"range":>6}  note')
-    print('-' * 52)
+    print(f'{"feature":>12} | {"rho":>5} {"normMAE":>8} {"peak":>5} {"AUC":>5} {"range":>6}  note')
+    print('-' * 58)
     stats = {}
     for f in feats:
-        r, m, p, rng = score(f)
-        stats[f] = (r, m, p, rng)
+        r, m, p, a, rng = score(f)
+        stats[f] = (r, m, p, a, rng)
         note = 'flat -> rho N/A' if rng < 0.1 else ''
-        print(f'{FEATURE_NAMES[f]:>12} | {r:>5.2f} {m:>8.3f} {p:>5.2f} {rng:>6.2f}  {note}')
+        print(f'{FEATURE_NAMES[f]:>12} | {r:>5.2f} {m:>8.3f} {p:>5.2f} {a:>5.2f} {rng:>6.2f}  {note}')
 
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
 
     def plot_feature(f):
-        r, m, p, rng = stats[f]
+        r, m, p, a, rng = stats[f]
         flat = rng < 0.1
         fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
         for i in range(min(n_original, 10)):
@@ -193,7 +200,8 @@ def main():
                 ax.legend(fontsize=8)
         tag = '  (flat signal, predicted near-exactly; rho N/A)' if flat else ''
         fig.suptitle(f'{FEATURE_NAMES[f]} in ABSOLUTE units: pure NN (no ODE) vs ODE '
-                     f'simulation  |  peak={p:.2f}  MAE={m:.3f}  rho={r:.2f}{tag}', y=1.02)
+                     f'simulation  |  peak={p:.2f}  AUC={a:.2f}  MAE={m:.3f}  rho={r:.2f}{tag}',
+                     y=1.02)
         fig.tight_layout()
         out = here / f'nn_baseline_{FEATURE_NAMES[f]}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)

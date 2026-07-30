@@ -74,30 +74,45 @@ CPU-only solver.
 
 The ~3,000x above compares scipy (CPU, one reactor at a time) against a batched
 NN, which conflates the solver with the hardware. `speed_benchmark.py` now times
-the ODE on the SAME device as the NN. On an A100 (n=20,000):
+every method the RIGHT way: warm up once, then loop inference for a fixed 45s
+wall-clock budget and amortize (per-reactor = total / (reps * N)). A single GPU
+pass is tens of microseconds, dominated by kernel-launch overhead, not compute, so
+timing one pass makes two fast methods report the SAME number (the timer floor).
+Looping thousands of reps pushes the overhead below the real compute, and it also
+runs the ODE on the SAME device as the NN. A100, n=20,000, 45s/method (9,000+ reps
+per fast method):
 
-| method | ms/reactor | vs solve_ivp |
-|---|---|---|
-| numerical ODE (solve_ivp, CPU) | 15.3 | 1x |
-| closed-form ODE (numpy, CPU) | 0.65 | 24x |
-| closed-form ODE (torch, cuda) | ~0.0003 | ~50,000x |
-| torchdiffeq odeint (cuda) | 0.007 | ~2,100x |
-| pure NN (cuda) | ~0.0003 | ~118,000x |
-| hybrid NN (closed-form, cuda) | 0.007 | ~44,000x |
+| method | ms/reactor | vs solve_ivp (CPU) | vs torchdiffeq (GPU) |
+|---|---|---|---|
+| numerical ODE (solve_ivp, CPU) | 25.06 | 1x | - |
+| closed-form ODE (numpy, CPU) | 0.35 | 72x | 0.02x |
+| closed-form ODE (torch, cuda) | 0.0005 | 47,000x | 23x |
+| torchdiffeq odeint (cuda) | 0.012 | 2,000x | 1x (baseline) |
+| pure NN (cuda) | 0.0002 | 103,000x | 50x |
+| hybrid NN (closed-form, cuda) | 0.0006 | 42,000x | 20x |
+| hybrid NN (50-substep Euler, cuda) | 0.0049 | 5,100x | 2.5x |
 
-**The honest finding:** on the GPU the exact ODE (torch closed-form) is AS FAST as
-the pure NN (both at the timer floor). Most of the NN's apparent advantage over
-the solver was scipy being CPU-bound and sequential, not something fundamental.
-Batched and on-device, the ODE keeps up. So the durable reason to learn a
-surrogate is NOT raw speed on this simplified ODE, it is for mechanistic models
-with NO closed form (the full flux-balance COSMIC-dFBA), which cannot be
-vectorized this way. (torchdiffeq, a general GPU solver, sits at ~2,100x: faster
-than scipy, slower than the closed form because it still takes adaptive steps.)
+Two baselines on purpose: "vs solve_ivp" is the incumbent (scipy, CPU-only, no GPU
+version exists); "vs torchdiffeq" is a general differentiable solver on the NN's
+device, which isolates the algorithm from the hardware. Read the torchdiffeq
+column as the honest surrogate-vs-solver number.
+
+**The honest findings:**
+- Properly amortized, the pure NN (0.0002 ms) and the exact closed-form torch ODE
+  (0.0005 ms) NO LONGER tie: the NN is ~2.4x faster. The earlier "identical" reading
+  was purely the single-pass timer floor, exactly the artifact to distrust.
+- Against a FAIR GPU solver (torchdiffeq), the NN is ~50x faster, not 100,000x. The
+  100,000x vs scipy mostly reflects CPU-vs-GPU hardware. torchdiffeq sits at ~2,000x
+  vs scipy and ~23x slower than the closed form (it still takes adaptive steps).
+- On THIS linear per-day ODE the exact closed form is within ~2.4x of the NN, so the
+  surrogate barely wins. The durable reason to learn a surrogate is mechanistic
+  models with NO closed form (the full flux-balance COSMIC-dFBA), where the relevant
+  penalty is torchdiffeq's ~2,000x, not the closed form's.
 
 Do NOT combine speed and accuracy in one table (different units/comparisons). The
-bridge sentence: the NN matches the ODE's accuracy (few percent) and, on a GPU,
-its speed too; on this simplified model it neither gains nor loses much, its value
-is for models that cannot be solved in closed form.
+bridge sentence: the NN matches the ODE's accuracy (few percent) and, on a GPU, its
+speed too; on this simplified model it neither gains nor loses much, its value is
+for models that cannot be solved in closed form.
 
 ---
 
