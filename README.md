@@ -113,9 +113,10 @@ internet, so download data and `pip install` on a login node first.
 - **Continuous-time PINN.** The current physics penalty is integrated form (exact
   one-day step). A continuous-time model would allow the differential form
   (`dx/dt = f` via autograd) and finer physics constraints.
-- **GPU-native solver.** `speed_benchmark.py` now times the ODE on the same
-  device as the NN (torch closed-form; torchdiffeq if installed) for a fair,
-  hardware-isolated comparison.
 - **Adaptive surrogate.** Detect out-of-domain inputs, simulate only there,
   fine-tune incrementally; the physics penalty carries over once real data
   arrives.
+
+Done this phase (see `nn/RESULTS.md`): pure-NN accuracy baseline, hybrid and
+physics-informed (PINN) surrogates, and a hardware-isolated speed benchmark that
+times the ODE on the same device as the NN (torch closed-form + torchdiffeq).
