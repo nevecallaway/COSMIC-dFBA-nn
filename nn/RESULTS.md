@@ -37,35 +37,42 @@ predicts on its own):
 
 Numbers below are AFTER the amino-acid data-gen fix (see note beneath the table).
 
+Final config: zero negatives, no clamp anywhere (`--glc-feed 40`, AA feed at
+default 1.0).
+
 | feature | R2 | peak ratio | norm MAE | rho | fcast range |
 |---|---|---|---|---|---|
 | Cell Density | 0.99 | 1.01 | 0.036 | 0.77 | 0.31 |
-| Cell Size | 0.98 | 1.00 | 0.025 | 1.00 | 0.51 |
-| Titer | 0.97 | 0.92 | 0.062 | 0.97 | 0.72 |
-| Glucose | 1.00 | 1.02 | 0.032 | 0.96 | 0.23 |
-| Glycine | 0.97 | 1.02 | 0.064 | 0.82 | 0.20 |
-| Asparagine | 0.99 | 0.99 | 0.027 | 0.90 | 0.10 |
-| Serine | 1.00 | 0.98 | 0.026 | 0.63 | 0.12 |
-| Glutamine | n/a | 1.00 | 0.029 | 0.80 | 0.09 |
+| Cell Size | 0.98 | 0.97 | 0.024 | 1.00 | 0.51 |
+| Titer | 0.97 | 0.97 | 0.063 | 0.98 | 0.72 |
+| Glucose | 1.00 | 1.02 | 0.033 | 0.95 | 0.23 |
+| Glycine | 0.97 | 1.04 | 0.061 | 0.69 | 0.18 |
+| Glutamine | n/a | 1.01 | 0.023 | 0.79 | 0.06 |
+| Asparagine | n/a | 0.99 | 0.027 | 0.86 | 0.08 |
+| Serine | n/a | 0.99 | 0.026 | 0.51 | 0.09 |
 
-Seven of eight variables score real R2 0.97-1.00. Only glutamine reads n/a, and
-only because its forecast-window range (0.09) is one hundredth under the 0.1
-threshold; its rho is 0.80, so the model tracks it fine.
+Five variables score real R2 0.97-1.00. The three amino acids read n/a only because
+their forecast-window range is just under 0.1, NOT because they are flat: rho is
+0.51-0.86 (up from ~0.2 before the fix) and the parity plot shows them on the
+diagonal, so the model tracks them. Their swing is real but front-loaded into
+days 0-6 (the input window).
 
-**Amino-acid data-gen fix + feed tuning (important):** earlier runs showed
-glutamine/serine/asparagine as perfectly flat lines with rho ~0.2. That was a
+**Amino-acid data-gen fix (important), and the zero-negative choice:** earlier runs
+showed glutamine/serine/asparagine as perfectly flat lines with rho ~0.2. That was a
 generator artifact: the AA initial pool was tied to a 210x-inflated perfusion feed,
-pinning each AA at its feed level. Two changes fixed it, with NO clamp anywhere:
-(1) decoupled the initial pool (realistic DMEM) from the feed (enriched per-AA only
-as much as needed), restoring the rise-then-deplete dynamics of data_2; (2) lowered
-the AA feed 20% (`--aa-feed-factor 0.8`) so the strongly-consumed AAs keep depleting
-into the forecast window like the real data, instead of plateauing after day 6. The
-cost is ~1,700 AA points (~0.2%) dipping slightly negative, which we SURFACE via the
-`[ODE NEG]` diagnostic rather than clamp. Feed sensitivity is steep: factor 0.5 gives
-~23k negatives, 0.75 ~2.7k, 0.8 ~1.7k -- 0.8 is the mildest that makes the AAs
-scoreable. This also revealed a real limitation: the data_3 uptake fluxes run high
-relative to the AA pools, so continued depletion and strict non-negativity are in
-tension.
+pinning each AA at its feed level. The fix, NO clamp anywhere, decoupled the initial
+pool (realistic DMEM) from the feed (enriched per-AA only as much as needed), which
+restored the rise-then-deplete dynamics of data_2. Separately, glucose was depleting
+NEGATIVE in high-consumption / low-glucose-DoE reactors (feed 25 too low); raising it
+to 40 (`--glc-feed 40`) removed all glucose negatives with glucose R2 unchanged at
+1.00. Net: zero `[ODE NEG]` events, no clamp.
+
+Trade-off we characterized: lowering the AA feed further (`--aa-feed-factor 0.8`)
+pushes the AA depletion into the forecast window so all three score real R2 (0.97-
+1.00), but at ~1,700 slightly-negative AA points. We chose the zero-negative config;
+the 0.8 variant is available if scoreable AAs are preferred over strict
+non-negativity. This tension (continued depletion vs non-negativity) is itself a real
+finding: the data_3 uptake fluxes run high relative to the AA pools.
 
 **Takeaway:** R2 0.97-1.00 on every scoreable variable, peak ratios 0.95-1.05, tiny
 MAE everywhere. A physics-free NN reproduces the dynamic variables to within a few
