@@ -33,9 +33,6 @@ from evaluate import rollout
 FEATURE_NAMES = ['CellDensity', 'CellSize', 'Titer', 'Glucose',
                  'Glutamine', 'Asparagine', 'Serine', 'Glycine']
 
-# trapezoidal integral, version-proof: NumPy 2.x renamed np.trapz -> np.trapezoid
-_trapz = getattr(np, 'trapezoid', None) or np.trapz
-
 
 def norm_windows(w, scaler, wt):
     n, s, f = w.shape
@@ -148,55 +145,59 @@ def main():
         all_pred[i] = pr * fsc + fmin                       # absolute units, all features
 
     def score(f):
-        rhos, maes, ratios, aucs, ranges = [], [], [], [], []
+        rhos, maes, ratios, ranges = [], [], [], []
         for i in range(n_original):
             pred, real = all_pred[i, :, f], sub[i, seq_len:, f]
             rmax = real.max() if real.max() > 0 else 1.0
             # relative dynamic range of the TRUE trajectory over the forecast window:
-            # near 0 means the feature is flat, so rho is not meaningful there.
+            # near 0 means the feature is flat, so rho and R2 are not meaningful.
             ranges.append(float((real.max() - real.min()) / rmax))
             if np.std(pred) > 0 and np.std(real) > 0:
                 rhos.append(float(np.corrcoef(pred, real)[0, 1]))
             maes.append(float(np.mean(np.abs(pred - real)) / rmax))
             ratios.append(float(pred.max() / rmax))
-            # AUC = trapezoid integral over the FORECAST window only (the days the
-            # NN actually predicts), reported as pred/true. This is the integrated-
-            # output metric (total titer / biomass); ~1.0 means the total is right.
-            ta = float(_trapz(real))
-            if ta > 0:
-                aucs.append(float(_trapz(pred)) / ta)
-        auc = float(np.mean(aucs)) if aucs else float('nan')
-        return np.mean(rhos), np.mean(maes), np.mean(ratios), auc, np.mean(ranges)
+        # R2 (coefficient of determination), pooled over ALL reactors' forecast
+        # points: 1 - SS_res/SS_tot with the mean as baseline. Unitless, the
+        # standard regression metric. Pooling includes cross-reactor level spread,
+        # so it rewards getting each reactor's overall level right. NOTE: like rho,
+        # meaningless for flat signals (SS_tot ~ 0 -> large negative); only reported
+        # for dynamic variables.
+        pf = all_pred[:, :, f].ravel()
+        tf = sub[:, seq_len:, f].ravel()
+        ss_tot = float(np.sum((tf - tf.mean()) ** 2))
+        r2 = 1.0 - float(np.sum((pf - tf) ** 2)) / ss_tot if ss_tot > 0 else float('nan')
+        return r2, np.mean(maes), np.mean(ratios), np.mean(rhos), np.mean(ranges)
 
     feats = range(N_FEATURES) if args.all_features else [feat]
     print(f'\npure NN (no ODE), rollout vs synthetic truth '
-          f'(range = true signal span; rho is not meaningful when range ~ 0):')
-    print(f'{"feature":>12} | {"rho":>5} {"normMAE":>8} {"peak":>5} {"AUC":>5} {"range":>6}  note')
-    print('-' * 58)
+          f'(range = true signal span; R2 and rho are not meaningful when range ~ 0):')
+    print(f'{"feature":>12} | {"R2":>6} {"peak":>5} {"normMAE":>8} {"rho":>5} {"range":>6}  note')
+    print('-' * 60)
     stats = {}
     for f in feats:
-        r, m, p, a, rng = score(f)
-        stats[f] = (r, m, p, a, rng)
-        note = 'flat -> rho N/A' if rng < 0.1 else ''
-        print(f'{FEATURE_NAMES[f]:>12} | {r:>5.2f} {m:>8.3f} {p:>5.2f} {a:>5.2f} {rng:>6.2f}  {note}')
+        r2, m, p, rho, rng = score(f)
+        stats[f] = (r2, m, p, rho, rng)
+        flat = rng < 0.1
+        note = 'flat -> R2/rho N/A' if flat else ''
+        r2s = f'{"n/a":>6}' if flat else f'{r2:>6.2f}'
+        print(f'{FEATURE_NAMES[f]:>12} | {r2s} {p:>5.2f} {m:>8.3f} {rho:>5.2f} {rng:>6.2f}  {note}')
 
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
 
     def plot_feature(f):
-        r, m, p, a, rng = stats[f]
+        r2, m, p, rho, rng = stats[f]
         flat = rng < 0.1
         fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
         for i in range(min(n_original, 10)):
             ax = axes[i]
-            # shade the AREA under each curve over the FORECAST window -- this is
-            # exactly what AUC integrates. The two shaded regions are the totals
-            # being compared (pred/true = AUC ratio); where red spills past gray
-            # the NN over-integrates (e.g. cell density), and vice versa.
+            # shade the forecast window under each curve as a visual fit aid:
+            # where red spills above the black line the NN over-predicts, where
+            # gray shows above red it under-predicts. (R2 in the title is the metric.)
             xf = np.arange(seq_len, N_DAYS)
             ax.fill_between(xf, 0, sub[i, seq_len:, f], color='0.4', alpha=0.10,
-                            label='true AUC' if i == 0 else None)
+                            label='true (forecast)' if i == 0 else None)
             ax.fill_between(xf, 0, all_pred[i, :, f], color='r', alpha=0.12,
-                            label='pred AUC' if i == 0 else None)
+                            label='pred (forecast)' if i == 0 else None)
             ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=1.8,
                     label='ODE simulation (synthetic)')
             ax.plot(np.arange(seq_len, N_DAYS), all_pred[i, :, f], 'r--', lw=2,
@@ -210,12 +211,13 @@ def main():
                 ax.set_ylim(0, top * 1.15)
             if i == 0:
                 ax.legend(fontsize=8)
-        tag = '  (flat signal, predicted near-exactly; rho N/A)' if flat else ''
+        tag = '  (flat signal, predicted near-exactly; R2/rho N/A)' if flat else ''
+        r2str = 'n/a' if flat else f'{r2:.2f}'
         fig.suptitle(f'{FEATURE_NAMES[f]} in ABSOLUTE units: pure NN (no ODE) vs ODE '
-                     f'simulation  |  peak={p:.2f}  AUC={a:.2f}  MAE={m:.3f}  rho={r:.2f}{tag}',
+                     f'simulation  |  peak={p:.2f}  R2={r2str}  MAE={m:.3f}  rho={rho:.2f}{tag}',
                      y=1.02)
         fig.tight_layout()
-        out = here / f'nn_baseline_auc_{FEATURE_NAMES[f]}.png'
+        out = here / f'nn_baseline_r2_{FEATURE_NAMES[f]}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
         print(f'Saved {out}')
 
