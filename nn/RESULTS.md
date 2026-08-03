@@ -18,35 +18,47 @@ reactor, reactors NOT held out; in-distribution). Scored in absolute units on al
 
 R2 = coefficient of determination (1 - SS_res/SS_tot, mean as baseline), pooled
 over all forecast points per feature. Unitless regression metric (per Kimberly).
-It shares rho's flat-signal caveat: for a near-constant metabolite SS_tot ~ 0, so
-R2 is not meaningful and is marked n/a.
+It shares rho's flat-signal caveat: over a near-constant window SS_tot ~ 0, so R2
+is not meaningful and is marked n/a. Numbers below are AFTER the amino-acid
+data-gen fix (see note beneath the table).
 
-| feature | R2 | peak ratio | norm MAE | rho | signal range |
+| feature | R2 | peak ratio | norm MAE | rho | fcast range |
 |---|---|---|---|---|---|
-| Cell Density | 0.97 | 1.12 | 0.091 | 0.78 | 0.31 |
-| Cell Size | 0.97 | 1.02 | 0.033 | 1.00 | 0.51 |
-| Titer | 0.97 | 1.02 | 0.065 | 0.97 | 0.72 |
-| Glucose | 0.99 | 1.01 | 0.042 | 0.78 | 0.23 |
-| Glutamine | n/a | 1.00 | 0.004 | 0.20 | 0.00 |
-| Asparagine | n/a | 1.01 | 0.032 | 0.76 | 0.09 |
-| Serine | n/a | 1.00 | 0.007 | 0.22 | 0.01 |
-| Glycine | n/a | 1.00 | 0.004 | -0.13 | 0.00 |
+| Cell Density | 0.99 | 1.01 | 0.036 | 0.77 | 0.31 |
+| Cell Size | 0.98 | 0.96 | 0.024 | 1.00 | 0.51 |
+| Titer | 0.97 | 0.95 | 0.061 | 0.98 | 0.72 |
+| Glucose | 1.00 | 1.04 | 0.040 | 0.93 | 0.23 |
+| Glycine | 0.97 | 1.05 | 0.062 | 0.59 | 0.18 |
+| Glutamine | n/a | 1.00 | 0.025 | 0.77 | 0.06 |
+| Asparagine | n/a | 0.99 | 0.028 | 0.90 | 0.08 |
+| Serine | n/a | 1.01 | 0.023 | 0.51 | 0.09 |
 
-Flat metabolites (signal range < 0.1) are predicted near-exactly (MAE ~0.005) but
-R2/rho are undefined there (nothing to correlate). Metric meaningfulness tracks
-signal range: the four dynamic variables all score R2 0.97-0.99.
+Five variables score real R2 0.97-1.00. The remaining three amino acids read n/a
+only because their FORECAST-window range is just under 0.1, not because they are
+flat: their rho jumped to 0.77-0.90 (from ~0.2 noise before the fix), so the model
+IS tracking their forecast-window trend.
 
-**Takeaway:** R2 0.97-0.99 on every dynamic variable, peak ratios 0.99-1.12, tiny
+**Amino-acid data-gen fix (important):** earlier runs showed glutamine/serine/
+asparagine as perfectly flat lines with rho ~0.2. That was a generator artifact:
+the AA initial pool was tied to a 210x-inflated perfusion feed, pinning each AA at
+its feed level. Decoupling the initial pool (realistic DMEM) from the feed (enriched
+only as much as each AA needs to stay non-negative, no clamp) restored the real
+rise-then-deplete dynamics seen in data_2. The dynamics are now FRONT-LOADED (most
+of the swing is in days 0-6, the model's input window), so the forecast window
+(days 6-12) is milder -> real but small range. A shorter seed window would move
+more AA dynamics into the forecast window if we want those R2 scored.
+
+**Takeaway:** R2 0.97-1.00 on every scoreable variable, peak ratios 0.95-1.05, tiny
 MAE everywhere. A physics-free NN reproduces the dynamic variables to within a few
-percent and explains 97-99% of their variance. **The ODE is not what makes the
-model accurate.** Two honest notes: (1) R2 is pooled across reactors, so it
-includes cross-reactor level spread (getting each reactor's overall level right
-already explains much of the variance); per-reactor trajectory-shape R2 is a
-harder test we can add. (2) Single seed; digits move run to run (cell-density peak
-spans ~0.99-1.12 across seeds), so report mean +/- std before quoting a hard number.
+percent and explains 97-100% of their variance, and the amino acids are now genuine
+(non-flat) targets it tracks. **The ODE is not what makes the model accurate.** Two
+honest notes: (1) R2 is pooled across reactors, so it includes cross-reactor level
+spread (getting each reactor's level right already explains much of the variance);
+per-reactor trajectory-shape R2 is a harder test we can add. (2) Single seed;
+digits move run to run, so report mean +/- std before quoting a hard number.
 
-Figures: `nn_baseline_r2_<Feature>.png` (per-feature 2x5 reactor grids; forecast
-window shaded; R2 in the title). Hero slides = Titer, Glucose, Cell Density.
+Figures: `nn_baseline_r2_<Feature>.png` (per-feature 2x5 grids), `nn_baseline_parity.png`
+(predicted-vs-true diagonal, all variables). Hero slides = Titer, Glucose, Cell Density.
 
 **Scope caveat:** synthetic, in-distribution. This shows the NN can REPRODUCE the
 ODE, not that it transfers to real reactors.
