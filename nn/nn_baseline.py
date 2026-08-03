@@ -225,6 +225,36 @@ def main():
     for f in feats:
         plot_feature(f)
 
+    # parity plot: predicted vs true, all forecast points, with the y=x diagonal.
+    # The single simplest "how does the model do" view -- points on the diagonal
+    # are perfect, and R2 is exactly how tightly they hug it.
+    def plot_parity():
+        fig, axes = plt.subplots(2, 4, figsize=(18, 9)); axes = axes.flatten()
+        for f in range(N_FEATURES):
+            ax = axes[f]
+            x = sub[:n_original, seq_len:, f].ravel()      # true (ODE)
+            y = all_pred[:, :, f].ravel()                  # predicted (NN)
+            r2, m, p, rho, rng = stats[f]
+            lo = float(min(x.min(), y.min())); hi = float(max(x.max(), y.max()))
+            pad = 0.05 * (hi - lo) if hi > lo else 1.0
+            lo -= pad; hi += pad
+            ax.plot([lo, hi], [lo, hi], color='0.5', lw=1, ls='--', zorder=1)
+            ax.scatter(x, y, s=9, c='#6B2333', alpha=0.30, edgecolors='none', zorder=2)
+            ax.set_xlim(lo, hi); ax.set_ylim(lo, hi); ax.set_aspect('equal', 'box')
+            r2str = 'n/a' if rng < 0.1 else f'{r2:.2f}'
+            ax.set_title(f'{FEATURE_NAMES[f]}  (R2={r2str})', fontsize=11)
+            ax.set_xlabel('true (ODE)', fontsize=8)
+            ax.set_ylabel('predicted (NN)', fontsize=8)
+        fig.suptitle('Predicted vs true, forecast window, all reactors -- points on '
+                     'the dashed diagonal are perfect', y=1.0, fontsize=13)
+        fig.tight_layout()
+        out = here / 'nn_baseline_parity.png'
+        fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+        print(f'Saved {out}')
+
+    if args.all_features:
+        plot_parity()
+
 
 if __name__ == '__main__':
     main()
