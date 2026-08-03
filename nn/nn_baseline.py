@@ -163,7 +163,7 @@ def main():
         # meaningless for flat signals (SS_tot ~ 0 -> large negative); only reported
         # for dynamic variables.
         pf = all_pred[:, :, f].ravel()
-        tf = sub[:, seq_len:, f].ravel()
+        tf = sub[:n_original, seq_len:, f].ravel()   # match all_pred's eval reactors
         ss_tot = float(np.sum((tf - tf.mean()) ** 2))
         r2 = 1.0 - float(np.sum((pf - tf) ** 2)) / ss_tot if ss_tot > 0 else float('nan')
         return r2, np.mean(maes), np.mean(ratios), np.mean(rhos), np.mean(ranges)

@@ -47,5 +47,5 @@ fi
 log "=== nn_baseline (all 8 features, AUC column) ==="
 $PY -u nn_baseline.py --data "$DATA" --all-features
 
-log "Done. Quote the AUC column: ~1.00 means the integrated output (total titer / "
-log "biomass) is right, not just the peak."
+log "Done. R2 is the metric (dynamic vars only; flat metabolites show n/a because"
+log "variance ~ 0). Titer / cell size should score highest."
