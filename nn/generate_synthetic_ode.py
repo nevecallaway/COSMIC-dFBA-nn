@@ -892,7 +892,17 @@ if __name__ == '__main__':
     parser.add_argument('--phase-threshold', type=float, default=None,
                         help='With --phase, use a per-reactor step eta = 1 once f crosses '
                              'this value (e.g. 0.5), instead of continuous eta = f')
+    parser.add_argument('--aa-feed-factor', type=float, default=1.0,
+                        help='Multiply the amino-acid perfusion feed by this factor. <1 '
+                             'lowers the feed so strongly-consumed AAs keep depleting into '
+                             'the forecast window (matching data_2), at the cost of possible '
+                             'negativity, surfaced by [ODE NEG]. No clamp is applied.')
     args = parser.parse_args()
+
+    if args.aa_feed_factor != 1.0:
+        CIN_NOMINAL[AAS_INDICES] *= args.aa_feed_factor
+        print(f'AA feed x{args.aa_feed_factor}: feed lowered to let consumed AAs keep '
+              f'depleting past day 6. Watch the [ODE NEG] count for negativity (no clamp).')
 
     trajs, times, phases, doe_params, component_names = generate_all(
         n_extra=args.n_extra, sample_rates=args.sample_rates,
