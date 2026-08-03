@@ -190,19 +190,15 @@ def main():
         fig, axes = plt.subplots(2, 5, figsize=(20, 7)); axes = axes.flatten()
         for i in range(min(n_original, 10)):
             ax = axes[i]
-            # shade the forecast window under each curve as a visual fit aid:
-            # where red spills above the black line the NN over-predicts, where
-            # gray shows above red it under-predicts. (R2 in the title is the metric.)
-            xf = np.arange(seq_len, N_DAYS)
-            ax.fill_between(xf, 0, sub[i, seq_len:, f], color='0.4', alpha=0.10,
-                            label='true (forecast)' if i == 0 else None)
-            ax.fill_between(xf, 0, all_pred[i, :, f], color='r', alpha=0.12,
-                            label='pred (forecast)' if i == 0 else None)
+            # very light band over the forecast region so it reads as "the part the
+            # NN predicts on its own", no under-curve fill (that only meant something
+            # for AUC; the metric now is R2 in the title).
+            ax.axvspan(seq_len, N_DAYS - 1, color='0.5', alpha=0.06)
             ax.plot(np.arange(N_DAYS), sub[i, :, f], 'k-', lw=1.8,
                     label='ODE simulation (synthetic)')
             ax.plot(np.arange(seq_len, N_DAYS), all_pred[i, :, f], 'r--', lw=2,
                     label='pure NN (no ODE)')
-            ax.axvline(seq_len, color='gray', lw=0.6, ls=':')
+            ax.axvline(seq_len, color='gray', lw=0.8, ls=':')
             ax.set_title(f'reactor {i}', fontsize=9)
             if flat:
                 # anchor the y-axis at 0 so a near-constant metabolite reads as flat,
