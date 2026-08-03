@@ -16,34 +16,37 @@ ODE), trained on **synthetic** data, **window-level holdout** (a few windows per
 reactor, reactors NOT held out; in-distribution). Scored in absolute units on all
 8 variables against the ODE simulation. seq_len = 6.
 
-AUC = trapezoid integral of the forecast window (pred/true) -- the integrated-
-output metric (total titer / biomass), the number the group actually cares about.
+R2 = coefficient of determination (1 - SS_res/SS_tot, mean as baseline), pooled
+over all forecast points per feature. Unitless regression metric (per Kimberly).
+It shares rho's flat-signal caveat: for a near-constant metabolite SS_tot ~ 0, so
+R2 is not meaningful and is marked n/a.
 
-| feature | peak ratio | AUC | norm MAE | rho | signal range |
+| feature | R2 | peak ratio | norm MAE | rho | signal range |
 |---|---|---|---|---|---|
-| Cell Density | 0.99 | 0.98 | 0.040 | 0.61 | 0.31 |
-| Cell Size | 0.99 | 1.01 | 0.024 | 1.00 | 0.51 |
-| Titer | 0.99 | 1.03 | 0.076 | 0.98 | 0.72 |
-| Glucose | 1.00 | 0.98 | 0.044 | 0.83 | 0.23 |
-| Glutamine | 1.00 | 1.00 | 0.004 | -0.35 * | 0.00 |
-| Asparagine | 1.02 | 1.00 | 0.029 | 0.79 | 0.09 |
-| Serine | 1.01 | 1.00 | 0.005 | 0.43 * | 0.01 |
-| Glycine | 1.00 | 1.00 | 0.004 | 0.25 * | 0.00 |
+| Cell Density | 0.97 | 1.12 | 0.091 | 0.78 | 0.31 |
+| Cell Size | 0.97 | 1.02 | 0.033 | 1.00 | 0.51 |
+| Titer | 0.97 | 1.02 | 0.065 | 0.97 | 0.72 |
+| Glucose | 0.99 | 1.01 | 0.042 | 0.78 | 0.23 |
+| Glutamine | n/a | 1.00 | 0.004 | 0.20 | 0.00 |
+| Asparagine | n/a | 1.01 | 0.032 | 0.76 | 0.09 |
+| Serine | n/a | 1.00 | 0.007 | 0.22 | 0.01 |
+| Glycine | n/a | 1.00 | 0.004 | -0.13 | 0.00 |
 
-\* Low rho = flat metabolite (signal range < 0.1), predicted near-exactly;
-correlation is not meaningful when there is nothing to correlate. rho tracks
-signal range monotonically (Titer, range 0.72, gets rho 0.98).
+Flat metabolites (signal range < 0.1) are predicted near-exactly (MAE ~0.005) but
+R2/rho are undefined there (nothing to correlate). Metric meaningfulness tracks
+signal range: the four dynamic variables all score R2 0.97-0.99.
 
-**Takeaway:** peak ratios 0.99-1.02, AUC 0.98-1.03, tiny MAE everywhere. A
-physics-free NN reproduces all 8 variables in absolute units to within a few
-percent, including the INTEGRATED output: total titer within 3% (AUC 1.03) and
-total biomass within 2% (AUC 0.98). **The ODE is not what makes the model
-accurate.** (Single seed; the few-percent magnitude story is robust, exact digits
-move run to run -- e.g. cell-density AUC spans ~0.98-1.09 across seeds, titer stays
-~1.03-1.04. Report mean +/- std over seeds before quoting a hard number.)
+**Takeaway:** R2 0.97-0.99 on every dynamic variable, peak ratios 0.99-1.12, tiny
+MAE everywhere. A physics-free NN reproduces the dynamic variables to within a few
+percent and explains 97-99% of their variance. **The ODE is not what makes the
+model accurate.** Two honest notes: (1) R2 is pooled across reactors, so it
+includes cross-reactor level spread (getting each reactor's overall level right
+already explains much of the variance); per-reactor trajectory-shape R2 is a
+harder test we can add. (2) Single seed; digits move run to run (cell-density peak
+spans ~0.99-1.12 across seeds), so report mean +/- std before quoting a hard number.
 
-Figures: `nn_baseline_<Feature>.png` (per-feature 2x5 reactor grids; flat
-metabolites y-anchored at 0). Hero slides = Titer, Glucose, Cell Density.
+Figures: `nn_baseline_r2_<Feature>.png` (per-feature 2x5 reactor grids; forecast
+window shaded; R2 in the title). Hero slides = Titer, Glucose, Cell Density.
 
 **Scope caveat:** synthetic, in-distribution. This shows the NN can REPRODUCE the
 ODE, not that it transfers to real reactors.
