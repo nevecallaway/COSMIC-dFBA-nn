@@ -16,11 +16,26 @@ ODE), trained on **synthetic** data, **window-level holdout** (a few windows per
 reactor, reactors NOT held out; in-distribution). Scored in absolute units on all
 8 variables against the ODE simulation. seq_len = 6.
 
-R2 = coefficient of determination (1 - SS_res/SS_tot, mean as baseline), pooled
-over all forecast points per feature. Unitless regression metric (per Kimberly).
-It shares rho's flat-signal caveat: over a near-constant window SS_tot ~ 0, so R2
-is not meaningful and is marked n/a. Numbers below are AFTER the amino-acid
-data-gen fix (see note beneath the table).
+**Metric definitions** (each computed on the forecast window, the days the model
+predicts on its own):
+- **R2** (coefficient of determination, `1 - SS_res/SS_tot`, mean as baseline):
+  the fraction of the true variance the model explains. 1.0 = predictions land
+  exactly on the truth; 0 = no better than always guessing the mean; negative =
+  worse than the mean. Penalizes wrong scale AND offset, not just shape. Unitless
+  (the metric Kimberly asked for). Undefined for a flat signal (variance ~ 0), so
+  marked n/a there.
+- **rho** (Pearson correlation, -1..+1): does the prediction move up and down WITH
+  the truth? A shape/direction score that ignores scale and offset. rho = 1 means
+  perfect pattern match even if the magnitude were off; you can have high rho with
+  mediocre R2, but not the reverse. Also n/a on flat signals.
+- **norm MAE**: mean absolute error divided by the true peak, i.e. the average miss
+  as a fraction of the signal size.
+- **peak ratio**: predicted peak / true peak. >1 overshoots, <1 undershoots.
+- **fcast range**: `(max - min) / max` of the TRUE signal over the forecast window,
+  how much the signal actually moves. Below 0.1 there is too little variation for
+  R2/rho to mean anything (hence the n/a flag).
+
+Numbers below are AFTER the amino-acid data-gen fix (see note beneath the table).
 
 | feature | R2 | peak ratio | norm MAE | rho | fcast range |
 |---|---|---|---|---|---|
