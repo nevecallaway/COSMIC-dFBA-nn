@@ -897,12 +897,21 @@ if __name__ == '__main__':
                              'lowers the feed so strongly-consumed AAs keep depleting into '
                              'the forecast window (matching data_2), at the cost of possible '
                              'negativity, surfaced by [ODE NEG]. No clamp is applied.')
+    parser.add_argument('--glc-feed', type=float, default=25.0,
+                        help='Glucose perfusion feed (mmol/L, base before the DoE Glc knob '
+                             'halves/doubles it). Raise it to stop glucose depleting negative '
+                             'in high-consumption / low-glucose-DoE reactors; glucose stays '
+                             'dynamic because its uptake is large. Default 25.')
     args = parser.parse_args()
 
     if args.aa_feed_factor != 1.0:
         CIN_NOMINAL[AAS_INDICES] *= args.aa_feed_factor
         print(f'AA feed x{args.aa_feed_factor}: feed lowered to let consumed AAs keep '
               f'depleting past day 6. Watch the [ODE NEG] count for negativity (no clamp).')
+    if args.glc_feed != 25.0:
+        CIN_NOMINAL[IDX_GLC] = args.glc_feed
+        print(f'Glucose feed set to {args.glc_feed} mmol/L (was 25) to curb negative '
+              f'glucose in the highest-consumption reactors.')
 
     trajs, times, phases, doe_params, component_names = generate_all(
         n_extra=args.n_extra, sample_rates=args.sample_rates,
