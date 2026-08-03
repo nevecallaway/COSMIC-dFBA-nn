@@ -56,11 +56,15 @@ def main():
     ap.add_argument('--seq-len', type=int, default=SEQ_LEN,
                     help='input window length in days (rebuilds windows; try shorter)')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--tag', default='',
+                    help='suffix appended to saved figure names, e.g. --tag v2 -> '
+                         'nn_baseline_r2_Titer_v2.png (avoids overwriting prior runs)')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     device = pick_device()
     here = Path(__file__).parent
+    tag = f'_{args.tag}' if args.tag else ''
     feat = args.feature
     seq_len = args.seq_len
 
@@ -213,7 +217,7 @@ def main():
                      f'simulation  |  peak={p:.2f}  R2={r2str}  MAE={m:.3f}  rho={rho:.2f}{tag}',
                      y=1.02)
         fig.tight_layout()
-        out = here / f'nn_baseline_r2_{FEATURE_NAMES[f]}.png'
+        out = here / f'nn_baseline_r2_{FEATURE_NAMES[f]}{tag}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
         print(f'Saved {out}')
 
@@ -244,7 +248,7 @@ def main():
         fig.suptitle('Predicted vs true, forecast window, all reactors -- points on '
                      'the dashed diagonal are perfect', y=1.0, fontsize=13)
         fig.tight_layout()
-        out = here / 'nn_baseline_parity.png'
+        out = here / f'nn_baseline_parity{tag}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
         print(f'Saved {out}')
 
