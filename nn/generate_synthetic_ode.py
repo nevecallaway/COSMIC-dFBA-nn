@@ -155,8 +155,17 @@ if _scale_path.exists():
 else:
     AA_SCALES = np.full(len(AAS_INDICES), 210.0)
 
-C_NOMINAL[AAS_INDICES]   = DMEM_AA * AA_SCALES
-CIN_NOMINAL[AAS_INDICES] = DMEM_AA * AA_SCALES
+# Decoupled initial vs feed (fixes the artificially FLAT metabolites). Previously
+# the initial pool AND the feed were both enriched to the same inflated value, so
+# every AA was pinned at its feed level (glutamine 525 mmol/L) and never moved --
+# the real dynamics in data_2 were lost. Now the culture STARTS at realistic DMEM
+# levels and only the perfusion FEED is enriched (real proprietary media is rich).
+# A consumed AA then rises toward the feed early (few cells) and depletes as the
+# culture grows -- the rise-then-fall seen in data_2 -- and stays non-negative
+# because the feed physically supplies it (AA_SCALES sizes the feed just enough,
+# via compute_aa_scales.py). No runtime clamp anywhere.
+C_NOMINAL[AAS_INDICES]   = DMEM_AA                 # realistic starting pool
+CIN_NOMINAL[AAS_INDICES] = DMEM_AA * AA_SCALES     # enriched perfusion feed only
 CIN_NOMINAL[IDX_NH4]      = 1.1
 CIN_NOMINAL[IDX_GLC]      = 25.0
 
