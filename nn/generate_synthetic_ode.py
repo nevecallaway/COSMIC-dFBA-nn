@@ -499,8 +499,6 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
         doe_params:   np.ndarray (n_extra, 3)
         cin_params:   np.ndarray (n_extra, N_WINDOW_FEATURES)  physical feed per reactor
     """
-    from rate_envelope import build_envelope_from_rates, in_envelope
-
     rng = np.random.default_rng(seed)
     trajs, does, cins = [], [], []
 
@@ -508,6 +506,7 @@ def generate_extra(n_extra, rates_growth, rates_prod, reactor_ids, pm_dict, doe_
 
     use_sampling = sample_rates or rate_mix > 0
     if use_sampling:
+        from rate_envelope import build_envelope_from_rates, in_envelope
         g_matrix = np.array([rates_growth[r] for r in reactor_ids])
         p_matrix = np.array([rates_prod[r] for r in reactor_ids])
         g_mean, g_cov = g_matrix.mean(axis=0), np.cov(g_matrix, rowvar=False)
