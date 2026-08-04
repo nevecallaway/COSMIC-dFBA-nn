@@ -32,6 +32,9 @@ from evaluate import rollout
 
 FEATURE_NAMES = ['CellDensity', 'CellSize', 'Titer', 'Glucose',
                  'Glutamine', 'Asparagine', 'Serine', 'Glycine']
+# physical units for the y-axes (the "absolute units" the figures are plotted in)
+FEATURE_UNITS = ['1e9 cells/L', 'um^3 /1000', 'mg/L', 'mmol/L',
+                 'mmol/L', 'mmol/L', 'mmol/L', 'mmol/L']
 
 
 def norm_windows(w, scaler, wt):
@@ -208,6 +211,10 @@ def main():
                     label='pure NN (no ODE)')
             ax.axvline(seq_len, color='gray', lw=0.8, ls=':')
             ax.set_title(f'reactor {i}', fontsize=9)
+            if i % 5 == 0:                       # left column: label the physical unit
+                ax.set_ylabel(FEATURE_UNITS[f], fontsize=8)
+            if i >= 5:                           # bottom row: label the time axis
+                ax.set_xlabel('day', fontsize=8)
             if flat:
                 # anchor the y-axis at 0 so a near-constant metabolite reads as flat,
                 # instead of matplotlib auto-zooming trivial <1% wiggle to fill the panel
@@ -217,7 +224,7 @@ def main():
                 ax.legend(fontsize=8)
         tag = '  (flat signal, predicted near-exactly; R2/rho N/A)' if flat else ''
         r2str = 'n/a' if flat else f'{r2:.2f}'
-        fig.suptitle(f'{FEATURE_NAMES[f]} in ABSOLUTE units: pure NN (no ODE) vs ODE '
+        fig.suptitle(f'{FEATURE_NAMES[f]} ({FEATURE_UNITS[f]}): pure NN (no ODE) vs ODE '
                      f'simulation  |  peak={p:.2f}  R2={r2str}  MAE={m:.3f}  rho={rho:.2f}{tag}',
                      y=1.02)
         fig.tight_layout()
@@ -246,7 +253,7 @@ def main():
             ax.scatter(x, y, s=9, c='#6B2333', alpha=0.30, edgecolors='none', zorder=2)
             ax.set_xlim(lo, hi); ax.set_ylim(lo, hi); ax.set_aspect('equal', 'box')
             r2str = 'n/a' if rng < 0.1 else f'{r2:.2f}'
-            ax.set_title(f'{FEATURE_NAMES[f]}  (R2={r2str})', fontsize=11)
+            ax.set_title(f'{FEATURE_NAMES[f]}  ({FEATURE_UNITS[f]})  R2={r2str}', fontsize=10)
             ax.set_xlabel('true (ODE)', fontsize=8)
             ax.set_ylabel('predicted (NN)', fontsize=8)
         fig.suptitle('Predicted vs true, forecast window, all reactors -- points on '
