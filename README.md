@@ -56,33 +56,38 @@ simulator, not yet validated against wet-lab reactors.
 
 ## Structure
 
+The working directory is condensed to the synthetic-only pure-NN pipeline. Older
+explorations (fed-batch, real-reactor training/LORO, deprecated experiments) are
+archived under `nn/scripts_past/`.
+
 ```
 nn/
-  RESULTS.md            end-of-phase results + handoff notes (read this first)
+  RESULTS.md            results + handoff notes (read this first)
 
-  model.py              pure NN (NextDayPredictor)
-  model_primeur.py      hybrid neural-ODE decoder; closed_form_step / ode_step
-  model_stripped.py     low-capacity hybrid (1 conv layer)
-  model_fedbatch.py     fed-batch variant of the hybrid ODE step
+  model.py              pure NN (NextDayPredictor) -- the primary model
+  model_primeur.py      hybrid neural-ODE decoder; closed_form_step (imported by evaluate.py)
 
-  nn_baseline.py        pure-NN accuracy experiment (no ODE)
-  pinn_baseline.py      physics-informed surrogate (ODE as training penalty only)
-  speed_benchmark.py    NN vs mechanistic solver timing (CPU + GPU, torchdiffeq)
+  nn_baseline.py        train + evaluate the pure NN; makes the figures
+  evaluate.py           autoregressive rollout used by nn_baseline
+  pinn_baseline.py      physics-informed variant (ODE as a training penalty only)
+  speed_benchmark.py    NN inference vs solving the ODE (same-device, torchdiffeq)
 
-  generate_synthetic_ode.py     mechanistic ODE data generator (closed-form / RK45)
-  train_real.py / loro_real.py  real-reactor training + leakage-free LORO
-  real_data.py          denormalize data_2 onto the ODE scale
-  device_utils.py       CPU/GPU selection
+  generate_synthetic_ode.py   mechanistic ODE data generator (closed-form / RK45)
+  compute_aa_scales.py        per-AA feed sizing for the generator
+  device_utils.py             CPU/GPU selection
 
-  data/                 data_1..4 (DoE, trajectories, rates, FBA efficiencies)
+  run_nnbaseline.sbatch / run_speed_gpu.sbatch   SLURM jobs
+  data/                 data_1..4 (DoE, trajectories, rates, FBA efficiencies) + aa_scales.npy
+  scripts_past/         archived fed-batch, real-data, and deprecated scripts
 
-run_*.sbatch / run_*_slurm.sh    SLURM job scripts
 og_code/                original mechanistic (MATLAB) reference
 ```
 
 Data: `data_2.csv` is the measured trajectories (normalized per reactor);
 `data_1.csv` the DoE conditions; `data_3.csv` phase-specific rates. The
-25-component layout is documented in earlier git history.
+25-component layout is documented in earlier git history. Real data is not used
+for training or evaluation; the model is trained and scored on the synthetic ODE
+runs alone (see `RESULTS.md`).
 
 ## Running
 
