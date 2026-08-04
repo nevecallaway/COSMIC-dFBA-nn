@@ -56,6 +56,9 @@ def main():
     ap.add_argument('--seq-len', type=int, default=SEQ_LEN,
                     help='input window length in days (rebuilds windows; try shorter)')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--conv-layers', type=int, default=3,
+                    help='number of 1D conv layers (capacity vs speed ablation; the '
+                         'speed benchmark takes the same flag so the two line up)')
     ap.add_argument('--tag', default='',
                     help='suffix appended to saved figure names, e.g. --tag v2 -> '
                          'nn_baseline_r2_Titer_v2.png (avoids overwriting prior runs)')
@@ -112,7 +115,8 @@ def main():
     tr_ld = DataLoader(tr_ds, batch_size=args.batch, shuffle=True)
     vl_ld = DataLoader(vl_ds, batch_size=args.batch, shuffle=False)
 
-    model = NextDayPredictor(hidden=args.hidden, n_doe=n_doe).to(device)
+    model = NextDayPredictor(hidden=args.hidden, n_conv_layers=args.conv_layers,
+                             n_doe=n_doe).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     best_val, best_state = float('inf'), None
