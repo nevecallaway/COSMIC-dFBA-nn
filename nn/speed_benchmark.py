@@ -174,23 +174,27 @@ def main():
                     help='wall-clock budget PER METHOD; the pass repeats in a loop '
                          'until this elapses, then the time is amortized. Use ~45 '
                          'for a real measurement (spends the run doing inference)')
-    ap.add_argument('--hidden', type=int, default=16,
-                    help='body width, SAME for pure NN and hybrid so the comparison '
-                         'isolates the ODE cost, not the network size')
+    ap.add_argument('--hidden', type=int, default=64,
+                    help='body width. Default 64 matches the REAL accuracy model '
+                         '(nn_baseline), so the pure-NN row is the actual inference time.')
+    ap.add_argument('--conv-layers', type=int, default=3,
+                    help='conv layers. Default 3 matches the REAL accuracy model. Same '
+                         'body for pure NN and hybrid, so their difference is the ODE step.')
     ap.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'])
     args = ap.parse_args()
 
     device = pick_device(args.device)
     print(f'Benchmark: n={args.n} (device methods) / n_solver={args.n_solver} (CPU), '
           f'{N_DAYS}-day trajectories, device={device}, hidden={args.hidden}, '
-          f'budget={args.secs}s/method\n')
+          f'conv_layers={args.conv_layers}, budget={args.secs}s/method\n')
 
-    # Matched architecture: same hidden width and a single conv layer for all,
-    # so any timing difference is the ODE step, not the network.
-    H = args.hidden
-    pure   = NextDayPredictor(hidden=H, n_conv_layers=1, n_doe=3).to(device)
-    hyb_cf = FluxDecoder(hidden=H, n_conv_layers=1, n_doe=3, integrator='closed').to(device)
-    hyb_eu = FluxDecoder(hidden=H, n_conv_layers=1, n_doe=3,
+    # REAL accuracy-model architecture (hidden 64, 3 conv), so the pure-NN row is
+    # the actual inference time. Same body for pure NN and hybrid, so the difference
+    # between them still isolates the ODE step.
+    H, CL = args.hidden, args.conv_layers
+    pure   = NextDayPredictor(hidden=H, n_conv_layers=CL, n_doe=3).to(device)
+    hyb_cf = FluxDecoder(hidden=H, n_conv_layers=CL, n_doe=3, integrator='closed').to(device)
+    hyb_eu = FluxDecoder(hidden=H, n_conv_layers=CL, n_doe=3,
                          integrator='euler', n_substeps=50).to(device)
     for m in (hyb_cf, hyb_eu):
         class _S:
