@@ -38,18 +38,28 @@ predicts on its own):
 Numbers below are AFTER the amino-acid data-gen fix (see note beneath the table).
 
 Final config: zero negatives, no clamp anywhere (`--glc-feed 40`, AA feed at
-default 1.0).
+default 1.0). SMALL model (1 conv layer, hidden 32), chosen per Kimberly: R2 ~0.95
+is more than adequate for xAI, and a smaller model is cleaner to attribute. Full
+model (3 conv, hidden 64) scores ~0.01-0.02 higher R2 and ~2x lower MAE; see the
+ablation note below.
 
 | feature | R2 | peak ratio | norm MAE | rho | fcast range |
 |---|---|---|---|---|---|
-| Cell Density | 0.99 | 1.01 | 0.036 | 0.77 | 0.31 |
-| Cell Size | 0.98 | 0.97 | 0.024 | 1.00 | 0.51 |
-| Titer | 0.97 | 0.97 | 0.063 | 0.98 | 0.72 |
-| Glucose | 1.00 | 1.02 | 0.033 | 0.95 | 0.23 |
-| Glycine | 0.97 | 1.04 | 0.061 | 0.69 | 0.18 |
-| Glutamine | n/a | 1.01 | 0.023 | 0.79 | 0.06 |
-| Asparagine | n/a | 0.99 | 0.027 | 0.86 | 0.08 |
-| Serine | n/a | 0.99 | 0.026 | 0.51 | 0.09 |
+| Cell Density | 0.98 | 1.11 | 0.113 | 0.91 | 0.31 |
+| Cell Size | 0.98 | 1.02 | 0.030 | 1.00 | 0.51 |
+| Titer | 0.95 | 0.96 | 0.076 | 0.97 | 0.72 |
+| Glucose | 0.99 | 1.01 | 0.052 | 0.97 | 0.23 |
+| Glycine | 0.95 | 0.98 | 0.070 | 0.53 | 0.18 |
+| Glutamine | n/a | 1.00 | 0.041 | 0.62 | 0.06 |
+| Asparagine | n/a | 0.99 | 0.043 | 0.63 | 0.08 |
+| Serine | n/a | 1.00 | 0.028 | 0.49 | 0.09 |
+
+Time resolution: 1 day (predictions are daily snapshots; the NN steps forward one
+day at a time). Ablation (conv layers 1/2/3 at hidden 64): R2 nearly flat across
+depth, cell density 0.98/0.99/0.99, titer 0.95/0.96/0.97; depth mainly halves MAE
+and calibrates the peak. Inference: 1 layer 0.0005 ms, 2 layers 0.0009, 3 layers
+0.0013 (all ~700M x faster than COSMIC-dFBA's ~15 min/reactor, so depth is chosen
+for accuracy/interpretability, not speed).
 
 Five variables score real R2 0.97-1.00. The three amino acids read n/a only because
 their forecast-window range is just under 0.1, NOT because they are flat: rho is
