@@ -1,6 +1,6 @@
 # en Primeur
 
-A fast, physics-informed neural surrogate for CHO bioreactor dynamics.
+A fast neural surrogate of a mechanistic CHO bioreactor model.
 
 > **Status:** research prototype (end of internship phase). Trained on synthetic
 > data only, treat as a surrogate of the mechanistic simulator, not a
