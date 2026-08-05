@@ -56,38 +56,92 @@ simulator, not yet validated against wet-lab reactors.
 
 ## Structure
 
-The working directory is condensed to the synthetic-only pure-NN pipeline. Older
+The `nn/` directory is condensed to the synthetic-only pure-NN pipeline. Older
 explorations (fed-batch, real-reactor training/LORO, deprecated experiments) are
-archived under `nn/scripts_past/`.
+archived under `nn/scripts_past/`. The essential files, grouped by function:
+
+### Data generation — build the synthetic data the NN learns from
+
+- **`generate_synthetic_ode.py`** — the mechanistic simulator. Integrates the
+  per-day ODE (feed + washout + cell uptake/secretion) to produce daily
+  trajectories, and writes `synthetic_ode.npz`. This is the ground truth the NN is
+  trained to reproduce.
+- **`compute_aa_scales.py`** — sizes each amino acid's perfusion feed to the minimum
+  that keeps it non-negative (no clamp). Writes `data/aa_scales.npy`, which the
+  generator reads. Run once, before generating.
+
+### Models — the network definitions
+
+- **`model.py`** — the pure NN (`NextDayPredictor`): 1D CNN -> attention -> head,
+  predicts next-day concentrations directly. The primary/headline model.
+- **`model_primeur.py`** — the hybrid neural-ODE decoder (`FluxDecoder`) plus
+  `closed_form_step` / `ode_step` (the exact one-day ODE step). Supplies the ODE
+  machinery reused by the hybrid, the PINN penalty, and the speed benchmark.
+
+### Training & evaluation — the main experiment
+
+- **`nn_baseline.py`** — trains the pure NN on the synthetic data, forecasts each
+  held-out run autoregressively, scores R2 / rho / MAE, and saves the figures. The
+  main deliverable script.
+- **`evaluate.py`** — shared evaluation helpers, most importantly the autoregressive
+  `rollout` that `nn_baseline` uses to forecast a run from its 6-day seed.
+- **`pinn_baseline.py`** — the physics-informed variant: same prediction task, but
+  the ODE is added as a soft training penalty (solver-free at inference).
+
+### Benchmarking
+
+- **`speed_benchmark.py`** — times NN inference against solving the ODE (numerical,
+  closed-form, torchdiffeq) on the same device, plus the hybrid variants.
+
+### Utilities & jobs
+
+- **`device_utils.py`** — `pick_device()`: use GPU if available, else CPU. Imported
+  by everything that runs a model.
+- **`run_nnbaseline.sbatch`** — SLURM job for `nn_baseline.py` (regenerates data if missing).
+- **`run_speed_gpu.sbatch`** — SLURM job for `speed_benchmark.py` on a GPU.
+
+### Data & docs
+
+- **`data/`** — `data_1..4` (DoE, trajectories, rates, FBA efficiencies) + `aa_scales.npy`.
+- **`RESULTS.md`** — results + handoff notes (read this first).
+- **`scripts_past/`** — archived fed-batch, real-data, and deprecated scripts.
+- **`og_code/`** (repo root) — original mechanistic (MATLAB) reference.
+
+### How they fit together
+
+The pipeline runs top to bottom; arrows are "produces / feeds into":
 
 ```
-nn/
-  RESULTS.md            results + handoff notes (read this first)
+compute_aa_scales.py  ─►  data/aa_scales.npy
+                                 │
+generate_synthetic_ode.py  ◄─────┘   (reads the feed scales)
+        │
+        ▼
+   synthetic_ode.npz
+        │
+        ▼
+   nn_baseline.py  ─►  figures + R2/rho/MAE  (summarized in RESULTS.md)
+        ├─ uses model.py         (the network)
+        ├─ uses evaluate.py      (autoregressive rollout)
+        └─ uses device_utils.py  (GPU/CPU)
 
-  model.py              pure NN (NextDayPredictor) -- the primary model
-  model_primeur.py      hybrid neural-ODE decoder; closed_form_step (imported by evaluate.py)
-
-  nn_baseline.py        train + evaluate the pure NN; makes the figures
-  evaluate.py           autoregressive rollout used by nn_baseline
-  pinn_baseline.py      physics-informed variant (ODE as a training penalty only)
-  speed_benchmark.py    NN inference vs solving the ODE (same-device, torchdiffeq)
-
-  generate_synthetic_ode.py   mechanistic ODE data generator (closed-form / RK45)
-  compute_aa_scales.py        per-AA feed sizing for the generator
-  device_utils.py             CPU/GPU selection
-
-  run_nnbaseline.sbatch / run_speed_gpu.sbatch   SLURM jobs
-  data/                 data_1..4 (DoE, trajectories, rates, FBA efficiencies) + aa_scales.npy
-  scripts_past/         archived fed-batch, real-data, and deprecated scripts
-
-og_code/                original mechanistic (MATLAB) reference
+pinn_baseline.py  and  speed_benchmark.py
+        └─ use model.py, model_primeur.py, generate_synthetic_ode.py, device_utils.py
 ```
 
-Data: `data_2.csv` is the measured trajectories (normalized per reactor);
-`data_1.csv` the DoE conditions; `data_3.csv` phase-specific rates. The
-25-component layout is documented in earlier git history. Real data is not used
-for training or evaluation; the model is trained and scored on the synthetic ODE
-runs alone (see `RESULTS.md`).
+Import graph (who imports whom; the three at the bottom have no local imports):
+
+- `nn_baseline.py`   -> `model`, `evaluate`, `generate_synthetic_ode`, `device_utils`
+- `evaluate.py`      -> `model`, `model_primeur`, `device_utils`
+- `pinn_baseline.py` -> `model`, `model_primeur`, `generate_synthetic_ode`, `device_utils`
+- `speed_benchmark.py` -> `model`, `model_primeur`, `generate_synthetic_ode`, `device_utils`
+- `compute_aa_scales.py` -> `generate_synthetic_ode`
+- `model.py`, `model_primeur.py`, `device_utils.py` -> (leaf modules, no local imports)
+
+Data note: `data_2.csv` is the measured trajectories (normalized per reactor);
+`data_1.csv` the DoE conditions; `data_3.csv` phase-specific rates. Real data is
+**not** used for training or evaluation, the model is trained and scored on the
+synthetic ODE runs alone (see `RESULTS.md`).
 
 ## Running
 
