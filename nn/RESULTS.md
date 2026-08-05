@@ -140,41 +140,44 @@ wall-clock budget and amortize (per-reactor = total / (reps * N)). A single GPU
 pass is tens of microseconds, dominated by kernel-launch overhead, not compute, so
 timing one pass makes two fast methods report the SAME number (the timer floor).
 Looping thousands of reps pushes the overhead below the real compute, and it also
-runs the ODE on the SAME device as the NN. Timed with the REAL accuracy-model
-network (hidden 64, 3 conv layers), so the pure-NN row is the ACTUAL inference
-time, not a minimal stand-in. A100, n=20,000, 45s/method:
+runs the ODE on the SAME device as the NN. Timed with the ADOPTED small model
+(1 conv layer, hidden 32), so the pure-NN row is the actual inference time. A100,
+n=20,000, ~20s/method:
 
 | method | ms/reactor | vs solve_ivp (CPU) | vs torchdiffeq (GPU) |
 |---|---|---|---|
-| numerical ODE (solve_ivp, CPU) | 25.25 | 1x | - |
-| closed-form ODE (numpy, CPU) | 0.41 | 62x | - |
-| closed-form ODE (torch, cuda) | 0.0005 | 47,000x | 24x |
-| torchdiffeq odeint (cuda) | 0.013 | 2,000x | 1x (baseline) |
-| pure NN (cuda) | 0.0013 | 18,900x | 9.5x |
-| hybrid NN (closed-form, cuda) | 0.0014 | 18,000x | 9.0x |
-| hybrid NN (50-substep Euler, cuda) | 0.0050 | 5,000x | 2.5x |
+| numerical ODE (solve_ivp, CPU) | 26.15 | 1x | - |
+| closed-form ODE (numpy, CPU) | 0.45 | 58x | - |
+| closed-form ODE (torch, cuda) | 0.0005 | 50,000x | 24x |
+| torchdiffeq odeint (cuda) | 0.0125 | 2,100x | 1x (baseline) |
+| pure NN (cuda) | 0.0003 | 79,500x | 38x |
+| hybrid NN (closed-form ODE in forward, cuda) | 0.0006 | 43,000x | 20.5x |
+| hybrid NN (50-substep Euler in forward, cuda) | 0.0050 | 5,200x | 2.5x |
 
-Two baselines on purpose: "vs solve_ivp" is the incumbent (scipy, CPU-only, no GPU
-version exists); "vs torchdiffeq" is a general differentiable solver on the NN's
-device, which isolates the algorithm from the hardware.
+PINN inference = pure NN (0.0003 ms): the ODE is only a training penalty, gone at
+inference. Two baselines on purpose: "vs solve_ivp" is the incumbent (scipy,
+CPU-only, no GPU version exists); "vs torchdiffeq" is a general differentiable
+solver on the NN's device, isolating algorithm from hardware.
 
-**The honest findings (real network):**
-- The exact closed-form ODE on the GPU (0.0005 ms) is actually ~2.6x FASTER than the
-  real NN (0.0013 ms). So on THIS simplified ODE, solving it directly beats the
-  surrogate -- the NN does NOT win on speed here.
-- vs a FAIR GPU solver (torchdiffeq), the NN is ~9.5x faster (not the ~50x the tiny
-  stand-in showed -- the real network is heavier). vs scipy (CPU) it is ~18,900x,
-  but that is mostly CPU-vs-GPU hardware.
-- So the surrogate's speed case rests entirely on the reference having NO closed
-  form. For a model that must solve a flux-balance LP each step (the full
-  COSMIC-dFBA), the relevant penalty is torchdiffeq's ~2,000x and the surrogate wins;
-  for this linear per-day ODE it does not. This is why the presentation leads with
-  MEDIA DESIGN (what the model learns) and treats speed as conditional.
+**The honest findings (small model):**
+- The pure NN (0.0003 ms) slightly edges out the exact closed-form ODE (0.0005 ms) on
+  the GPU -- so on this simplified ODE the NN matches or marginally beats the direct
+  solve (both at the sub-microsecond floor). It is ~38x faster than a fair GPU solver
+  (torchdiffeq) and ~79,500x faster than scipy (mostly CPU-vs-GPU hardware).
+- ODE-in-forward cost: the PINN is FREE (= pure NN; no ODE at inference); the hybrid's
+  closed-form step roughly DOUBLES it (0.0006 ms, ~2x); the 50-substep Euler
+  integrator is ~17x. The step is a fixed cost, so it is a larger fraction of this
+  tiny network than of the big one.
+- The surrogate's real speed case is the reference having NO closed form: vs the
+  ACTUAL COSMIC-dFBA (~15 min/reactor, Sarat) the NN is ~hundreds of millions x
+  faster; on our simplified closed-form generator it is a wash. So the presentation
+  leads with MEDIA DESIGN (what the model learns) and treats speed as enabling, not
+  the contribution.
 
 Do NOT combine speed and accuracy in one table (different units/comparisons). The
-honest bridge: the NN matches the ODE's accuracy (few percent), but on this
-simplified model it does NOT beat the exact solver on speed; its value is for
-models that cannot be solved in closed form, and for what it learns (media design).
+honest bridge: the NN matches the ODE's accuracy (few percent) and, on our simplified
+generator, its speed too; the decisive speed win is only vs models with no closed
+form (the real COSMIC-dFBA), and the lasting value is what the model learns.
 
 ---
 
