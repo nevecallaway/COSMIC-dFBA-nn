@@ -23,3 +23,6 @@ __pycache__/
 
 # Colab / notebook outputs
 .virtual_documents/
+
+# PowerPoint lock / temp files
+~$*
