@@ -53,6 +53,28 @@ A physics-informed (PINN) variant — concentrations predicted directly with the
 ODE as a soft training penalty, solver-free at inference — was also explored and
 is archived under [`nn/scripts_past/pinn_baseline.py`](nn/scripts_past/pinn_baseline.py).
 
+### How a forecast is made
+
+The model is a one-day-ahead predictor applied **autoregressively**, and it is
+trained differently from how a whole run is forecast:
+
+- **Training is teacher-forced.** Every training window is real (synthetic-truth)
+  data and the target is the real next day (`nn_baseline.py`). The model only ever
+  predicts one step ahead from ground truth.
+- **Inference is a free-running rollout.** The model is seeded with only the first
+  `SEQ_LEN` days (6 by default) of a run, then forecasts day by day, feeding each
+  prediction back in as the input for the next step (`evaluate.rollout`).
+
+The key point: **past the seed, the model gets no real data at inference.** Days
+6-12 are predicted entirely from the model's own previous outputs plus the fixed
+operating conditions, with no ground-truth correction along the way. The reported
+R2 is measured on this autoregressive rollout (the hard test), not on one-step
+prediction from ground truth.
+
+A free-running *training* variant, which also rolls out on its own predictions
+during training (to test whether that narrows the train/inference gap), lives in
+[`nn/nn_freerun.py`](nn/nn_freerun.py).
+
 ## Key results (see `nn/RESULTS.md` for detail)
 
 - **Accuracy:** a physics-free NN reproduces all 8 tracked variables in absolute
@@ -94,7 +116,12 @@ archived under `nn/scripts_past/`. The essential files, grouped by function:
   held-out run autoregressively, scores R2 / rho / MAE, and saves the figures. The
   main deliverable script.
 - **`evaluate.py`** — shared evaluation helpers, most importantly the autoregressive
-  `rollout` that `nn_baseline` uses to forecast a run from its 6-day seed.
+  `rollout` that both training scripts use at inference to forecast a run from its
+  6-day seed (no real data past the seed).
+- **`nn_freerun.py`** — the free-running training variant: same architecture and
+  inference as `nn_baseline`, but trained by rolling out on its own predictions
+  (not teacher-forced), to test exposure bias. Prints the same R2 table for a
+  head-to-head comparison.
 
 ### Benchmarking
 
