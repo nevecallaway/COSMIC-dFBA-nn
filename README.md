@@ -1,4 +1,4 @@
-# en Primeur
+# EN PRIMEUR
 
 A fast neural surrogate of a mechanistic CHO bioreactor model.
 
