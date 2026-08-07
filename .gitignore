@@ -26,3 +26,6 @@ __pycache__/
 
 # PowerPoint lock / temp files
 ~$*
+
+# macOS
+.DS_Store
