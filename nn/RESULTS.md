@@ -161,7 +161,7 @@ solver on the NN's device, isolating algorithm from hardware.
 
 **The honest findings (small model):**
 - The pure NN (0.0003 ms) slightly edges out the exact closed-form ODE (0.0005 ms) on
-  the GPU -- so on this simplified ODE the NN matches or marginally beats the direct
+  the GPU, so on this simplified ODE the NN matches or marginally beats the direct
   solve (both at the sub-microsecond floor). It is ~38x faster than a fair GPU solver
   (torchdiffeq) and ~79,500x faster than scipy (mostly CPU-vs-GPU hardware).
 - ODE-in-forward cost: the PINN is FREE (= pure NN; no ODE at inference); the hybrid's
